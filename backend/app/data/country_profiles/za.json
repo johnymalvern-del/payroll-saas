@@ -1,0 +1,34 @@
+{
+  "code": "ZA",
+  "name": "South Africa",
+  "version": 1,
+  "effective_from": "2024-01-01",
+  "data": {
+    "currency": "ZAR",
+    "default_timezone": "Africa/Johannesburg",
+    "standard_hours": {
+      "weekly": null,
+      "daily": null,
+      "monthly": null,
+      "_verify_flag": true,
+      "_source": null
+    },
+    "leave_types": [
+      { "code": "annual", "name": "Annual leave", "is_paid": true, "entitlement_days_per_year": null, "_verify_flag": true },
+      { "code": "sick", "name": "Sick leave", "is_paid": true, "entitlement_days_per_cycle": null, "document_required_after_days": null, "_verify_flag": true },
+      { "code": "family_responsibility", "name": "Family responsibility leave", "is_paid": true, "entitlement_days_per_year": null, "_verify_flag": true },
+      { "code": "parental", "name": "Parental leave", "is_paid": false, "entitlement_days": null, "_verify_flag": true },
+      { "code": "unpaid", "name": "Unpaid leave", "is_paid": false, "entitlement_days": null, "_verify_flag": true }
+    ],
+    "holiday_pay_defaults": {
+      "hourly": "paid_if_eligible",
+      "salaried": "paid_always",
+      "casual": "unpaid",
+      "contract": "paid_if_eligible",
+      "_verify_flag": true
+    },
+    "public_holidays": [],
+    "_verify_flag": true,
+    "_source": null
+  }
+}

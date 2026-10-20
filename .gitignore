@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Env
+.env
+.env.local
+
+# Backups (POPIA-sensitive)
+backups/*
+!backups/.gitkeep
+*.dump
+*.sql.bak
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS
+.DS_Store
+*.swp
+
+# IDE
+.idea/
+.vscode/

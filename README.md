@@ -1,0 +1,88 @@
+# Payroll SaaS
+
+Multi-tenant payroll and attendance system. **Phase 1, Part 1A** delivers the foundation: repository scaffold, Docker Compose, validated settings, structured logging with request ids, control + tenant models with Alembic environments, and PostgreSQL-enforced append-only `audit_log`.
+
+## Quickstart (Linux / macOS / WSL)
+
+```bash
+cp .env.example .env
+make up
+make migrate
+make seed
+make test
+
+
+Save-File 'backend\pyproject.toml' @'
+[project]
+name = "payroll-saas-backend"
+version = "0.1.0"
+description = "Multi-tenant payroll and attendance SaaS - backend"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.111,<0.116",
+    "uvicorn[standard]>=0.30,<0.35",
+    "sqlalchemy>=2.0.30,<2.1",
+    "psycopg[binary]>=3.2,<3.3",
+    "alembic>=1.13,<1.15",
+    "pydantic>=2.7,<2.10",
+    "pydantic-settings>=2.3,<2.6",
+    "redis>=5.0,<6",
+    "rq>=1.16,<2",
+    "pyjwt[crypto]>=2.8,<3",
+    "argon2-cffi>=23.1,<24",
+    "pyotp>=2.9,<3",
+    "boto3>=1.34,<2",
+    "clamd>=1.0,<2",
+    "python-multipart>=0.0.9,<0.1",
+    "email-validator>=2.1,<3",
+    "openpyxl>=3.1,<4",
+    "weasyprint>=62,<64",
+    "httpx>=0.27,<0.29",
+    "structlog>=24.1,<25",
+    "cryptography>=42,<44",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2,<9",
+    "pytest-cov>=5.0,<6",
+    "hypothesis>=6.100,<7",
+    "ruff>=0.5,<0.7",
+    "mypy>=1.10,<1.12",
+    "pre-commit>=3.7,<4",
+    "types-PyJWT>=1.7",
+    "types-redis>=4.6",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app"]
+
+[tool.setuptools.package-data]
+"app.data" = ["**/*.json"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["E501", "B008"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+plugins = []
+
+[[tool.mypy.overrides]]
+module = ["weasyprint.*", "clamd.*", "boto3.*", "botocore.*", "rq.*", "pyotp.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
