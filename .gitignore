@@ -33,3 +33,4 @@ frontend/.vite/
 # IDE
 .idea/
 .vscode/
+bootstrap.ps1

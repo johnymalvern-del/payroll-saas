@@ -6,6 +6,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from app.core.config import get_settings
 from app.db.base import Base
 from app.db.control import models  # noqa: F401  (registers tables)
 
@@ -15,17 +16,18 @@ if config.config_file_name is not None:
 
 
 def get_url() -> str:
+    """Resolve the control DB URL.
+
+    Order of precedence:
+      1. An explicit sqlalchemy.url set on the Alembic Config (used by tests
+         that call command.upgrade with a preset URL).
+      2. The application settings (which read .env via pydantic-settings).
+    """
     url = config.get_main_option("sqlalchemy.url")
     if url and url != "driver://":
         return url
-    url = os.environ.get("DATABASE_URL_CONTROL_ADMIN") or os.environ.get(
-        "DATABASE_URL_CONTROL"
-    )
-    if not url:
-        raise RuntimeError(
-            "DATABASE_URL_CONTROL_ADMIN or DATABASE_URL_CONTROL must be set"
-        )
-    return url
+    settings = get_settings()
+    return settings.database_url_control_admin or settings.database_url_control
 
 
 target_metadata = Base.metadata

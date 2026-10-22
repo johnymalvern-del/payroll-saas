@@ -12,10 +12,12 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./infrastructure/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U payroll_admin"]
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U payroll_admin -d postgres"]
+      interval: 3s
       timeout: 5s
-      retries: 20
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -24,9 +26,11 @@ services:
       - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 3s
       timeout: 5s
-      retries: 20
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
 
   api:
     build:
@@ -36,6 +40,9 @@ services:
     env_file: .env
     environment:
       PYTHONPATH: /app
+      # Force short psycopg connect timeouts during startup failure detection;
+      # the SQLAlchemy URL still gets 130s from the driver default. Nothing
+      # here overrides runtime behaviour for long queries.
     volumes:
       - ./backend/app:/app/app
       - ./backend/alembic:/app/alembic
@@ -49,7 +56,19 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    # Wait for DNS to settle, then verify postgres is reachable BEFORE
+    # starting uvicorn. If postgres isn't reachable after 30 attempts
+    # (0.5s apart = 15s), exit and let restart: on-failure retry.
+    command: >
+      sh -c "
+      for i in $$(seq 1 30); do
+        python -c \"import socket, sys; s = socket.socket(); s.settimeout(1); s.connect(('postgres', 5432)); s.close()\" 2>/dev/null && break;
+        echo \"waiting for postgres dns/port ... attempt $$i\";
+        sleep 0.5;
+      done;
+      exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+    restart: on-failure:5
 
 volumes:
   postgres_data:

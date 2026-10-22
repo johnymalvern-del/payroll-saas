@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import os
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from app.core.config import get_settings
 from app.db.base import Base
 from app.db.tenant import models  # noqa: F401  (registers tables)
 
@@ -15,17 +15,18 @@ if config.config_file_name is not None:
 
 
 def get_url() -> str:
+    """Resolve the tenant DB URL.
+
+    Order of precedence:
+      1. An explicit sqlalchemy.url set on the Alembic Config (tests, and
+         `_run_tenant_migrations` in provisioning.py both use this).
+      2. The application settings (which read .env via pydantic-settings).
+    """
     url = config.get_main_option("sqlalchemy.url")
     if url and url != "driver://":
         return url
-    url = os.environ.get("DATABASE_URL_TENANT_ADMIN") or os.environ.get(
-        "DATABASE_URL_TENANT"
-    )
-    if not url:
-        raise RuntimeError(
-            "DATABASE_URL_TENANT_ADMIN or DATABASE_URL_TENANT must be set"
-        )
-    return url
+    settings = get_settings()
+    return settings.database_url_tenant_admin_template
 
 
 target_metadata = Base.metadata
