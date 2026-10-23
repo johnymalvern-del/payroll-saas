@@ -131,3 +131,44 @@ def ensure_no_tenant(request: Request) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This endpoint must not be called for a specific tenant",
         )
+# ---------------------------------------------------------------------------
+# Storage (file bytes: payslips, attachments, exports)
+# ---------------------------------------------------------------------------
+
+from app.storage.base import Storage
+from app.storage.factory import get_storage
+
+
+def _storage() -> Storage:
+    return get_storage()
+
+
+StorageDep = Annotated[Storage, Depends(_storage)]
+
+# ---------------------------------------------------------------------------
+# Job runner (payroll runs, imports, reports, scheduled jobs)
+# ---------------------------------------------------------------------------
+
+from app.jobs.base import JobRunner
+from app.jobs.factory import get_job_runner
+
+
+def _job_runner() -> JobRunner:
+    return get_job_runner()
+
+
+JobRunnerDep = Annotated[JobRunner, Depends(_job_runner)]
+
+# ---------------------------------------------------------------------------
+# Virus scanner (all uploaded files: sick notes, attachments, exports)
+# ---------------------------------------------------------------------------
+
+from app.scanner.base import VirusScanner
+from app.scanner.factory import get_scanner
+
+
+def _scanner() -> VirusScanner:
+    return get_scanner()
+
+
+ScannerDep = Annotated[VirusScanner, Depends(_scanner)]

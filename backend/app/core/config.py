@@ -75,6 +75,33 @@ class Settings(BaseSettings):
             ) from exc
         return self
 
+    @model_validator(mode="after")
+    def _validate_production_defaults(self) -> "Settings":
+        """Production must not use development defaults for storage, queue, or scanner.
+
+        The storage, job-runner, and scanner factories refuse at call time. This
+        validator refuses at startup, so a misconfigured production deployment
+        cannot even serve a health request.
+        """
+        if self.environment != "production":
+            return self
+        missing: list[str] = []
+        if not self.s3_endpoint:
+            missing.append("S3_ENDPOINT")
+        if not self.s3_bucket:
+            missing.append("S3_BUCKET")
+        if not self.redis_url:
+            missing.append("REDIS_URL")
+        if not self.clamav_host:
+            missing.append("CLAMAV_HOST")
+        if missing:
+            raise ValueError(
+                "Production requires "
+                + ", ".join(missing)
+                + " (development defaults are not permitted in production)"
+            )
+        return self
+
 
 @lru_cache
 def get_settings() -> Settings:
