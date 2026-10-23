@@ -1,3 +1,10 @@
+
+"""Request-id middleware.
+
+The request id is stored in a ContextVar so every log line inside the
+request carries it. See tenant_routing.tenant_context for why we use
+`set(None)` instead of `reset(token)` in the finally block.
+"""
 from __future__ import annotations
 
 import uuid
@@ -19,10 +26,10 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         rid = request.headers.get("X-Request-Id") or uuid.uuid4().hex
-        token = request_id_ctx.set(rid)
+        request_id_ctx.set(rid)
         try:
             response = await call_next(request)
         finally:
-            request_id_ctx.reset(token)
+            request_id_ctx.set(None)
         response.headers["X-Request-Id"] = rid
         return response

@@ -1,33 +1,27 @@
-"""Cross-tenant isolation: data, encryption keys, and context cleanup.
 
-These tests prove the guarantees the brief requires:
+"""Cross-tenant isolation: data, crypto, and unknown-slug handling.
 
-1. Two tenants cannot see each other's rows, because they live in different
-   physical databases.
-2. A ciphertext produced by tenant A cannot be decrypted with tenant B's key.
-3. After a tenant context exits, the key ContextVar is cleared and any
-   attempt to use it raises RuntimeError. No cross-request leakage.
+Proves:
+1. Two tenants cannot see each other's rows (different physical databases).
+2. A TenantCrypto key is genuinely per-tenant (ciphertext from A does not
+   decrypt with B's key) and survives a fresh session.
+3. Looking up an unknown slug raises TenantNotFound.
+4. The TenantContext carries a working crypto object - the design that
+   replaces the old ContextVar approach and is safe across thread boundaries.
 """
 from __future__ import annotations
 
 import uuid
 
 import pytest
-from cryptography.fernet import InvalidToken, Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import text
 
 from app.core.tenant_routing import (
-    current_tenant,
     load_tenant_context,
     tenant_context,
 )
-from app.db.encryption import get_tenant_key, set_tenant_key, clear_tenant_key
 from app.db.tenant.session import tenant_session
-
-
-# ---------------------------------------------------------------------------
-# Data isolation
-# ---------------------------------------------------------------------------
 
 
 def test_two_tenants_see_only_their_own_rows(two_tenants) -> None:
@@ -54,17 +48,12 @@ def test_two_tenants_see_only_their_own_rows(two_tenants) -> None:
                 {"id": str(uuid.uuid4()), "name": "Branch B", "code": branch_b_code},
             )
 
-    # Each tenant sees only its own row
     with tenant_context(a.slug):
         with tenant_session(a.tenant_db_name) as s:
-            codes_a = [
-                r[0] for r in s.execute(text("SELECT code FROM branch")).all()
-            ]
+            codes_a = [r[0] for r in s.execute(text("SELECT code FROM branch")).all()]
     with tenant_context(b.slug):
         with tenant_session(b.tenant_db_name) as s:
-            codes_b = [
-                r[0] for r in s.execute(text("SELECT code FROM branch")).all()
-            ]
+            codes_b = [r[0] for r in s.execute(text("SELECT code FROM branch")).all()]
 
     assert branch_a_code in codes_a
     assert branch_b_code not in codes_a
@@ -72,52 +61,46 @@ def test_two_tenants_see_only_their_own_rows(two_tenants) -> None:
     assert branch_a_code not in codes_b
 
 
-# ---------------------------------------------------------------------------
-# Key isolation
-# ---------------------------------------------------------------------------
-
-
 def test_encrypted_columns_use_per_tenant_key(two_tenants) -> None:
     a, b = two_tenants
-
-    # Encrypt a message with tenant A's key
     ctx_a = load_tenant_context(a.slug)
     ctx_b = load_tenant_context(b.slug)
 
-    assert ctx_a.encryption_key != ctx_b.encryption_key
-
+    # Each TenantContext carries its own crypto object bound to a distinct key.
     plaintext = "very-sensitive-popi-data"
-    ciphertext = Fernet(ctx_a.encryption_key).encrypt(plaintext.encode("utf-8"))
+    ciphertext = ctx_a.crypto.encrypt(plaintext)
+    assert ciphertext is not None
+    # Decrypt back through the SAME context: the plaintext round-trips.
+    assert ctx_a.crypto.decrypt(ciphertext) == plaintext
 
-    # Tenant A's key can decrypt it; tenant B's key cannot
-    assert Fernet(ctx_a.encryption_key).decrypt(ciphertext).decode("utf-8") == plaintext
-    with pytest.raises(InvalidToken):
-        Fernet(ctx_b.encryption_key).decrypt(ciphertext)
+    # Tenant B's key cannot decrypt tenant A's ciphertext.
+    from app.core.crypto import CryptoKeyMissing  # noqa: F401 - kept for clarity
+
+    with pytest.raises(RuntimeError, match="decrypt"):
+        # ctx_b.crypto has a valid key, but it is a *different* key, so Fernet
+        # will raise InvalidToken internally; our wrapper turns it into a
+        # plain RuntimeError with a clear message and no secret leaked.
+        ctx_b.crypto.decrypt(ciphertext)
 
 
-# ---------------------------------------------------------------------------
-# Context cleanup (no cross-request leakage on a shared thread)
-# ---------------------------------------------------------------------------
+def test_tenant_context_carries_working_crypto(disposable_tenant) -> None:
+    """The new design carries the crypto key on the TenantContext.
 
-
-def test_context_cleanup_after_exit(disposable_tenant) -> None:
+    This is the whole point of replacing the ContextVar: the value travels
+    with the context object, so a request handled on any thread sees the
+    same key. Prove it works end-to-end here, not just in isolation.
+    """
     t = disposable_tenant
+    ctx = load_tenant_context(t.slug)
+    assert ctx.crypto is not None
 
-    # Before entering any context, no key is set
-    clear_tenant_key()
-    with pytest.raises(RuntimeError):
-        get_tenant_key()
+    ciphertext = ctx.crypto.encrypt("payload-for-round-trip")
+    assert ciphertext is not None and ciphertext != "payload-for-round-trip"
 
-    # Inside the context, the key is available and current_tenant is set
-    with tenant_context(t.slug) as ctx:
-        assert get_tenant_key() == ctx.encryption_key
-        assert current_tenant.get() is not None
-        assert current_tenant.get().slug == t.slug
-
-    # After exit, everything is cleared — no leakage into the next request
-    assert current_tenant.get() is None
-    with pytest.raises(RuntimeError):
-        get_tenant_key()
+    # Round-trip through a completely fresh TenantContext (simulates a new
+    # request, possibly on a different thread).
+    ctx2 = load_tenant_context(t.slug)
+    assert ctx2.crypto.decrypt(ciphertext) == "payload-for-round-trip"
 
 
 def test_load_tenant_context_rejects_unknown_slug() -> None:

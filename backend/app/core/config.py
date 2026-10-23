@@ -8,8 +8,6 @@ from cryptography.fernet import Fernet
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Locate the repository-root .env regardless of the current working directory.
-# backend/app/core/config.py -> parents[3] is the repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _ENV_FILE = _REPO_ROOT / ".env"
 
@@ -52,13 +50,22 @@ class Settings(BaseSettings):
     access_token_ttl_minutes: int = 15
     refresh_token_ttl_days: int = 30
 
+    # New for 1C.2 — auth
+    login_max_failures: int = 5
+    login_lockout_minutes: int = 15
+    login_rate_limit_per_minute: int = 20
+    refresh_reuse_leeway_seconds: int = 10
+    refresh_token_retention_days: int = 30
+
+    # New for 1C.2 — rate limiter backend selection
+    workers_count: int = 1
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @property
     def tenant_header_fallback_active(self) -> bool:
-        """Header fallback is only ever active in development or test."""
         return self.allow_tenant_header_fallback and self.environment in ("development", "test")
 
     @model_validator(mode="after")
@@ -77,12 +84,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_production_defaults(self) -> "Settings":
-        """Production must not use development defaults for storage, queue, or scanner.
-
-        The storage, job-runner, and scanner factories refuse at call time. This
-        validator refuses at startup, so a misconfigured production deployment
-        cannot even serve a health request.
-        """
         if self.environment != "production":
             return self
         missing: list[str] = []
@@ -100,6 +101,19 @@ class Settings(BaseSettings):
                 + ", ".join(missing)
                 + " (development defaults are not permitted in production)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_worker_safety(self) -> "Settings":
+        """In production with more than one worker, only shared rate-limiter
+        backends are safe. The factory enforces this at construction; the
+        validator here documents and enforces the same rule at startup."""
+        if self.environment == "production" and self.workers_count > 1:
+            if not self.redis_url:
+                raise ValueError(
+                    "Production with workers_count > 1 requires REDIS_URL "
+                    "(in-memory rate limiter cannot be shared across workers)"
+                )
         return self
 
 

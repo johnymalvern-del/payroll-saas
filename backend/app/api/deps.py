@@ -1,12 +1,17 @@
+
 """FastAPI dependency helpers.
 
-- `ControlDbDep`  : a control-database session (platform admin, registration)
-- `TenantDep`     : a resolved TenantContext (raises if the request has no tenant)
-- `TenantDbDep`   : a tenant-database session, scoped to the resolved tenant
-- `CurrentUser`   : populated in Phase 1C (auth); left as a type alias here.
+- `ControlDbDep`   : a control-database session (platform admin, registration)
+- `TenantDep`      : a resolved TenantContext (raises if the request has no tenant)
+- `TenantDbDep`    : a tenant-database session, scoped to the resolved tenant
+- `StorageDep`     : file storage backend (local in dev, S3 in prod)
+- `JobRunnerDep`   : job-runner backend (in-process in dev, RQ in prod)
+- `ScannerDep`     : virus-scanner backend (no-op in dev, ClamAV in prod)
 
-Every endpoint that touches tenant data must depend on `TenantDbDep` (which
-implies `TenantDep`). Endpoints that touch the control DB use `ControlDbDep`.
+The tenant context travels as a value (TenantContext), not a ContextVar.
+This is required because FastAPI runs sync dependencies and sync endpoints
+on different anyio worker threads, and context variables do not cross that
+boundary.
 """
 from __future__ import annotations
 
@@ -35,22 +40,12 @@ from app.db.tenant.session import tenant_session
 log = get_logger("app.api.deps")
 
 
-# ---------------------------------------------------------------------------
-# Control DB session
-# ---------------------------------------------------------------------------
-
-
 def _control_db() -> Iterator[Session]:
     with control_session() as session:
         yield session
 
 
 ControlDbDep = Annotated[Session, Depends(_control_db)]
-
-
-# ---------------------------------------------------------------------------
-# Tenant context
-# ---------------------------------------------------------------------------
 
 
 def _translate_tenant_error(exc: TenantError) -> AppError:
@@ -101,27 +96,12 @@ def _tenant(request: Request) -> Iterator[TenantContext]:
 TenantDep = Annotated[TenantContext, Depends(_tenant)]
 
 
-# ---------------------------------------------------------------------------
-# Tenant DB session (implies tenant context)
-# ---------------------------------------------------------------------------
-
-
 def _tenant_db(ctx: TenantDep) -> Iterator[Session]:
     with tenant_session(ctx.tenant_db_name) as session:
         yield session
 
 
 TenantDbDep = Annotated[Session, Depends(_tenant_db)]
-
-
-# ---------------------------------------------------------------------------
-# Placeholders for Phase 1C
-# ---------------------------------------------------------------------------
-
-
-# `CurrentUser` will be replaced with an Annotated dependency in Phase 1C:
-#   CurrentUser = Annotated[User, Depends(get_current_user)]
-# For now, tests that need auth simply bypass it.
 
 
 def ensure_no_tenant(request: Request) -> None:
@@ -131,6 +111,8 @@ def ensure_no_tenant(request: Request) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This endpoint must not be called for a specific tenant",
         )
+
+
 # ---------------------------------------------------------------------------
 # Storage (file bytes: payslips, attachments, exports)
 # ---------------------------------------------------------------------------
@@ -145,6 +127,7 @@ def _storage() -> Storage:
 
 StorageDep = Annotated[Storage, Depends(_storage)]
 
+
 # ---------------------------------------------------------------------------
 # Job runner (payroll runs, imports, reports, scheduled jobs)
 # ---------------------------------------------------------------------------
@@ -158,6 +141,7 @@ def _job_runner() -> JobRunner:
 
 
 JobRunnerDep = Annotated[JobRunner, Depends(_job_runner)]
+
 
 # ---------------------------------------------------------------------------
 # Virus scanner (all uploaded files: sick notes, attachments, exports)

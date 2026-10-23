@@ -1,6 +1,16 @@
+
+"""Tenant ORM models: employees, users, scopes, biometric consent.
+
+Columns that hold encrypted content (national_id_encrypted,
+bank_account_number_encrypted, mfa_secret_encrypted) are plain Text at the
+database level. The application encrypts before writing and decrypts after
+reading, using TenantCrypto. This is deliberate: a ContextVar-held key is
+not visible across FastAPI thread boundaries, so the key must be passed as
+a value, not carried implicitly.
+"""
 from __future__ import annotations
 
-import uuid
+import uuid  # noqa: F401 - required because Mapped[uuid.UUID] annotations resolve at runtime
 from datetime import date, datetime
 
 from sqlalchemy import (
@@ -18,7 +28,6 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin, uuid_pk
-from app.db.encryption import EncryptedString
 
 
 class Employee(Base, TimestampMixin):
@@ -29,7 +38,7 @@ class Employee(Base, TimestampMixin):
     employee_code: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     first_name: Mapped[str] = mapped_column(String(120), nullable=False)
     last_name: Mapped[str] = mapped_column(String(120), nullable=False)
-    national_id_encrypted: Mapped[str | None] = mapped_column(EncryptedString, nullable=True)
+    national_id_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     mobile: Mapped[str | None] = mapped_column(String(40), nullable=True)
     date_of_birth: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -64,9 +73,7 @@ class Employee(Base, TimestampMixin):
     work_pattern_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     default_shift_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     bank_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    bank_account_number_encrypted: Mapped[str | None] = mapped_column(
-        EncryptedString, nullable=True
-    )
+    bank_account_number_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     bank_branch_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     account_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     tax_number: Mapped[str | None] = mapped_column(String(40), nullable=True)
@@ -110,10 +117,13 @@ class User(Base, TimestampMixin):
     role: Mapped[str] = mapped_column(String(30), nullable=False, default="employee")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    mfa_secret_encrypted: Mapped[str | None] = mapped_column(EncryptedString, nullable=True)
+    mfa_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     failed_attempts: Mapped[int] = mapped_column(nullable=False, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    password_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class UserScope(Base, TimestampMixin):
@@ -161,7 +171,7 @@ class BiometricEnrolment(Base, TimestampMixin):
         index=True,
     )
     method: Mapped[str] = mapped_column(String(20), nullable=False)
-    template_encrypted: Mapped[str] = mapped_column(EncryptedString, nullable=False)
+    template_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     vendor: Mapped[str] = mapped_column(String(60), nullable=False)
     template_version: Mapped[str] = mapped_column(String(40), nullable=False)
     consent_id: Mapped[uuid.UUID] = mapped_column(

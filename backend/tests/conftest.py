@@ -1,4 +1,4 @@
-﻿"""Session-scoped test infrastructure for the payroll backend.
+"""Session-scoped test infrastructure for the payroll backend.
 
 Creates a fresh `payroll_control_test` database at session start, runs the
 control migrations against it programmatically, points the application at
@@ -189,3 +189,20 @@ def inserted_audit_row(tenant_engine_app: Engine) -> str:
             {"id": row_id},
         )
     return row_id
+
+
+# ---------------------------------------------------------------------------
+# Shared FastAPI TestClient for endpoint tests.
+# Provided here rather than in a per-module fixture so every test module that
+# needs an HTTP client can just declare `api_client` as a parameter.
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest_api_client
+from fastapi.testclient import TestClient as _TestClient
+from app.main import app as _app
+
+
+@_pytest_api_client.fixture()
+def api_client():
+    with _TestClient(_app) as client:
+        yield client
