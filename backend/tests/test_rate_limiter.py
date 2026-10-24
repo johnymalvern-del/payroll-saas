@@ -1,11 +1,5 @@
 
-"""Rate-limiter tests.
-
-Three tests:
-  1. In-memory limiter allows up to `limit` hits in a window, then denies.
-  2. In-memory limiter allows again after the window passes.
-  3. Production with workers_count > 1 and no REDIS_URL refuses to build.
-"""
+"""Rate-limiter tests."""
 from __future__ import annotations
 
 import time
@@ -43,6 +37,7 @@ def test_production_multiworker_requires_redis() -> None:
         database_url_control_admin="postgresql+psycopg://u:p@localhost:5432/ctl",
         database_url_tenant_template="postgresql+psycopg://u:p@localhost:5432/{tenant_db}",
         database_url_tenant_admin_template="postgresql+psycopg://u:p@localhost:5432/{tenant_db}",
+        database_url_superuser="postgresql+psycopg://u:p@localhost:5432/postgres",
         redis_url="",
         s3_endpoint="http://minio:9000",
         s3_bucket="payroll-files",

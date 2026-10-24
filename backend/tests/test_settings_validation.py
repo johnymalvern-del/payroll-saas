@@ -26,6 +26,8 @@ def _base_args(**overrides: object) -> dict[str, object]:
         "database_url_control_admin": "postgresql+psycopg://u:p@localhost:5432/ctl",
         "database_url_tenant_template": "postgresql+psycopg://u:p@localhost:5432/{tenant_db}",
         "database_url_tenant_admin_template": "postgresql+psycopg://u:p@localhost:5432/{tenant_db}",
+        "database_url_superuser": "postgresql+psycopg://u:p@localhost:5432/postgres",
+        "database_url_superuser": "postgresql+psycopg://u:p@localhost:5432/postgres",
         "redis_url": "",
         "s3_endpoint": "",
         "s3_access_key": "",

@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from functools import lru_cache
@@ -29,6 +30,7 @@ class Settings(BaseSettings):
     database_url_control_admin: str
     database_url_tenant_template: str
     database_url_tenant_admin_template: str
+    database_url_superuser: str
 
     redis_url: str
 
@@ -50,14 +52,12 @@ class Settings(BaseSettings):
     access_token_ttl_minutes: int = 15
     refresh_token_ttl_days: int = 30
 
-    # New for 1C.2 — auth
     login_max_failures: int = 5
     login_lockout_minutes: int = 15
     login_rate_limit_per_minute: int = 20
     refresh_reuse_leeway_seconds: int = 10
     refresh_token_retention_days: int = 30
 
-    # New for 1C.2 — rate limiter backend selection
     workers_count: int = 1
 
     @property
@@ -105,9 +105,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_worker_safety(self) -> "Settings":
-        """In production with more than one worker, only shared rate-limiter
-        backends are safe. The factory enforces this at construction; the
-        validator here documents and enforces the same rule at startup."""
         if self.environment == "production" and self.workers_count > 1:
             if not self.redis_url:
                 raise ValueError(

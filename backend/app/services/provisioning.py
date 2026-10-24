@@ -66,6 +66,23 @@ def _admin_url(db_name: str = "postgres") -> str:
     return get_settings().database_url_tenant_admin_template.format(tenant_db=db_name)
 
 
+def _control_admin_url(db_name: str = "postgres") -> str:
+    """URL for the CONTROL-database admin role, pointed at the named database.
+
+    Reuses the control admin URL (which points at the superuser) but swaps
+    the trailing database name. Used for administrative operations that must
+    run as a superuser - terminating backends and dropping databases cannot
+    be done by non-superuser roles when the caller needs to terminate
+    backends owned by a superuser.
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    base = get_settings().database_url_superuser
+    parsed = urlparse(base.replace("postgresql+psycopg://", "postgresql://", 1))
+    rebuilt = parsed._replace(path=f"/{db_name}")
+    return urlunparse(rebuilt).replace("postgresql://", "postgresql+psycopg://", 1)
+
+
 def _run_tenant_migrations(db_name: str) -> str:
     """Apply all tenant migrations to the named database. Return resulting revision."""
     backend_dir = Path(__file__).resolve().parent.parent.parent
@@ -120,9 +137,24 @@ def _create_first_admin(db_name: str, username: str, password_hash: str) -> None
 
 
 def _drop_tenant_database(db_name: str) -> None:
-    """Forcefully drop a tenant database. Used only during provisioning rollback."""
+    """Forcefully drop a tenant database.
+
+    Used during provisioning rollback, test teardown, and the erase command.
+
+    IMPORTANT: this runs as the CONTROL-database admin role (a superuser),
+    not as the tenant admin role. Two things require superuser:
+      * pg_terminate_backend: non-superusers cannot terminate backends owned
+        by a superuser, which happens routinely when a test opens a session
+        and then a rollback or teardown runs while that session is alive.
+      * DROP DATABASE: if the DB is owned by a non-superuser role that is no
+        longer connected, only a superuser (or that owner) can drop it.
+
+    Both are administrative operations and belong on the superuser connection.
+    """
     admin_engine = create_engine(
-        _admin_url("postgres"), isolation_level="AUTOCOMMIT", future=True
+        _control_admin_url("postgres"),
+        isolation_level="AUTOCOMMIT",
+        future=True,
     )
     try:
         with admin_engine.connect() as conn:
