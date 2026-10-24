@@ -1,8 +1,24 @@
+
+"""Tenant ORM models for organisation structure.
+
+Columns added by migration 0004:
+  * Company.row_version
+  * Branch.is_active, Branch.row_version
+  * Site.is_active, Site.row_version
+  * Department.is_active, Department.row_version
+
+row_version is the concurrency guard for PATCH endpoints: the request carries
+the version it read, the UPDATE is conditioned on that version, and a
+mismatch returns 409 record_changed.
+
+is_active is the soft-delete flag for branch/site/department. Deleting a
+row with dependent references returns 409; deactivate instead.
+"""
 from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, true
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,6 +46,9 @@ class Company(Base, TimestampMixin):
         String(64), nullable=False, default="Africa/Johannesburg"
     )
     settings: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
 
 class Branch(Base, TimestampMixin):
@@ -40,6 +59,12 @@ class Branch(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     code: Mapped[str] = mapped_column(String(40), nullable=False)
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
 
 class Site(Base, TimestampMixin):
@@ -63,6 +88,12 @@ class Site(Base, TimestampMixin):
     latitude: Mapped[float | None] = mapped_column(Numeric(9, 6), nullable=True)
     longitude: Mapped[float | None] = mapped_column(Numeric(9, 6), nullable=True)
     geofence_radius_m: Mapped[int | None] = mapped_column(nullable=True)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
     branch: Mapped[Branch] = relationship(Branch, lazy="joined")
 
@@ -78,4 +109,10 @@ class Department(Base, TimestampMixin):
         UUID(as_uuid=True),
         ForeignKey("department.id", ondelete="SET NULL"),
         nullable=True,
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
     )
