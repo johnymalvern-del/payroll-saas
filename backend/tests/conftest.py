@@ -206,3 +206,48 @@ from app.main import app as _app
 def api_client():
     with _TestClient(_app) as client:
         yield client
+
+# ---------------------------------------------------------------------------
+# RATE LIMITER BYPASS FOR PYTEST
+#
+# app/api/v1/auth/router.py keys the login limiter on client IP only
+# ("login:ip:<ip>"). In tests every request comes from 127.0.0.1, so the
+# entire suite shares one sliding window and trips the per-minute limit
+# after enough logins. That is production behaviour working as intended;
+# the test suite must not depend on how many logins it makes.
+#
+# This fixture replaces the process-wide cached limiter with an always-allow
+# implementation for the whole pytest session. It does NOT touch production:
+# get_rate_limiter.cache_clear() + reinstating the real factory happens on
+# session teardown. A future test that specifically exercises the rate
+# limiter should call get_rate_limiter.cache_clear() inside its own fixture
+# and rebuild the real limiter for that test.
+#
+# If a rate-limiter test is ever added, restore the real limiter for its
+# scope; that is why the teardown below reinstates it.
+# ---------------------------------------------------------------------------
+
+
+import pytest as _pytest_rl
+
+
+class _AlwaysAllowRateLimiter:
+    def hit(self, key: str, limit: int, window_seconds: int) -> bool:
+        return True
+
+
+@_pytest_rl.fixture(scope="session", autouse=True)
+def _bypass_rate_limiter_for_pytest():
+    from app.core.rate_limiter import factory as _rl_factory
+
+    _rl_factory.get_rate_limiter.cache_clear()
+    _original_build = _rl_factory._build
+    _rl_factory._build = lambda _settings: _AlwaysAllowRateLimiter()
+    _rl_factory.get_rate_limiter.cache_clear()
+    try:
+        yield
+    finally:
+        _rl_factory._build = _original_build
+        _rl_factory.get_rate_limiter.cache_clear()
+
+# END OF FILE
