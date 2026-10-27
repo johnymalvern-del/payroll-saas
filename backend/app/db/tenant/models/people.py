@@ -1,4 +1,3 @@
-
 """Tenant ORM models: employees, users, scopes, biometric consent.
 
 Columns that hold encrypted content (national_id_encrypted,
@@ -7,6 +6,13 @@ database level. The application encrypts before writing and decrypts after
 reading, using TenantCrypto. This is deliberate: a ContextVar-held key is
 not visible across FastAPI thread boundaries, so the key must be passed as
 a value, not carried implicitly.
+
+Columns added by migration 0008:
+  * Employee.row_version - optimistic-concurrency guard for PATCH
+    /api/v1/employees/{id}. row_version was already present on Company,
+    Branch, Site and Department (see migration 0004); 1C.8 adds it here so
+    employee PATCH follows the same contract as the other organisation
+    endpoints.
 """
 from __future__ import annotations
 
@@ -18,11 +24,13 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
     func,
+    true,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -81,6 +89,9 @@ class Employee(Base, TimestampMixin):
     retirement_fund_flags: Mapped[str | None] = mapped_column(String(120), nullable=True)
     uif_exempt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
 
 class EmployeePayHistory(Base, TimestampMixin):
@@ -183,3 +194,5 @@ class BiometricEnrolment(Base, TimestampMixin):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+# END OF FILE
