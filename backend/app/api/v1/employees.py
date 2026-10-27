@@ -623,7 +623,7 @@ def patch_employee(
     for simple_key in (
         "first_name", "last_name", "email", "mobile", "date_of_birth",
         "hire_date", "termination_date", "status", "job_title",
-        "employee_type", "pay_basis", "pay_frequency", "base_rate",
+        "employee_type", "pay_basis", "pay_frequency",
         "overtime_eligible", "clocks", "work_pattern_id", "default_shift_id",
         "bank_name", "bank_branch_code", "account_type", "tax_number",
         "medical_aid_dependants", "retirement_fund_flags", "uif_exempt", "notes",

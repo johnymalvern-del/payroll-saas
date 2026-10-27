@@ -10,6 +10,7 @@ Two separation-of-duty rules are enforced by the matrix itself:
 
   * PAY_RATE_REQUEST  is granted to `hr` only.
     PAY_RATE_APPROVE  is granted to `payroll_admin` only.
+    PAY_RATE_VIEW     is granted to `hr`, `payroll_admin` and `auditor`.
   * BANK_DETAIL_REQUEST is granted to `hr` only.
     BANK_DETAIL_APPROVE is granted to `payroll_admin` only.
 
@@ -48,6 +49,7 @@ class Permission(str, Enum):
 
     PAY_RATE_REQUEST = "pay_rate_request"
     PAY_RATE_APPROVE = "pay_rate_approve"
+    PAY_RATE_VIEW = "pay_rate_view"
     BANK_DETAIL_REQUEST = "bank_detail_request"
     BANK_DETAIL_APPROVE = "bank_detail_approve"
 
@@ -95,6 +97,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.ADVANCE_DECIDE,
         Permission.GRIEVANCE_HANDLE,
         Permission.PAY_RATE_REQUEST,
+        Permission.PAY_RATE_VIEW,
         Permission.BANK_DETAIL_REQUEST,
         Permission.PAYROLL_PREVIEW,
         Permission.EMPLOYEE_CRUD,
@@ -112,6 +115,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.EXCEPTION_RESOLVE,
         Permission.ADVANCE_DECIDE,
         Permission.PAY_RATE_APPROVE,
+        Permission.PAY_RATE_VIEW,
         Permission.BANK_DETAIL_APPROVE,
         Permission.SHIFT_CONFIGURE,
         Permission.PAYROLL_PREVIEW,
@@ -127,6 +131,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.PAYSLIP_VIEW,
         Permission.AUDIT_VIEW,
         Permission.ORG_VIEW,
+        Permission.PAY_RATE_VIEW,
     }),
 }
 

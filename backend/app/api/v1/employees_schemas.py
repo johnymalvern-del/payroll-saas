@@ -24,7 +24,7 @@ _ALLOWED_STATUS = ("active", "on_leave", "suspended", "terminated")
 _ALLOWED_EMPLOYEE_TYPE = ("hourly", "salaried", "casual", "contract")
 _ALLOWED_PAY_BASIS = ("hourly", "daily", "monthly")
 _ALLOWED_PAY_FREQUENCY = ("weekly", "fortnightly", "monthly")
-_PATCH_FORBIDDEN_FIELDS = frozenset({"national_id", "bank_account_number"})
+_PATCH_FORBIDDEN_FIELDS = frozenset({"national_id", "bank_account_number", "base_rate"})
 
 
 def _clean_code(v: str) -> str:

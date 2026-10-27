@@ -90,6 +90,7 @@ SECTION_6_MATRIX: dict[Permission, dict[str, bool]] = {
     Permission.GRIEVANCE_HANDLE: {"employee": False, "manager": False, "hr": True, "payroll_admin": False, "auditor": False},
     Permission.PAY_RATE_REQUEST: {"employee": False, "manager": False, "hr": True, "payroll_admin": False, "auditor": False},
     Permission.PAY_RATE_APPROVE: {"employee": False, "manager": False, "hr": False, "payroll_admin": True, "auditor": False},
+    Permission.PAY_RATE_VIEW: {"employee": False, "manager": False, "hr": True, "payroll_admin": True, "auditor": True},
     Permission.BANK_DETAIL_REQUEST: {"employee": False, "manager": False, "hr": True, "payroll_admin": False, "auditor": False},
     Permission.BANK_DETAIL_APPROVE: {"employee": False, "manager": False, "hr": False, "payroll_admin": True, "auditor": False},
     Permission.SHIFT_CONFIGURE: {"employee": False, "manager": False, "hr": False, "payroll_admin": True, "auditor": False},
