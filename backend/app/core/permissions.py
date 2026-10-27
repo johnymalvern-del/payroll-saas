@@ -1,4 +1,3 @@
-
 """Permission matrix and enforcement dependency.
 
 Every capability an endpoint exposes must be enumerated here as a `Permission`
@@ -16,6 +15,13 @@ Two separation-of-duty rules are enforced by the matrix itself:
 
 Scope (site, branch, department filters) is NOT a permission; it is handled
 in app/core/scope.py.
+
+1C.5 adds ORG_VIEW (organisation read: branches, sites, departments) and
+ORG_MANAGE (organisation write). Per the roadmap:
+  ORG_VIEW  - employee, manager, hr, payroll_admin, auditor.
+  ORG_MANAGE- hr, payroll_admin.
+The scope rules decide *which* branches each role sees; the permission only
+decides whether the role may call the endpoint at all.
 """
 from __future__ import annotations
 
@@ -54,6 +60,9 @@ class Permission(str, Enum):
     USER_MANAGE = "user_manage"
     EMPLOYEE_CRUD = "employee_crud"
 
+    ORG_VIEW = "org_view"
+    ORG_MANAGE = "org_manage"
+
 
 # Role -> set of permissions. Mirrors section 6 of the master brief.
 # Any change here MUST be mirrored in tests/test_permissions.py's own matrix.
@@ -62,6 +71,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.SELF_VIEW,
         Permission.SELF_SUBMIT,
         Permission.PAYSLIP_VIEW,
+        Permission.ORG_VIEW,
     }),
     "manager": frozenset({
         Permission.SELF_VIEW,
@@ -71,6 +81,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.ATTENDANCE_ADJUST,
         Permission.OVERTIME_APPROVE,
         Permission.EXCEPTION_RESOLVE,
+        Permission.ORG_VIEW,
     }),
     "hr": frozenset({
         Permission.SELF_VIEW,
@@ -87,6 +98,8 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.BANK_DETAIL_REQUEST,
         Permission.PAYROLL_PREVIEW,
         Permission.EMPLOYEE_CRUD,
+        Permission.ORG_VIEW,
+        Permission.ORG_MANAGE,
     }),
     "payroll_admin": frozenset({
         Permission.SELF_VIEW,
@@ -107,12 +120,13 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.AUDIT_VIEW,
         Permission.USER_MANAGE,
         Permission.EMPLOYEE_CRUD,
+        Permission.ORG_VIEW,
+        Permission.ORG_MANAGE,
     }),
-    # Auditor: read-only audit and payslip viewing. No SELF_VIEW (auditors
-    # are not employees of the company they audit), no SELF_SUBMIT.
     "auditor": frozenset({
         Permission.PAYSLIP_VIEW,
         Permission.AUDIT_VIEW,
+        Permission.ORG_VIEW,
     }),
 }
 
