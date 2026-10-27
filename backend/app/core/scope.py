@@ -44,7 +44,7 @@ Branch-scope additions (1C.4.1):
   for Branch rows. They do NOT share a `model` parameter with the employee
   functions, deliberately: branches have a single scope key (branch id) and
   a single applicable rule set, so a generic signature would only invite
-  the wrong join key. Sites get their own helper in 1C.6 on the same shape.
+  the wrong join key.
 
   Branch scope rules (fail closed):
     - payroll_admin, auditor, and hr with NO user_scope rows: all branches.
@@ -55,6 +55,19 @@ Branch-scope additions (1C.4.1):
     - employee: only the branch on their own employee record.
     - A user with no linked employee record and no scope rows: no branches.
     - Unknown role: no branches.
+
+Site-scope additions (1C.6):
+
+  `apply_site_scope` and `assert_site_in_scope` answer the same question for
+  Site rows. Site scope rules (fail closed):
+    - payroll_admin, auditor, and hr with NO user_scope rows: all sites.
+    - hr WITH user_scope rows, and manager: sites named by their site-type
+      scope rows, PLUS the sites inside any branch named by their
+      branch-type scope rows, PLUS the site on their own employee record.
+      Department-type scope rows contribute no sites.
+    - employee: only the site on their own employee record.
+    - A user with no linked employee record and no scope rows: no sites.
+    - Unknown role: no sites.
 """
 from __future__ import annotations
 
@@ -211,8 +224,7 @@ def _scoped_branch_ids(session: Session, user: Any) -> set[uuid.UUID] | None:
 
     None means "company-wide, do not filter". Empty set means "sees none".
     Mirrors `_scoped_target_ids`' contract so the two public branch helpers
-    stay trivial and the site/department helpers in 1C.6/1C.7 can follow the
-    same shape.
+    stay trivial and the site helpers below follow the same shape.
     """
     role = getattr(user, "role", None)
     user_id = getattr(user, "id", None)
@@ -303,12 +315,7 @@ def apply_branch_scope(query: Any, user: Any, session: Session) -> Any:
 
 
 def assert_branch_in_scope(user: Any, branch_id: uuid.UUID, session: Session) -> None:
-    """Raise ScopeViolation unless branch_id is in the user's branch scope.
-
-    Used by single-row branch reads and writes so a user cannot fetch or
-    modify a branch outside scope by guessing its UUID. Endpoints that catch
-    ScopeViolation should respond 404, mirroring `assert_in_scope`.
-    """
+    """Raise ScopeViolation unless branch_id is in the user's branch scope."""
     target = _scoped_branch_ids(session, user)
     if target is None:
         return  # company-wide
@@ -316,3 +323,106 @@ def assert_branch_in_scope(user: Any, branch_id: uuid.UUID, session: Session) ->
         raise ScopeViolation(
             f"branch {branch_id} is outside the current user's scope"
         )
+
+
+# ---------------------------------------------------------------------------
+# Site scope (1C.6)
+# ---------------------------------------------------------------------------
+
+
+def _scoped_site_ids(session: Session, user: Any) -> set[uuid.UUID] | None:
+    """Return the set of site_ids the user can see, or None for "all".
+
+    None means "company-wide, do not filter". Empty set means "sees none".
+    Mirrors `_scoped_branch_ids`' contract.
+    """
+    role = getattr(user, "role", None)
+    user_id = getattr(user, "id", None)
+    employee_id = getattr(user, "employee_id", None)
+
+    if role in ("payroll_admin", "auditor"):
+        return None
+
+    if role == "hr":
+        scope_rows = _user_scope_rows(session, user_id)
+        if not scope_rows:
+            return None  # company-wide HR without explicit scope rows
+        return _sites_in_scope(session, scope_rows, employee_id)
+
+    if role == "manager":
+        scope_rows = _user_scope_rows(session, user_id) if user_id else []
+        return _sites_in_scope(session, scope_rows, employee_id)
+
+    if role == "employee":
+        if not employee_id:
+            return set()
+        return _sites_for_employee(session, employee_id)
+
+    return set()
+
+
+def _sites_for_employee(session: Session, employee_id: uuid.UUID) -> set[uuid.UUID]:
+    row = session.scalar(select(Employee.site_id).where(Employee.id == employee_id))
+    return {row} if row is not None else set()
+
+
+def _sites_in_scope(
+    session: Session,
+    scope_rows: list[UserScope],
+    employee_id: uuid.UUID | None,
+) -> set[uuid.UUID]:
+    """Resolve the site set for hr-with-scope and manager.
+
+    Rules:
+      * site-type scope rows contribute their scope_id.
+      * branch-type scope rows contribute the sites inside those branches.
+      * department-type scope rows contribute nothing.
+      * the site on the user's own employee record is always included.
+    """
+    site_ids: set[uuid.UUID] = set()
+    branch_ids: list[uuid.UUID] = []
+    for row in scope_rows:
+        if row.scope_type == "site":
+            site_ids.add(row.scope_id)
+        elif row.scope_type == "branch":
+            branch_ids.append(row.scope_id)
+
+    if branch_ids:
+        rows = session.scalars(
+            select(Site.id).where(Site.branch_id.in_(branch_ids))
+        ).all()
+        for sid in rows:
+            if sid is not None:
+                site_ids.add(sid)
+
+    if employee_id is not None:
+        own = session.scalar(
+            select(Employee.site_id).where(Employee.id == employee_id)
+        )
+        if own is not None:
+            site_ids.add(own)
+
+    return site_ids
+
+
+def apply_site_scope(query: Any, user: Any, session: Session) -> Any:
+    """Append a filter to `query` so it returns only Site rows in scope."""
+    target = _scoped_site_ids(session, user)
+    if target is None:
+        return query  # company-wide
+    if not target:
+        return query.where(False)
+    return query.where(Site.id.in_(target))
+
+
+def assert_site_in_scope(user: Any, site_id: uuid.UUID, session: Session) -> None:
+    """Raise ScopeViolation unless site_id is in the user's site scope."""
+    target = _scoped_site_ids(session, user)
+    if target is None:
+        return  # company-wide
+    if site_id not in target:
+        raise ScopeViolation(
+            f"site {site_id} is outside the current user's scope"
+        )
+
+# END OF FILE
