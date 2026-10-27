@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1.auth.router import router as auth_router
 from app.api.v1.branches import router as branches_router
 from app.api.v1.company.router import router as company_router
+from app.api.v1.departments import router as departments_router
 from app.api.v1.register import router as register_router
 from app.api.v1.sites import router as sites_router
 
@@ -12,5 +13,6 @@ api_router.include_router(auth_router)
 api_router.include_router(company_router)
 api_router.include_router(branches_router)
 api_router.include_router(sites_router)
+api_router.include_router(departments_router)
 
 # END OF FILE

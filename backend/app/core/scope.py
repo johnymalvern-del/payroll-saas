@@ -425,4 +425,96 @@ def assert_site_in_scope(user: Any, site_id: uuid.UUID, session: Session) -> Non
             f"site {site_id} is outside the current user's scope"
         )
 
+# ---------------------------------------------------------------------------
+# Department scope (1C.7)
+# ---------------------------------------------------------------------------
+
+
+def _scoped_department_ids(session: Session, user: Any) -> set[uuid.UUID] | None:
+    """Return the set of department_ids the user can see, or None for "all".
+
+    None means "company-wide, do not filter". Empty set means "sees none".
+    Mirrors `_scoped_branch_ids` and `_scoped_site_ids`' contract.
+    """
+    role = getattr(user, "role", None)
+    user_id = getattr(user, "id", None)
+    employee_id = getattr(user, "employee_id", None)
+
+    if role in ("payroll_admin", "auditor"):
+        return None
+
+    if role == "hr":
+        scope_rows = _user_scope_rows(session, user_id)
+        if not scope_rows:
+            return None  # company-wide HR without explicit scope rows
+        return _departments_in_scope(session, scope_rows, employee_id)
+
+    if role == "manager":
+        scope_rows = _user_scope_rows(session, user_id) if user_id else []
+        return _departments_in_scope(session, scope_rows, employee_id)
+
+    if role == "employee":
+        if not employee_id:
+            return set()
+        return _departments_for_employee(session, employee_id)
+
+    return set()
+
+
+def _departments_for_employee(session: Session, employee_id: uuid.UUID) -> set[uuid.UUID]:
+    row = session.scalar(
+        select(Employee.department_id).where(Employee.id == employee_id)
+    )
+    return {row} if row is not None else set()
+
+
+def _departments_in_scope(
+    session: Session,
+    scope_rows: list[UserScope],
+    employee_id: uuid.UUID | None,
+) -> set[uuid.UUID]:
+    """Resolve the department set for hr-with-scope and manager.
+
+    Rules (1C.7):
+      * department-type scope rows contribute their scope_id.
+      * branch-type and site-type scope rows contribute nothing: departments
+        are a separate axis that does not nest under branches or sites.
+      * the department on the user's own employee record is always included.
+    """
+    dept_ids: set[uuid.UUID] = set()
+    for row in scope_rows:
+        if row.scope_type == "department":
+            dept_ids.add(row.scope_id)
+        # branch- and site-type rows deliberately contribute nothing.
+
+    if employee_id is not None:
+        own = session.scalar(
+            select(Employee.department_id).where(Employee.id == employee_id)
+        )
+        if own is not None:
+            dept_ids.add(own)
+
+    return dept_ids
+
+
+def apply_department_scope(query: Any, user: Any, session: Session) -> Any:
+    """Append a filter to `query` so it returns only Department rows in scope."""
+    target = _scoped_department_ids(session, user)
+    if target is None:
+        return query  # company-wide
+    if not target:
+        return query.where(False)
+    return query.where(Department.id.in_(target))
+
+
+def assert_department_in_scope(user: Any, department_id: uuid.UUID, session: Session) -> None:
+    """Raise ScopeViolation unless department_id is in the user's scope."""
+    target = _scoped_department_ids(session, user)
+    if target is None:
+        return  # company-wide
+    if department_id not in target:
+        raise ScopeViolation(
+            f"department {department_id} is outside the current user's scope"
+        )
+
 # END OF FILE
