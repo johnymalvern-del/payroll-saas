@@ -135,6 +135,9 @@ class User(Base, TimestampMixin):
     password_changed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
 
 class UserScope(Base, TimestampMixin):
