@@ -208,27 +208,38 @@ def api_client():
         yield client
 
 # ---------------------------------------------------------------------------
-# RATE LIMITER BYPASS FOR PYTEST
+
+# ---------------------------------------------------------------------------
+# RATE LIMITER BYPASS FOR PYTEST (1C.6.2)
 #
-# app/api/v1/auth/router.py keys the login limiter on client IP only
-# ("login:ip:<ip>"). In tests every request comes from 127.0.0.1, so the
-# entire suite shares one sliding window and trips the per-minute limit
-# after enough logins. That is production behaviour working as intended;
-# the test suite must not depend on how many logins it makes.
+# History:
+#   1C.6.1 installed an always-allow limiter for the WHOLE session, which
+#   broke tests/test_auth_endpoints.py::test_rate_limit_returns_429: that
+#   test's `_reset_rate_limiter` autouse fixture wipes `_events` on the real
+#   InMemoryRateLimiter, and the always-allow object has no `_events`, so the
+#   fixture silently did nothing, the 25 failed logins were not counted, and
+#   AuthLockedError (423) fired before the rate limit (429) could.
 #
-# This fixture replaces the process-wide cached limiter with an always-allow
-# implementation for the whole pytest session. It does NOT touch production:
-# get_rate_limiter.cache_clear() + reinstating the real factory happens on
-# session teardown. A future test that specifically exercises the rate
-# limiter should call get_rate_limiter.cache_clear() inside its own fixture
-# and rebuild the real limiter for that test.
+#   1C.6.2 scopes the bypass per test: any test whose module is NOT in
+#   _REAL_LIMITER_MODULES gets the always-allow limiter; tests in the real-
+#   limiter set get the actual limiter and their own fixtures (e.g.
+#   test_auth_endpoints._reset_rate_limiter) work unchanged.
 #
-# If a rate-limiter test is ever added, restore the real limiter for its
-# scope; that is why the teardown below reinstates it.
+# The production code is untouched. `get_rate_limiter` remains the factory
+# the production code calls; the bypass only replaces the cached instance
+# for the duration of a test that is not in the real-limiter set.
 # ---------------------------------------------------------------------------
 
 
 import pytest as _pytest_rl
+
+
+# Modules that exercise the real rate limiter and must NOT be bypassed.
+# Add to this set if a future test also needs the real limiter.
+_REAL_LIMITER_MODULES: frozenset[str] = frozenset({
+    "test_auth_endpoints.py",
+    "test_rate_limiter.py",
+})
 
 
 class _AlwaysAllowRateLimiter:
@@ -237,17 +248,40 @@ class _AlwaysAllowRateLimiter:
 
 
 @_pytest_rl.fixture(scope="session", autouse=True)
-def _bypass_rate_limiter_for_pytest():
+def _save_rate_limiter_factory():
+    """Save the real _build at session start; restore it on teardown."""
+    from app.core.rate_limiter import factory as _rl_factory
+    _original = _rl_factory._build
+    try:
+        yield _original
+    finally:
+        _rl_factory._build = _original
+        _rl_factory.get_rate_limiter.cache_clear()
+
+
+@_pytest_rl.fixture(autouse=True)
+def _bypass_rate_limiter_unless_real(request, _save_rate_limiter_factory):
+    """Install the always-allow limiter for tests that are not in the
+    real-limiter set; leave the real limiter in place otherwise."""
+    from pathlib import Path
     from app.core.rate_limiter import factory as _rl_factory
 
-    _rl_factory.get_rate_limiter.cache_clear()
-    _original_build = _rl_factory._build
+    module_file = getattr(request.node, "fspath", None)
+    module_name = Path(str(module_file)).name if module_file is not None else ""
+
+    if module_name in _REAL_LIMITER_MODULES:
+        # Leave the real limiter installed; the module's own fixtures
+        # (e.g. _reset_rate_limiter) manage it.
+        yield
+        return
+
+    original = _save_rate_limiter_factory
     _rl_factory._build = lambda _settings: _AlwaysAllowRateLimiter()
     _rl_factory.get_rate_limiter.cache_clear()
     try:
         yield
     finally:
-        _rl_factory._build = _original_build
+        _rl_factory._build = original
         _rl_factory.get_rate_limiter.cache_clear()
 
 # END OF FILE
