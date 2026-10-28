@@ -306,7 +306,7 @@ def _apply_adjustment(db, user, employee_id, work_date, custom,
         entity_id=str(adj.id),
         action="attendance.adjustment.create",
         old_value=adj.old_value,
-        new_value={"adjustment": _serialize_adj(adj)},
+        new_value={"day": _day_snapshot(day_after), "adjustment": _serialize_adj(adj)},
         request_id=request_id,
     ))
     if not db.info.get("bulk_no_commit"):
