@@ -32,6 +32,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     Time,
     UniqueConstraint,
     func,
@@ -324,6 +325,12 @@ class AttendanceDay(Base, TimestampMixin):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     locked: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="false")
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     row_version: Mapped[int] = mapped_column(Integer(), nullable=False, default=1, server_default="1")
 
     segments: Mapped[list["AttendanceSegment"]] = relationship(
@@ -386,6 +393,96 @@ class CountryCalendar(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     source_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     loaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ExceptionItem(Base, TimestampMixin):
+    """One open exception of each type per (employee, work_date).
+
+    Uniqueness of open rows enforced by partial unique index
+    uq_exception_item_open on (employee_id, work_date, type) WHERE status='open'.
+    Resolved rows accumulate history; when the underlying condition re-appears
+    after being resolved, a new open row is created (C4).
+    """
+
+    __tablename__ = "exception_item"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    employee_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("employee.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    work_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    type: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_ref: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    suggested_fix: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="open", server_default="open"
+    )
+    assigned_to: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    resolved_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    resolution: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
+class Adjustment(Base):
+    """Append-only attendance adjustment (C6). Only created_at, no updated_at.
+
+    The latest active adjustment for a (employee_id, work_date) wins;
+    outcome='revert' restores the punch-based computation. Never edited
+    or deleted. old_value and new_value capture the attendance_day snapshot
+    before and after so audit drill-down shows exactly what changed.
+    """
+
+    __tablename__ = "adjustment"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    employee_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("employee.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    work_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    time_in: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    time_out: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    minutes: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    reason_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    old_value: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    new_value: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    period_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
