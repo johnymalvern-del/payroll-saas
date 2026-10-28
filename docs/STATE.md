@@ -218,4 +218,121 @@ Open 2B with a SPEC, no code. The SPEC must cover:
 5. Recompute trigger: synchronous on adjustment, or a job. Today no job is
    wired to attendance; the dev job runner exists behind an interface.
 
+## Chapter 2B closed (attendance calculation)
+
+2B delivered and committed at 30dbfe0. 644 tests passing (569 from 2A + 75 from 2B).
+
+### What 2B added
+
+Migrations: 0013 (attendance_day, attendance_segment, country_calendar),
+0014 (shift.grace_mode, shift.pay_early_arrival).
+
+`attendance_engine.py` (~750 lines):
+- Pure: `round_clock_time`, `apply_grace_arrival`,
+  `apply_grace_departure`, `build_sessions`, `detect_shift`,
+  `determine_day_type`, `split_at_midnight`, `apply_overtime_tiers`,
+  `build_day`.
+- DB: `ensure_days`, `recompute_day`, `_load_holiday_set`,
+  `_holiday_set_for`, `_employee_expected`, `_persist_day`,
+  `_advisory_lock_key` (B8: `pg_advisory_xact_lock(int4, int4)` per
+  employee+date).
+
+`attendance_schemas.py`: `SegmentOut`, `DayOut`, `DayDetailOut`,
+`DayListOut`, `RecomputeIn`, `RecomputeOut`.
+
+`attendance.py` router (3 endpoints, `ATTENDANCE_VIEW` on reads,
+`ATTENDANCE_ADJUST` on recompute):
+- `GET /attendance/day` — cursor list, filters, `apply_scope`.
+- `GET /attendance/day/{employee_id}/{work_date}` — with segments,
+  `assert_in_scope`, IDOR-safe 404.
+- `POST /attendance/recompute` — `ensure_days` then `recompute_day`
+  per date, scope-limited via `apply_scope`, locked days skipped.
+
+Punch trigger: `_process_punch` (in `punches.py`) calls `recompute_day`
+for the punch's local date AND the previous local date, so an out-punch
+at 06:00 next morning closes a session that started the day before.
+Failure is swallowed with `db.rollback()` so the punch is never lost;
+diagnostic `[TRIGGER]` prints to stderr remain for now (low volume;
+removed in a future cleanup).
+
+### Amendments B1–B14 as implemented
+
+- **B1** (D5 standard hours): no `standard_hours` in code. Segments
+  store `rate_method` + `rate_value` as config; converting multiplier
+  to money is Phase 4 with contracted weekly hours per employee (the
+  `Employee` column does not exist yet; Phase 4 adds it per B1, formula
+  confirmed by accountant).
+- **B2** (dates): `work_date` = local date the shift STARTS;
+  `segment.local_date` = real calendar date of the segment. Documented
+  in model and engine. Night shift is one day with segments on two
+  dates.
+- **B3** (minutes): `worked = normal + overtime`. `raw_minutes` added
+  (elapsed minus unpaid break, before rounding/grace). Below-min
+  overtime drops to 0 and flags `overtime_below_minimum`. Invariant
+  `sum(segment.minutes) == worked_minutes` tested in 2B-3a.
+- **B4** (grace): `shift.grace_mode` (`threshold` or `allowance`).
+  `threshold`: late beyond grace counts full lateness from scheduled
+  start. `allowance`: only excess beyond grace counts. Symmetric for
+  early departure.
+- **B5** (early arrival): `shift.pay_early_arrival` bool. False: time
+  before scheduled start is unpaid, flags `early_arrival_ignored`.
+  True: early minutes are overtime and follow approval setting.
+- **B6** (shift detection): preferred shift (`expected_shift_id` over
+  `default_shift_id`) wins even outside tolerance and flags
+  `outside_tolerance`. `no_shift_match` only when no known shift and
+  none within tolerance.
+- **B7** (sweep): `ensure_days(scope, from_date, to_date)` creates
+  rows for days with no punches (`absent` / `missing_punch` /
+  `public_holiday_unworked` / `clocks=false`-synthetic). Today is
+  tenant-local. Never creates future days. No leave overlay yet
+  (Chapter 3 will trigger recompute on approval per B10).
+- **B8** (concurrency): `pg_advisory_xact_lock` per
+  `(employee_id, work_date)`. Locks are transaction-scoped and
+  released automatically on commit/rollback. Cross-thread test
+  deferred to Phase 5; the lock is exercised on every recompute, so
+  a bug manifests as `DeadlockDetected` at runtime, not silent failure.
+- **B9** (holiday calendar): `country_calendar` table + validator.
+  Fails closed with `holiday_calendar_missing` when the year has no
+  rows. Bug fixed mid-2B: year check was scoped to the requested date
+  range instead of the whole year.
+- **B10** (leave): no leave input in `ensure_days`/`recompute_day`
+  yet. Chapter 3 triggers recompute on approval.
+- **B11** (source_version): increments only when computed output
+  changes (status, minutes, segments, flags). `computed_at` updates
+  on every successful recompute. Tested idempotency: recompute with
+  no change keeps `source_version`.
+- **B12** (guards): `sites.py site_in_use` counts employees + punches
+  + devices. `shifts.py shift_in_use` counts rate_rules +
+  work_pattern_days + employees + attendance_days. Recompute endpoint
+  applies `apply_scope` to target employees.
+- **B13** (rounding): `round_clock_time` applies to clock-in and
+  clock-out before session build. `nearest` = half up. No
+  segment-level rounding.
+- **B14** (tests): 51 pure + 7 DB + 10 endpoint + 4 trigger = 72 new
+  tests. Covers B4–B13, timezone splits (SA + NY), minutes
+  invariant, locked-day skip, holiday-calendar fail-closed.
+
+### Open items carried from 2B
+
+- 5 MB batch body cap (A6) still not enforced at HTTP layer.
+  Middleware recommended before phone clock-in ships.
+- Photo happy path not tested (would write to StorageDep). Needs a
+  test override in `conftest.py`, not production code.
+- No scheduler yet. `ensure_days` callable via
+  `POST /attendance/recompute` but production needs a daily job to
+  sweep absent days past their grace. Chapter 5 report scheduler can
+  host it, or a dedicated cron in the job-runner interface.
+- Cross-thread concurrency test for the advisory lock deferred to
+  Phase 5.
+- `Employee` contracted weekly hours column does not exist. Phase 4
+  adds it per B1.
+- Diagnostic `[TRIGGER]` prints in `punches.py` — intentional now,
+  removed in a later cleanup.
+
+### Next
+
+2C attendance work surface: exceptions queue, single + bulk
+adjustments, attendance sheet (monthly grid + daily list API).
+SPEC-only first, one approval, then scripts.
+
 # END OF FILE
