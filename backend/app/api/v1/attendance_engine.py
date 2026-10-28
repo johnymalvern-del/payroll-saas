@@ -618,6 +618,14 @@ def ensure_days(db, employee_ids, from_date, to_date, *, absent_grace_days=1):
                         db.add(_new_day(employee.id, cur, "missing_punch", flags=["waiting_grace"]))
                     created += 1
             cur += timedelta(days=1)
+        _stale = db.scalars(select(AttendanceDay).where(
+            AttendanceDay.employee_id == employee.id,
+            AttendanceDay.work_date >= start,
+            AttendanceDay.work_date <= stop,
+            AttendanceDay.source_version == 0,
+        )).all()
+        for _d in _stale:
+            _sync_exceptions(db, employee.id, _d.work_date, _d)
     db.commit()
     return created
 
