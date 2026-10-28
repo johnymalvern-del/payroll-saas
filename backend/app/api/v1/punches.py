@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -233,6 +233,22 @@ def _process_punch(
     ))
     db.commit()
     db.refresh(punch)
+    # B7/D2: synchronous day-build after punch commit.
+    import sys as _sys
+    import traceback as _tb
+    try:
+        from app.api.v1.attendance_engine import _tenant_local_today, recompute_day
+        _, tz = _tenant_local_today(db)
+        local_date = punch.effective_time.astimezone(tz).date()
+        print(f"[TRIGGER] emp={punch.employee_id} local_date={local_date}", file=_sys.stderr)
+        d1 = recompute_day(db, punch.employee_id, local_date)
+        print(f"[TRIGGER] recompute returned: {None if d1 is None else (str(d1.id), str(d1.work_date), d1.status)}", file=_sys.stderr)
+        d2 = recompute_day(db, punch.employee_id, local_date - timedelta(days=1))
+        print(f"[TRIGGER] prev recompute returned: {None if d2 is None else (str(d2.id), str(d2.work_date), d2.status)}", file=_sys.stderr)
+    except Exception as e:
+        db.rollback()
+        print(f"[TRIGGER FAILED] {type(e).__name__}: {e}", file=_sys.stderr)
+        _tb.print_exc(file=_sys.stderr)
     return punch, True
 
 
