@@ -50,5 +50,5 @@ async def validation_exception_handler(
         "validation_error",
         "Request validation failed",
         status.HTTP_422_UNPROCESSABLE_ENTITY,
-        {"errors": exc.errors()},
+        {"errors": [{k: v for k, v in e.items() if k != "ctx"} for e in exc.errors()]},
     )

@@ -1,4 +1,3 @@
-
 """Permission matrix, scope semantics, and route-inventory tests.
 
 The matrix below is written out independently of ROLE_PERMISSIONS. It is the
@@ -99,6 +98,9 @@ SECTION_6_MATRIX: dict[Permission, dict[str, bool]] = {
     Permission.PAYROLL_REOPEN: {"employee": False, "manager": False, "hr": False, "payroll_admin": True, "auditor": False},
     Permission.AUDIT_VIEW: {"employee": False, "manager": False, "hr": False, "payroll_admin": True, "auditor": True},
     Permission.USER_MANAGE: {"employee": False, "manager": False, "hr": False, "payroll_admin": True, "auditor": False},
+    Permission.ORG_VIEW: {"employee": True, "manager": True, "hr": True, "payroll_admin": True, "auditor": True},
+    Permission.ORG_MANAGE: {"employee": False, "manager": False, "hr": True, "payroll_admin": True, "auditor": False},
+    Permission.ATTENDANCE_VIEW: {"employee": True, "manager": True, "hr": True, "payroll_admin": True, "auditor": False},
 }
 
 
@@ -372,3 +374,5 @@ def test_every_route_has_an_auth_dependency_or_is_allow_listed() -> None:
         "Routes without any Depends() dependency and not in the allow-list:\n  "
         + "\n  ".join(offenders)
     )
+
+# END OF FILE
