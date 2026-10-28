@@ -31,6 +31,7 @@ from sqlalchemy import func, or_, select
 
 from app.api.deps import TenantDbDep
 from app.api.v1.exceptions_schemas import (
+    BulkResolveIn, BulkResolveItemOut, BulkResolveOut,
     CustomAdjustmentIn, ExceptionListOut, ExceptionOut,
     ResolveIn, ResolveOut,
 )
@@ -523,5 +524,164 @@ def _pre_validate_bulk_item(db, user, item, exc):
         except AppError as e:
             return e.code
     return None
+
+
+@router.post("/bulk_resolve", response_model=BulkResolveOut)
+def bulk_resolve_exception(
+    payload: BulkResolveIn,
+    request: Request,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.ATTENDANCE_ADJUST))],
+) -> BulkResolveOut:
+    computed = _compute_bulk_token(payload.items)
+    if payload.token is not None and payload.token != computed:
+        raise AppError(
+            "token_mismatch",
+            "Payload does not match the dry-run token; re-run dry-run with the same items",
+            status.HTTP_409_CONFLICT,
+        )
+    is_dry_run = payload.token is None
+    request_id = getattr(request.state, "request_id", None)
+
+    exceptions_by_id: dict[uuid.UUID, ExceptionItem | None] = {}
+    for item in payload.items:
+        exceptions_by_id[item.exception_id] = db.get(ExceptionItem, item.exception_id)
+
+    pre_errors: dict[int, str] = {}
+    for idx, item in enumerate(payload.items):
+        code = _pre_validate_bulk_item(db, user, item, exceptions_by_id[item.exception_id])
+        if code is not None:
+            pre_errors[idx] = code
+
+    if is_dry_run:
+        results: list[BulkResolveItemOut] = []
+        for idx, item in enumerate(payload.items):
+            if idx in pre_errors:
+                code = pre_errors[idx]
+                results.append(BulkResolveItemOut(
+                    index=idx, exception_id=item.exception_id, ok=False,
+                    error_code=code, error_message=_ERROR_MESSAGES.get(code, code),
+                ))
+            else:
+                results.append(BulkResolveItemOut(
+                    index=idx, exception_id=item.exception_id, ok=True,
+                ))
+        return BulkResolveOut(
+            results=results,
+            applied=0,
+            dry_run=True,
+            token=computed,
+        )
+
+    if pre_errors:
+        results: list[BulkResolveItemOut] = []
+        for idx, item in enumerate(payload.items):
+            if idx in pre_errors:
+                code = pre_errors[idx]
+                results.append(BulkResolveItemOut(
+                    index=idx, exception_id=item.exception_id, ok=False,
+                    error_code=code, error_message=_ERROR_MESSAGES.get(code, code),
+                ))
+            else:
+                results.append(BulkResolveItemOut(
+                    index=idx, exception_id=item.exception_id, ok=True,
+                ))
+        raise AppError(
+            "bulk_validation_failed",
+            "One or more items failed validation; nothing was applied. Use the dry-run results to fix the batch.",
+            status.HTTP_400_BAD_REQUEST,
+            {"results": [r.model_dump() for r in results]},
+        )
+
+    db.info["bulk_no_commit"] = True
+    try:
+        applied_results: list[BulkResolveItemOut] = []
+        for idx, item in enumerate(payload.items):
+            exc = exceptions_by_id[item.exception_id]
+            employee = db.get(Employee, exc.employee_id)
+            day = _day_for(db, exc.employee_id, exc.work_date)
+            adjustment_id: uuid.UUID | None = None
+            try:
+                if item.action == "dismiss":
+                    pass
+                elif item.action == "custom":
+                    ca = item.custom_adjustment
+                    adjustment_id, _ = _apply_adjustment(
+                        db, user, exc.employee_id, exc.work_date, ca, request_id=request_id
+                    )
+                else:
+                    ca = _suggested_adjustment_for(db, exc, day, employee)
+                    if ca is not None:
+                        adjustment_id, _ = _apply_adjustment(
+                            db, user, exc.employee_id, exc.work_date, ca, request_id=request_id
+                        )
+                    elif exc.type == "overtime_unapproved" and day is not None:
+                        _approve_pending_segments(db, day)
+                        recompute_day(db, exc.employee_id, exc.work_date)
+                exc.status = "resolved"
+                exc.resolved_by = getattr(user, "id", None)
+                exc.resolved_at = datetime.now(timezone.utc)
+                exc.resolution = {
+                    "action": item.action,
+                    "adjustment_id": str(adjustment_id) if adjustment_id else None,
+                    "note": item.note,
+                    "batch": True,
+                }
+                db.add(AuditLog(
+                    id=uuid.uuid4(),
+                    actor_user_id=getattr(user, "id", None),
+                    actor_role=getattr(user, "role", None),
+                    entity_type="exception_item",
+                    entity_id=str(exc.id),
+                    action="attendance.exception.resolve",
+                    old_value={"status": "open"},
+                    new_value={
+                        "status": "resolved",
+                        "action": item.action,
+                        "adjustment_id": str(adjustment_id) if adjustment_id else None,
+                        "batch": True,
+                    },
+                    request_id=request_id,
+                ))
+                db.flush()
+                applied_results.append(BulkResolveItemOut(
+                    index=idx, exception_id=item.exception_id, ok=True,
+                    adjustment_id=adjustment_id,
+                ))
+            except AppError as e:
+                db.rollback()
+                raise AppError(
+                    "batch_failed",
+                    f"Batch aborted at item {idx}: {e.message}. Nothing was applied.",
+                    status.HTTP_409_CONFLICT,
+                    {"failed_index": idx, "code": e.code},
+                ) from None
+
+        batch_id = uuid.uuid4()
+        db.add(AuditLog(
+            id=uuid.uuid4(),
+            actor_user_id=getattr(user, "id", None),
+            actor_role=getattr(user, "role", None),
+            entity_type="exception_item",
+            entity_id=str(batch_id),
+            action="attendance.exception.bulk",
+            old_value=None,
+            new_value={
+                "batch_id": str(batch_id),
+                "count": len(applied_results),
+                "ids": [str(item.exception_id) for item in payload.items],
+            },
+            request_id=request_id,
+        ))
+        db.commit()
+    finally:
+        db.info.pop("bulk_no_commit", None)
+
+    return BulkResolveOut(
+        results=applied_results,
+        applied=len(applied_results),
+        dry_run=False,
+        token=computed,
+    )
 
 # END OF FILE
