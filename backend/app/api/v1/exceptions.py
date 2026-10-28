@@ -366,4 +366,98 @@ def _suggested_adjustment_for(db, exc, day, employee):
         status.HTTP_400_BAD_REQUEST,
     )
 
+
+@router.post("/{exception_id}/resolve", response_model=ResolveOut)
+def resolve_exception(
+    exception_id: uuid.UUID,
+    payload: ResolveIn,
+    request: Request,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.ATTENDANCE_ADJUST))],
+) -> ResolveOut:
+    exc = db.get(ExceptionItem, exception_id)
+    if exc is None:
+        raise AppError("record_not_found", "Exception not found", 404)
+    try:
+        assert_in_scope(user, exc.employee_id, db)
+    except ScopeViolation:
+        raise AppError("record_not_found", "Exception not found", 404) from None
+    if exc.status != "open":
+        raise AppError(
+            "exception_not_open",
+            f"Exception is already {exc.status}",
+            status.HTTP_409_CONFLICT,
+        )
+    if getattr(user, "employee_id", None) is not None and user.employee_id == exc.employee_id:
+        raise AppError(
+            "cannot_adjust_own",
+            "A user cannot adjust their own attendance",
+            status.HTTP_403_FORBIDDEN,
+        )
+    employee = db.get(Employee, exc.employee_id)
+    if employee is None:
+        raise AppError("record_not_found", "Employee not found", 404)
+    day = _day_for(db, exc.employee_id, exc.work_date)
+    request_id = getattr(request.state, "request_id", None)
+    adjustment_id: uuid.UUID | None = None
+    day_status = day.status if day is not None else None
+
+    try:
+        if payload.action == "dismiss":
+            pass
+        elif payload.action == "custom":
+            ca = payload.custom_adjustment
+            _validate_reason(db, ca.reason_code, ca.note)
+            adjustment_id, day_status = _apply_adjustment(
+                db, user, exc.employee_id, exc.work_date, ca, request_id=request_id
+            )
+        else:
+            ca = _suggested_adjustment_for(db, exc, day, employee)
+            if ca is not None:
+                _validate_reason(db, ca.reason_code, ca.note)
+                adjustment_id, day_status = _apply_adjustment(
+                    db, user, exc.employee_id, exc.work_date, ca, request_id=request_id
+                )
+            elif exc.type == "overtime_unapproved" and day is not None:
+                _approve_pending_segments(db, day)
+                recompute_day(db, exc.employee_id, exc.work_date)
+                db.commit()
+                refreshed = _day_for(db, exc.employee_id, exc.work_date)
+                day_status = refreshed.status if refreshed is not None else None
+    except AppError:
+        db.rollback()
+        raise
+
+    exc = db.get(ExceptionItem, exception_id)
+    exc.status = "resolved"
+    exc.resolved_by = getattr(user, "id", None)
+    exc.resolved_at = datetime.now(timezone.utc)
+    exc.resolution = {
+        "action": payload.action,
+        "adjustment_id": str(adjustment_id) if adjustment_id else None,
+        "note": payload.note,
+    }
+    db.add(AuditLog(
+        id=uuid.uuid4(),
+        actor_user_id=getattr(user, "id", None),
+        actor_role=getattr(user, "role", None),
+        entity_type="exception_item",
+        entity_id=str(exc.id),
+        action="attendance.exception.resolve",
+        old_value={"status": "open"},
+        new_value={
+            "status": "resolved",
+            "action": payload.action,
+            "adjustment_id": str(adjustment_id) if adjustment_id else None,
+        },
+        request_id=request_id,
+    ))
+    db.commit()
+    db.refresh(exc)
+    return ResolveOut(
+        exception=_to_out(exc),
+        adjustment_id=adjustment_id,
+        day_status=day_status,
+    )
+
 # END OF FILE
