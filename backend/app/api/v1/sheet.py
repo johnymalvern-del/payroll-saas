@@ -15,14 +15,19 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func, select
 
 from app.api.deps import TenantDbDep
 from app.api.v1.sheet_schemas import (
+    DailyOut,
+    DailyRowOut,
+    MarkReviewedIn,
+    MarkReviewedOut,
+    MarkReviewedRefusedOut,
     SheetCellOut,
     SheetEmployeeOut,
     SheetOut,
@@ -32,6 +37,7 @@ from app.core.permissions import Permission, require_permission
 from app.core.scope import apply_scope
 from app.db.tenant.models.attendance import AttendanceDay, ExceptionItem
 from app.db.tenant.models.people import Employee
+from app.db.tenant.models.platform import AuditLog
 
 router = APIRouter(prefix="/attendance", tags=["attendance-sheet"])
 
@@ -190,5 +196,159 @@ def get_sheet(
         total = int(db.scalar(count_q) or 0)
 
     return SheetOut(items=items, next_cursor=next_cursor, total=total)
+
+
+@router.get("/daily", response_model=DailyOut)
+def get_daily(
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.ATTENDANCE_VIEW))],
+    target_date: date = Query(..., alias="date"),
+    site_id: uuid.UUID | None = Query(None),
+    branch_id: uuid.UUID | None = Query(None),
+    department_id: uuid.UUID | None = Query(None),
+    include_terminated: bool = Query(False),
+    include_total: bool = Query(False),
+    limit: int = Query(_DEFAULT_SHEET_LIMIT, ge=1, le=_MAX_SHEET_LIMIT),
+    cursor: str | None = Query(None),
+) -> DailyOut:
+    q = _employee_filter_query(
+        db, user,
+        site_id=site_id, branch_id=branch_id, department_id=department_id,
+        include_terminated=include_terminated,
+    )
+    if cursor is not None:
+        cid = _decode_emp_cursor(cursor)
+        q = q.where(Employee.id > cid)
+    q = q.order_by(Employee.id.asc()).limit(limit + 1)
+    emps = list(db.scalars(q).all())
+    next_cursor = None
+    if len(emps) > limit:
+        emps = emps[:limit]
+        next_cursor = _encode_emp_cursor(emps[-1].id)
+
+    emp_ids = [e.id for e in emps]
+    days_map = _days_by_emp(db, emp_ids, target_date, target_date)
+    exc_map = _open_exception_counts(db, emp_ids, target_date, target_date)
+
+    items = []
+    for emp in emps:
+        day = days_map.get((emp.id, target_date))
+        items.append(DailyRowOut(
+            employee_id=emp.id,
+            employee_code=emp.employee_code,
+            employee_name=_employee_name(emp),
+            site_id=emp.site_id,
+            department_id=emp.department_id,
+            work_date=target_date,
+            status=day.status if day is not None else None,
+            first_in=day.first_in if day is not None else None,
+            last_out=day.last_out if day is not None else None,
+            shift_id=day.shift_id if day is not None else None,
+            worked_minutes=day.worked_minutes if day is not None else None,
+            normal_minutes=day.normal_minutes if day is not None else None,
+            overtime_minutes=day.overtime_minutes if day is not None else None,
+            flags=list(day.flags or []) if day is not None else [],
+            open_exception_count=exc_map.get((emp.id, target_date), 0),
+            locked=day.locked if day is not None else False,
+            reviewed=(day.reviewed_at is not None) if day is not None else False,
+        ))
+
+    total: int | None = None
+    if include_total:
+        tq = _employee_filter_query(
+            db, user,
+            site_id=site_id, branch_id=branch_id, department_id=department_id,
+            include_terminated=include_terminated,
+        )
+        count_q = select(func.count()).select_from(tq.subquery())
+        total = int(db.scalar(count_q) or 0)
+
+    return DailyOut(items=items, next_cursor=next_cursor, total=total)
+
+
+@router.post("/mark_reviewed", response_model=MarkReviewedOut)
+def mark_reviewed(
+    payload: MarkReviewedIn,
+    request: Request,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.ATTENDANCE_ADJUST))],
+) -> MarkReviewedOut:
+    _validate_range(payload.from_date, payload.to_date)
+
+    if payload.employee_ids is not None:
+        q = select(Employee).where(Employee.id.in_(payload.employee_ids))
+    elif payload.site_id is not None:
+        q = select(Employee).where(Employee.site_id == payload.site_id)
+    else:
+        q = select(Employee).where(Employee.department_id == payload.department_id)
+    q = apply_scope(q, user, db, model=Employee)
+    target_ids = [e.id for e in db.scalars(q).all()]
+
+    if not target_ids:
+        return MarkReviewedOut(marked=0, refused=0, refused_days=[])
+
+    open_exc_rows = db.execute(
+        select(ExceptionItem.employee_id, ExceptionItem.work_date).where(
+            ExceptionItem.employee_id.in_(target_ids),
+            ExceptionItem.work_date >= payload.from_date,
+            ExceptionItem.work_date <= payload.to_date,
+            ExceptionItem.status == "open",
+        )
+    ).all()
+    refused_set = {(r[0], r[1]) for r in open_exc_rows}
+
+    candidate_rows = list(db.scalars(
+        select(AttendanceDay).where(
+            AttendanceDay.employee_id.in_(target_ids),
+            AttendanceDay.work_date >= payload.from_date,
+            AttendanceDay.work_date <= payload.to_date,
+            AttendanceDay.reviewed_at.is_(None),
+        )
+    ).all())
+
+    now = datetime.now(timezone.utc)
+    uid = getattr(user, "id", None)
+    marked = 0
+    refused_days: list[MarkReviewedRefusedOut] = []
+    for row in candidate_rows:
+        if (row.employee_id, row.work_date) in refused_set:
+            refused_days.append(MarkReviewedRefusedOut(
+                employee_id=row.employee_id,
+                work_date=row.work_date,
+                reason="open_exceptions",
+            ))
+            continue
+        row.reviewed_at = now
+        row.reviewed_by = uid
+        marked += 1
+
+    db.add(AuditLog(
+        id=uuid.uuid4(),
+        actor_user_id=uid,
+        actor_role=getattr(user, "role", None),
+        entity_type="attendance_day",
+        entity_id=str(uuid.uuid4()),
+        action="attendance.mark_reviewed",
+        old_value=None,
+        new_value={
+            "marked": marked,
+            "refused": len(refused_days),
+            "from_date": payload.from_date.isoformat(),
+            "to_date": payload.to_date.isoformat(),
+            "target_count": len(target_ids),
+            "refused_sample": [
+                {"employee_id": str(rd.employee_id), "work_date": rd.work_date.isoformat()}
+                for rd in refused_days[:20]
+            ],
+        },
+        request_id=getattr(request.state, "request_id", None),
+    ))
+    db.commit()
+
+    return MarkReviewedOut(
+        marked=marked,
+        refused=len(refused_days),
+        refused_days=refused_days,
+    )
 
 # END OF FILE
