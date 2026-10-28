@@ -22,18 +22,29 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import func, or_, select
 
 from app.api.deps import TenantDbDep
-from app.api.v1.exceptions_schemas import ExceptionListOut, ExceptionOut
+from app.api.v1.exceptions_schemas import (
+    CustomAdjustmentIn, ExceptionListOut, ExceptionOut,
+    ResolveIn, ResolveOut,
+)
 from app.core.errors import AppError
 from app.core.permissions import Permission, require_permission
 from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
-from app.db.tenant.models.attendance import ExceptionItem
+from app.db.tenant.models.attendance import (
+    Adjustment, AttendanceDay, AttendanceSegment, ExceptionItem, Shift,
+)
+from app.db.tenant.models.organisation import Company, Site
+from app.db.tenant.models.platform import AuditLog
+from app.api.v1.attendance_engine import (
+    _day_snapshot, _persist_adjustment, _sync_exceptions, recompute_day,
+)
+from zoneinfo import ZoneInfo
 from app.db.tenant.models.people import Employee
 
 router = APIRouter(prefix="/attendance/exceptions", tags=["attendance-exceptions"])
@@ -175,5 +186,184 @@ def get_exception(
     except ScopeViolation:
         raise AppError("record_not_found", "Exception not found", 404) from None
     return _to_out(exc)
+
+
+_DEFAULT_REASON_CODES = (
+    "device_down",
+    "forgot_clock",
+    "approved_site_work",
+    "system_correction",
+    "other",
+)
+
+
+def _current_reason_codes(db) -> tuple:
+    company = db.scalar(select(Company))
+    if company is None:
+        return _DEFAULT_REASON_CODES
+    settings = company.settings or {}
+    att = settings.get("attendance") or {}
+    codes = att.get("reason_codes")
+    if isinstance(codes, list) and codes and all(isinstance(c, str) for c in codes):
+        return tuple(codes)
+    return _DEFAULT_REASON_CODES
+
+
+def _validate_reason(db, reason_code: str, note: str | None) -> None:
+    allowed = _current_reason_codes(db)
+    if reason_code not in allowed:
+        raise AppError(
+            "invalid_reason_code",
+            f"reason_code must be one of {allowed}",
+            status.HTTP_400_BAD_REQUEST,
+            {"reason_code": reason_code},
+        )
+    if reason_code == "other":
+        if note is None or len(note.strip()) < 10:
+            raise AppError(
+                "note_required",
+                "reason_code 'other' requires a note of at least 10 characters",
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+
+def _site_tz_for_employee(db, employee) -> ZoneInfo:
+    if employee.site_id is not None:
+        site = db.get(Site, employee.site_id)
+        if site is not None and site.timezone:
+            return ZoneInfo(site.timezone)
+    company = db.scalar(select(Company))
+    if company is None:
+        raise AppError("company_missing", "Company row not found", 500)
+    return ZoneInfo(company.default_timezone)
+
+
+def _day_for(db, employee_id, work_date):
+    return db.scalar(select(AttendanceDay).where(
+        AttendanceDay.employee_id == employee_id,
+        AttendanceDay.work_date == work_date,
+    ))
+
+
+def _approve_pending_segments(db, day) -> int:
+    segs = db.scalars(select(AttendanceSegment).where(
+        AttendanceSegment.attendance_day_id == day.id,
+        AttendanceSegment.overtime_status == "pending",
+    )).all()
+    for s in segs:
+        s.overtime_status = "approved"
+    db.flush()
+    return len(segs)
+
+
+def _serialize_adj(adj) -> dict:
+    return {
+        "id": str(adj.id),
+        "employee_id": str(adj.employee_id),
+        "work_date": adj.work_date.isoformat(),
+        "outcome": adj.outcome,
+        "time_in": adj.time_in.isoformat() if adj.time_in else None,
+        "time_out": adj.time_out.isoformat() if adj.time_out else None,
+        "minutes": adj.minutes,
+        "reason_code": adj.reason_code,
+        "note": adj.note,
+        "batch_id": str(adj.batch_id) if adj.batch_id else None,
+        "created_by": str(adj.created_by) if adj.created_by else None,
+    }
+
+
+def _apply_adjustment(db, user, employee_id, work_date, custom,
+                      *, batch_id=None, request_id=None):
+    day_before = _day_for(db, employee_id, work_date)
+    if day_before is not None and day_before.locked:
+        raise AppError(
+            "day_locked",
+            "The payroll period containing this day is closed; corrections after close come with the payroll period feature",
+            status.HTTP_409_CONFLICT,
+        )
+    adj = _persist_adjustment(
+        db,
+        employee_id=employee_id,
+        work_date=work_date,
+        outcome=custom.outcome,
+        time_in=custom.time_in,
+        time_out=custom.time_out,
+        reason_code=custom.reason_code,
+        note=custom.note,
+        created_by=getattr(user, "id", None),
+        batch_id=batch_id,
+    )
+    recompute_day(db, employee_id, work_date)
+    day_after = _day_for(db, employee_id, work_date)
+    adj.new_value = _day_snapshot(day_after)
+    db.add(AuditLog(
+        id=uuid.uuid4(),
+        actor_user_id=getattr(user, "id", None),
+        actor_role=getattr(user, "role", None),
+        entity_type="adjustment",
+        entity_id=str(adj.id),
+        action="attendance.adjustment.create",
+        old_value=adj.old_value,
+        new_value={"adjustment": _serialize_adj(adj)},
+        request_id=request_id,
+    ))
+    db.commit()
+    return adj.id, (day_after.status if day_after else None)
+
+
+def _suggested_adjustment_for(db, exc, day, employee):
+    """Return a CustomAdjustmentIn or None (acceptance-only), or raise."""
+    t = exc.type
+    if t == "missing_out":
+        if day is None or day.shift_id is None or day.first_in is None:
+            raise AppError(
+                "suggestion_requires_params",
+                "missing_out with no shift cannot be auto-applied; use custom",
+                status.HTTP_400_BAD_REQUEST,
+            )
+        shift = db.get(Shift, day.shift_id)
+        if shift is None:
+            raise AppError("suggestion_requires_params", "shift not found", status.HTTP_400_BAD_REQUEST)
+        tz = _site_tz_for_employee(db, employee)
+        end_local = datetime.combine(day.work_date, shift.start_time, tzinfo=tz) + timedelta(minutes=shift.length_minutes)
+        return CustomAdjustmentIn(
+            outcome="worked",
+            time_in=day.first_in,
+            time_out=end_local.astimezone(timezone.utc),
+            reason_code="forgot_clock",
+            note="Auto: apply shift end time",
+        )
+    if t == "too_long":
+        if day is None or day.shift_id is None or day.first_in is None:
+            raise AppError("suggestion_requires_params", "too_long with no shift", status.HTTP_400_BAD_REQUEST)
+        shift = db.get(Shift, day.shift_id)
+        if shift is None:
+            raise AppError("suggestion_requires_params", "shift not found", status.HTTP_400_BAD_REQUEST)
+        return CustomAdjustmentIn(
+            outcome="worked",
+            time_in=day.first_in,
+            time_out=day.first_in + timedelta(minutes=shift.max_shift_minutes),
+            reason_code="system_correction",
+            note="Auto: truncate to max shift",
+        )
+    if t == "absent_expected":
+        return CustomAdjustmentIn(
+            outcome="day_off",
+            reason_code="system_correction",
+            note="Auto: mark as day off",
+        )
+    if t == "no_shift_match":
+        raise AppError(
+            "suggestion_requires_params",
+            "no_shift_match requires choosing a shift via 'custom'",
+            status.HTTP_400_BAD_REQUEST,
+        )
+    if t in ("low_confidence", "overtime_unapproved", "device_clock_gap", "duplicate", "employee_query"):
+        return None
+    raise AppError(
+        "unknown_suggestion",
+        f"No suggestion for exception type {t}",
+        status.HTTP_400_BAD_REQUEST,
+    )
 
 # END OF FILE
