@@ -100,6 +100,8 @@ def _mk_rule(session, shift_id, day_type, kind, *, tier=1, up_to=None, value="1.
 
 
 def _mk_calendar(session, year, dates):
+    if not dates:
+        dates = [date(year, 12, 25)]
     for d in dates:
         session.add(CountryCalendar(
             country_code="ZA", holiday_date=d, name=f"H-{d.isoformat()}",
