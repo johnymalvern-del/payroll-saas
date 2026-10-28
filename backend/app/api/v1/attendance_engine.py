@@ -308,7 +308,32 @@ def build_day(
     holiday_set: set[date],
     site_tz,
     rules_by_key: dict,
+    adjustment=None,
 ) -> DayBuildResult:
+    if adjustment is not None and getattr(adjustment, "outcome", None) == "revert":
+        adjustment = None
+    if adjustment is not None and getattr(adjustment, "outcome", None) in ("leave", "sick", "absent", "day_off"):
+        adj_flags: list[str] = []
+        if adjustment.outcome in ("leave", "sick"):
+            adj_flags.append("unreconciled_leave")
+        return DayBuildResult(
+            work_date=work_date,
+            status=adjustment.outcome,
+            flags=adj_flags,
+        )
+    if adjustment is not None and getattr(adjustment, "outcome", None) == "worked":
+        tin = getattr(adjustment, "time_in", None)
+        tout = getattr(adjustment, "time_out", None)
+        if tin is None or tout is None:
+            return DayBuildResult(
+                work_date=work_date,
+                status="missing_punch",
+                flags=["incomplete_adjustment"],
+            )
+        session = Session(
+            start=tin, end=tout, shift_id=session.shift_id,
+            source_punch_ids=[], open=False, flags=list(session.flags),
+        )
     if session.end is None:
         return DayBuildResult(
             work_date=work_date, status="missing_punch",

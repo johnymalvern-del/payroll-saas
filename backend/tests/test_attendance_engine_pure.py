@@ -56,11 +56,12 @@ def weekday_rules(ot_t1=30, ot_t2=None):
     return r
 
 
-def build(sh, start_utc, end_utc, work_date, rules, holidays=None):
+def build(sh, start_utc, end_utc, work_date, rules, holidays=None, adjustment=None):
     sess = Session(start=start_utc, end=end_utc, shift_id=sh.id,
                    source_punch_ids=[uuid.uuid4()], open=False)
     return build_day(work_date=work_date, session=sess, shift=sh,
-                     holiday_set=holidays or set(), site_tz=SA, rules_by_key=rules)
+                     holiday_set=holidays or set(), site_tz=SA, rules_by_key=rules,
+                     adjustment=adjustment)
 
 
 @pytest.mark.parametrize("start_min,mode,expected_min", [
@@ -296,5 +297,40 @@ def test_minutes_invariant():
     rules = weekday_rules(ot_t1=30, ot_t2="open")
     r = build(sh, sa_utc(2024, 5, 1, 8, 0), sa_utc(2024, 5, 1, 18, 0), date(2024, 5, 1), rules)
     assert sum(s.minutes for s in r.segments) == r.worked_minutes
+
+
+def _adj(outcome, time_in=None, time_out=None):
+    return SN(outcome=outcome, time_in=time_in, time_out=time_out)
+
+
+def test_build_day_with_worked_adjustment_overrides_punches():
+    sh = mk_shift()
+    adj = _adj("worked", sa_utc(2024,5,1,8,0), sa_utc(2024,5,1,17,0))
+    r = build(sh, sa_utc(2024,5,1,8,0), sa_utc(2024,5,1,10,0),
+              date(2024,5,1), weekday_rules(), adjustment=adj)
+    assert r.normal_minutes == 420
+    assert r.overtime_minutes == 60
+
+
+def test_build_day_with_leave_adjustment():
+    sh = mk_shift()
+    adj = _adj("leave")
+    r = build(sh, sa_utc(2024,5,1,8,0), sa_utc(2024,5,1,17,0),
+              date(2024,5,1), weekday_rules(), adjustment=adj)
+    assert r.status == "leave"
+    assert r.normal_minutes == 0
+    assert r.overtime_minutes == 0
+    assert len(r.segments) == 0
+    assert "unreconciled_leave" in r.flags
+
+
+def test_build_day_with_revert_adjustment_uses_punches():
+    sh = mk_shift()
+    adj = _adj("revert", sa_utc(2024,5,1,8,0), sa_utc(2024,5,1,10,0))
+    r = build(sh, sa_utc(2024,5,1,8,0), sa_utc(2024,5,1,17,0),
+              date(2024,5,1), weekday_rules(), adjustment=adj)
+    assert r.normal_minutes == 420
+    assert r.overtime_minutes == 60
+
 
 # END OF FILE
