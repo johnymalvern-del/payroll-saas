@@ -22,6 +22,7 @@ from app.api.v1.work_patterns import router as work_patterns_router
 from app.api.v1.attendance import router as attendance_router
 from app.api.v1.exceptions import router as exceptions_router
 from app.api.v1.adjustments import router as adjustments_router
+from app.api.v1.sheet import router as sheet_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(register_router)
@@ -47,3 +48,4 @@ api_router.include_router(punches_router)
 api_router.include_router(attendance_router)
 api_router.include_router(exceptions_router)
 api_router.include_router(adjustments_router)
+api_router.include_router(sheet_router)
