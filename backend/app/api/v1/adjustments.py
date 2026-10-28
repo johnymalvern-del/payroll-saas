@@ -214,7 +214,7 @@ def bulk_adjust(
             "bulk_validation_failed",
             "One or more items failed validation; nothing was applied. Use the dry-run results to fix the batch.",
             status.HTTP_400_BAD_REQUEST,
-            {"results": [r.model_dump() for r in _emit_results()]},
+            {"results": [r.model_dump(mode="json") for r in _emit_results()]},
         )
 
     db.info["bulk_no_commit"] = True
