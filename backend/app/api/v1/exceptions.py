@@ -20,6 +20,7 @@ bulk_resolve endpoints, added in 2C-3b-ii.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -307,7 +308,8 @@ def _apply_adjustment(db, user, employee_id, work_date, custom,
         new_value={"adjustment": _serialize_adj(adj)},
         request_id=request_id,
     ))
-    db.commit()
+    if not db.info.get("bulk_no_commit"):
+        db.commit()
     return adj.id, (day_after.status if day_after else None)
 
 
@@ -459,5 +461,67 @@ def resolve_exception(
         adjustment_id=adjustment_id,
         day_status=day_status,
     )
+
+
+_ERROR_MESSAGES = {
+    "record_not_found": "Exception not found or out of scope",
+    "cannot_adjust_own": "A user cannot adjust their own attendance",
+    "exception_not_open": "Exception is not open",
+    "day_locked": "Day is in a closed payroll period",
+    "note_required": "Dismiss requires a note of at least 3 characters",
+    "custom_missing": "action='custom' requires custom_adjustment",
+    "invalid_reason_code": "Reason code is not in the current list",
+    "note_too_short": "reason_code 'other' requires a note of at least 10 characters",
+    "suggestion_requires_params": "This exception requires a custom adjustment; apply_suggestion cannot proceed",
+    "token_mismatch": "Payload does not match the dry-run token",
+    "batch_failed": "Batch aborted due to an unexpected error",
+}
+
+
+def _compute_bulk_token(items) -> str:
+    payload = [item.model_dump(mode="json") for item in items]
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _pre_validate_bulk_item(db, user, item, exc):
+    """Return an error code (str) if invalid, else None. Read-only."""
+    if exc is None:
+        return "record_not_found"
+    if getattr(user, "employee_id", None) is not None and user.employee_id == exc.employee_id:
+        return "cannot_adjust_own"
+    try:
+        assert_in_scope(user, exc.employee_id, db)
+    except ScopeViolation:
+        return "record_not_found"
+    if exc.status != "open":
+        return "exception_not_open"
+    day = _day_for(db, exc.employee_id, exc.work_date)
+    if day is not None and day.locked:
+        return "day_locked"
+    if item.action == "dismiss":
+        if item.note is None or len(item.note.strip()) < 3:
+            return "note_required"
+        return None
+    if item.action == "custom":
+        if item.custom_adjustment is None:
+            return "custom_missing"
+        try:
+            _validate_reason(db, item.custom_adjustment.reason_code, item.custom_adjustment.note)
+        except AppError as e:
+            return e.code
+        return None
+    # apply_suggestion
+    employee = db.get(Employee, exc.employee_id)
+    try:
+        ca = _suggested_adjustment_for(db, exc, day, employee)
+    except AppError as e:
+        return e.code
+    if ca is not None:
+        try:
+            _validate_reason(db, ca.reason_code, ca.note)
+        except AppError as e:
+            return e.code
+    return None
 
 # END OF FILE

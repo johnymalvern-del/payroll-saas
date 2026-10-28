@@ -714,8 +714,11 @@ def _persist_day(db, employee_id, work_date, *, status, first_in, last_out,
                 source_refs=[str(pid) for pid in seg.source_punch_ids]))
     day.computed_at = datetime.now(timezone.utc)
     _sync_exceptions(db, employee_id, work_date, day)
-    db.commit()
-    db.refresh(day)
+    if db.info.get("bulk_no_commit"):
+        db.flush()
+    else:
+        db.commit()
+        db.refresh(day)
     return day
 
 
