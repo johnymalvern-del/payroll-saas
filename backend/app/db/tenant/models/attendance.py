@@ -82,6 +82,12 @@ class Shift(Base, TimestampMixin):
     salaried_premium_mode: Mapped[str] = mapped_column(
         String(20), nullable=False, default="full", server_default="full"
     )
+    grace_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="threshold", server_default="threshold"
+    )
+    pay_early_arrival: Mapped[bool] = mapped_column(
+        Boolean(), nullable=False, default=False, server_default="false"
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean(), nullable=False, default=True, server_default=true()
     )
@@ -264,5 +270,123 @@ class EmployeeWorkPattern(Base, TimestampMixin):
     )
     effective_from: Mapped[date] = mapped_column(Date(), nullable=False)
     effective_to: Mapped[date | None] = mapped_column(Date(), nullable=True)
+
+
+class AttendanceDay(Base, TimestampMixin):
+    """One row per (employee, work_date).
+
+    work_date is the local date on which the shift STARTS - the day the
+    shift belongs to. A night shift that runs from 22:00 to 06:00 the next
+    morning is ONE AttendanceDay with work_date = the starting date; its
+    attendance_segment rows may carry local_date values on two consecutive
+    calendar dates. This is deliberate: the day is the shift-start day,
+    the segments are the real calendar pieces.
+
+    worked_minutes = normal_minutes + overtime_minutes (paid minutes).
+    raw_minutes is elapsed time minus unpaid break, before rounding and
+    grace, kept for audit and drill-down.
+
+    source_version increments ONLY when the computed output (status,
+    minutes, segments, flags) actually changes. computed_at updates on
+    every successful recompute. Phase 4's payslip comparison uses
+    source_version, so a no-op recompute must not look like a change.
+    """
+
+    __tablename__ = "attendance_day"
+    __table_args__ = (
+        UniqueConstraint("employee_id", "work_date", name="uq_attendance_day_emp_date"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    employee_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("employee.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    work_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    first_in: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_out: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    worked_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default="0")
+    normal_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default="0")
+    overtime_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default="0")
+    raw_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default="0")
+    shift_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("shift.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    flags: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    source_version: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default="0")
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    locked: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default="false")
+    row_version: Mapped[int] = mapped_column(Integer(), nullable=False, default=1, server_default="1")
+
+    segments: Mapped[list["AttendanceSegment"]] = relationship(
+        "AttendanceSegment",
+        cascade="all, delete-orphan",
+        order_by="AttendanceSegment.local_date, AttendanceSegment.kind, AttendanceSegment.tier",
+    )
+
+
+class AttendanceSegment(Base, TimestampMixin):
+    """One rate-relevant piece of work.
+
+    Cut at local midnight, at day-type boundaries, and at rate-tier
+    boundaries. local_date is the real calendar date of this segment; it
+    may differ from the parent day's work_date on a night shift.
+
+    rate_method and rate_value record the applicable shift_rate_rule at
+    build time. A multiplier needs an hourly rate to become money; that
+    conversion is Phase 4 and is not done here.
+    """
+
+    __tablename__ = "attendance_segment"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    attendance_day_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("attendance_day.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    local_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    day_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    tier: Mapped[int] = mapped_column(Integer(), nullable=False)
+    minutes: Mapped[int] = mapped_column(Integer(), nullable=False)
+    rate_method: Mapped[str] = mapped_column(String(20), nullable=False)
+    rate_value: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    overtime_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    source_refs: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+
+
+class CountryCalendar(Base, TimestampMixin):
+    """Official country holiday dates, loaded from a CSV the user supplies.
+
+    The tenant's country comes from company.country_code (default ZA). The
+    loader refuses to load a year twice unless --replace is given. day-build
+    raises holiday_calendar_missing if a requested year has no rows for the
+    country; a missing calendar is NEVER read as "no holidays".
+    """
+
+    __tablename__ = "country_calendar"
+    __table_args__ = (
+        UniqueConstraint("country_code", "holiday_date", name="uq_country_calendar_code_date"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    country_code: Mapped[str] = mapped_column(String(2), nullable=False)
+    holiday_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    source_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    loaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 # END OF FILE

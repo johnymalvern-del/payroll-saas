@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 
 _ROUNDING_MODES = ('nearest', 'up', 'down')
 _SALARIED_PREMIUM_MODES = ('full', 'premium_only')
+_GRACE_MODES = ('threshold', 'allowance')
 
 
 class ShiftOut(BaseModel):
@@ -26,6 +27,8 @@ class ShiftOut(BaseModel):
     max_shift_minutes: int
     match_tolerance_minutes: int
     salaried_premium_mode: str
+    grace_mode: str
+    pay_early_arrival: bool
     is_active: bool
     row_version: int
 
@@ -45,6 +48,8 @@ class ShiftCreateIn(BaseModel):
     max_shift_minutes: int = Field(..., gt=0)
     match_tolerance_minutes: int = Field(default=60, ge=0)
     salaried_premium_mode: str = Field(default='full')
+    grace_mode: str = Field(default='threshold')
+    pay_early_arrival: bool = False
 
     @field_validator('rounding_mode')
     @classmethod
@@ -58,6 +63,13 @@ class ShiftCreateIn(BaseModel):
     def _v_salaried(cls, v: str) -> str:
         if v not in _SALARIED_PREMIUM_MODES:
             raise ValueError(f'salaried_premium_mode must be one of {_SALARIED_PREMIUM_MODES}')
+        return v
+
+    @field_validator('grace_mode')
+    @classmethod
+    def _v_grace_mode(cls, v: str) -> str:
+        if v not in _GRACE_MODES:
+            raise ValueError(f'grace_mode must be one of {_GRACE_MODES}')
         return v
 
 
@@ -77,6 +89,8 @@ class ShiftPatchIn(BaseModel):
     max_shift_minutes: int | None = Field(default=None, gt=0)
     match_tolerance_minutes: int | None = Field(default=None, ge=0)
     salaried_premium_mode: str | None = None
+    grace_mode: str | None = None
+    pay_early_arrival: bool | None = None
     is_active: bool | None = None
 
 

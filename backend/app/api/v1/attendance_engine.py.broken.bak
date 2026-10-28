@@ -1,0 +1,104 @@
+$fixPy = @'
+import pathlib
+eng = pathlib.Path(r"C:\xampp\htdocs\Payroll\backend\app\api\v1\attendance_engine.py")
+tst = pathlib.Path(r"C:\xampp\htdocs\Payroll\backend\tests\test_attendance_engine_db.py")
+
+# --- Fix 1: holiday year check + range-filtered return ---
+t = eng.read_text(encoding="utf-8")
+old = '''def _load_holiday_set(db, country_code, from_date, to_date):
+    years = set(range(from_date.year, to_date.year + 1))
+    rows = db.scalars(select(CountryCalendar).where(
+        CountryCalendar.country_code == country_code,
+        CountryCalendar.holiday_date >= from_date,
+        CountryCalendar.holiday_date <= to_date,
+    )).all()
+    by_year = {}
+    for r in rows:
+        by_year[r.holiday_date.year] = by_year.get(r.holiday_date.year, 0) + 1
+    for y in years:
+        if by_year.get(y, 0) == 0:
+            raise AppError("holiday_calendar_missing",
+                f"country_calendar has no rows for {country_code} in {y}", 400,
+                {"country_code": country_code, "year": y})
+    return {r.holiday_date for r in rows}'''
+new = '''def _load_holiday_set(db, country_code, from_date, to_date):
+    years = set(range(from_date.year, to_date.year + 1))
+    year_start = date(min(years), 1, 1)
+    year_end = date(max(years), 12, 31)
+    rows = db.scalars(select(CountryCalendar).where(
+        CountryCalendar.country_code == country_code,
+        CountryCalendar.holiday_date >= year_start,
+        CountryCalendar.holiday_date <= year_end,
+    )).all()
+    by_year = {}
+    for r in rows:
+        by_year[r.holiday_date.year] = by_year.get(r.holiday_date.year, 0) + 1
+    for y in years:
+        if by_year.get(y, 0) == 0:
+            raise AppError("holiday_calendar_missing",
+                f"country_calendar has no rows for {country_code} in {y}", 400,
+                {"country_code": country_code, "year": y})
+    return {r.holiday_date for r in rows if from_date <= r.holiday_date <= to_date}'''
+assert t.count(old) == 1, f"holiday anchor {t.count(old)}"
+t = t.replace(old, new, 1)
+
+# --- Fix 2: advisory lock with explicit int4 cast ---
+old = '''def _advisory_lock_key(employee_id, work_date):
+    emp = int.from_bytes(employee_id.bytes[:8], "big", signed=True)
+    days = (work_date - date(1970, 1, 1)).days
+    return emp, days
+
+
+def recompute_day(db, employee_id, work_date):
+    k1, k2 = _advisory_lock_key(employee_id, work_date)
+    db.execute(text("SELECT pg_advisory_xact_lock(:k1, :k2)"), {"k1": k1, "k2": k2})
+    employee = db.get(Employee, employee_id)'''
+new = '''def _advisory_lock_key(employee_id, work_date):
+    emp_low = int.from_bytes(employee_id.bytes[:4], "big", signed=False) & 0x7FFFFFFF
+    days = (work_date - date(1970, 1, 1)).days & 0x7FFFFFFF
+    return emp_low, days
+
+
+def recompute_day(db, employee_id, work_date):
+    k1, k2 = _advisory_lock_key(employee_id, work_date)
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(CAST(:k1 AS int), CAST(:k2 AS int))"),
+        {"k1": k1, "k2": k2},
+    )
+    employee = db.get(Employee, employee_id)'''
+assert t.count(old) == 1, f"lock anchor {t.count(old)}"
+t = t.replace(old, new, 1)
+eng.write_text(t, encoding="utf-8")
+print("patched attendance_engine.py (2 changes)")
+
+# --- Fix 3: _mk_calendar seeds a sanity date when dates is empty ---
+t = tst.read_text(encoding="utf-8")
+old = '''def _mk_calendar(session, year, dates):
+    for d in dates:
+        session.add(CountryCalendar(
+            country_code="ZA", holiday_date=d, name=f"H-{d.isoformat()}",
+            source_ref="test",
+        ))
+    session.commit()'''
+new = '''def _mk_calendar(session, year, dates):
+    if not dates:
+        dates = [date(year, 12, 25)]
+    for d in dates:
+        session.add(CountryCalendar(
+            country_code="ZA", holiday_date=d, name=f"H-{d.isoformat()}",
+            source_ref="test",
+        ))
+    session.commit()'''
+assert t.count(old) == 1, f"calendar helper anchor {t.count(old)}"
+t = t.replace(old, new, 1)
+tst.write_text(t, encoding="utf-8")
+print("patched test_attendance_engine_db.py (1 change)")
+'@
+$tmp = 'C:\xampp\htdocs\Payroll\backend\_fix_2b3b.py'
+[System.IO.File]::WriteAllText($tmp, $fixPy, (New-Object System.Text.UTF8Encoding($false)))
+cd C:\xampp\htdocs\Payroll\backend
+python $tmp
+Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+python -c "from app.api.v1.attendance_engine import recompute_day, ensure_days, _load_holiday_set; print('import OK')"
+python -m pytest tests/test_attendance_engine_db.py -v
+Write-Host '2B-3b FIX OK'

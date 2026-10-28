@@ -52,6 +52,8 @@ from app.core.scope import (
     assert_site_in_scope,
 )
 from app.db.tenant.models.organisation import Branch, Site
+from app.db.tenant.models.attendance import Punch
+from app.db.tenant.models.devices import Device
 from app.db.tenant.models.people import Employee
 from app.db.tenant.models.platform import AuditLog
 from app.services.audit_redact import redact_for_audit
@@ -425,12 +427,20 @@ def delete_site(
         )
         or 0
     )
-    if employee_count > 0:
+    punch_count = int(
+        db.scalar(select(func.count()).select_from(Punch).where(Punch.site_id == site.id))
+        or 0
+    )
+    device_count = int(
+        db.scalar(select(func.count()).select_from(Device).where(Device.site_id == site.id))
+        or 0
+    )
+    if employee_count > 0 or punch_count > 0 or device_count > 0:
         raise AppError(
             "site_in_use",
-            f"Cannot delete site: {employee_count} employee(s) reference it",
+            f"Cannot delete site: employees={employee_count}, punches={punch_count}, devices={device_count}",
             status.HTTP_409_CONFLICT,
-            {"employees": employee_count},
+            {"employees": employee_count, "punches": punch_count, "devices": device_count},
         )
 
     old_snapshot = _to_out(site).model_dump(mode="json")

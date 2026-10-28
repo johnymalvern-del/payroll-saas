@@ -19,7 +19,7 @@ from app.api.v1.shifts_schemas import (
 )
 from app.core.errors import AppError
 from app.core.permissions import Permission, require_permission
-from app.db.tenant.models.attendance import Shift, ShiftRateRule, WorkPatternDay
+from app.db.tenant.models.attendance import AttendanceDay, Shift, ShiftRateRule, WorkPatternDay
 from app.db.tenant.models.people import Employee
 from app.db.tenant.models.platform import AuditLog
 from app.services.audit_redact import redact_for_audit
@@ -45,6 +45,7 @@ def _to_out(s: Shift) -> ShiftOut:
         max_shift_minutes=s.max_shift_minutes,
         match_tolerance_minutes=s.match_tolerance_minutes,
         salaried_premium_mode=s.salaried_premium_mode,
+        grace_mode=s.grace_mode, pay_early_arrival=s.pay_early_arrival,
         is_active=s.is_active, row_version=s.row_version,
     )
 
@@ -86,7 +87,8 @@ def _in_use_counts(db: Any, shift_id: uuid.UUID) -> dict[str, int]:
     rules = int(db.scalar(select(func.count()).select_from(ShiftRateRule).where(ShiftRateRule.shift_id == shift_id)) or 0)
     wpd = int(db.scalar(select(func.count()).select_from(WorkPatternDay).where(WorkPatternDay.expected_shift_id == shift_id)) or 0)
     emps = int(db.scalar(select(func.count()).select_from(Employee).where(Employee.default_shift_id == shift_id)) or 0)
-    return {'rate_rules': rules, 'work_pattern_days': wpd, 'employees': emps}
+    att = int(db.scalar(select(func.count()).select_from(AttendanceDay).where(AttendanceDay.shift_id == shift_id)) or 0)
+    return {'rate_rules': rules, 'work_pattern_days': wpd, 'employees': emps, 'attendance_days': att}
 
 
 @router.get('', response_model=ShiftListOut)
@@ -143,6 +145,7 @@ def create_shift(
         max_shift_minutes=payload.max_shift_minutes,
         match_tolerance_minutes=payload.match_tolerance_minutes,
         salaried_premium_mode=payload.salaried_premium_mode,
+        grace_mode=payload.grace_mode, pay_early_arrival=payload.pay_early_arrival,
         is_active=True, row_version=1,
     )
     db.add(shift)
