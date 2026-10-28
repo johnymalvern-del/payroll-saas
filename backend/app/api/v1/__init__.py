@@ -19,6 +19,8 @@ from app.api.v1.sites import router as sites_router
 from app.api.v1.users import router as users_router
 from app.api.v1.work_patterns import router as work_patterns_router
 
+from app.api.v1.attendance import router as attendance_router
+
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(register_router)
 api_router.include_router(auth_router)
@@ -40,3 +42,4 @@ api_router.include_router(devices_router)
 api_router.include_router(punches_router)
 
 # END OF FILE
+api_router.include_router(attendance_router)
