@@ -870,7 +870,12 @@ def recompute_day(db, employee_id, work_date):
     total_raw = sum(r.raw_minutes for r in results)
     all_segments = [seg for r in results for seg in r.segments]
     primary_shift_id = day_sessions[0].shift_id if day_sessions else None
-    status = "worked" if total_worked > 0 else "missing_punch"
+    if len(results) == 1:
+        status = results[0].status
+    elif total_worked > 0:
+        status = "worked"
+    else:
+        status = "missing_punch"
     return _persist_day(
         db, employee.id, work_date, status=status,
         first_in=first_in, last_out=last_out,
