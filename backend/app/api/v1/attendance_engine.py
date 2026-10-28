@@ -33,6 +33,7 @@ from sqlalchemy import func, or_, select, text
 from app.core.errors import AppError
 from app.core.rate_lookup import find_rule_for_minute, NoApplicableRateRule
 from app.db.tenant.models.attendance import (
+    Adjustment,
     AttendanceDay, AttendanceSegment, CountryCalendar, EmployeeWorkPattern,
     PublicHolidayTenant, Punch, Shift, ShiftRateRule, WorkPattern, WorkPatternDay,
 )
@@ -690,6 +691,8 @@ def _persist_day(db, employee_id, work_date, *, status, first_in, last_out,
         day.row_version = day.row_version + 1
         db.flush()
     if content_changed:
+        day.reviewed_at = None
+        day.reviewed_by = None
         day.source_version = day.source_version + 1
         db.execute(AttendanceSegment.__table__.delete().where(
             AttendanceSegment.attendance_day_id == day.id))
@@ -768,6 +771,8 @@ def recompute_day(db, employee_id, work_date):
     expected, expected_shift_id = _employee_expected(db, employee, work_date)
     default_shift_id = employee.default_shift_id
 
+    adj = _load_adjustments(db, employee_id, work_date)
+
     win_start = datetime.combine(work_date - timedelta(days=1), time(20, 0), tzinfo=tz)
     win_end = datetime.combine(work_date + timedelta(days=2), time(6, 0), tzinfo=tz)
     punch_rows = db.scalars(select(Punch).where(
@@ -778,6 +783,10 @@ def recompute_day(db, employee_id, work_date):
     ).order_by(Punch.effective_time)).all()
 
     if not punch_rows:
+        if adj is not None and adj.outcome != "revert":
+            return _build_day_from_adjustment_only(
+                db, employee, work_date, emp_holidays, today_local, adj,
+                default_shift_id, expected_shift_id, tz, existing)
         return _no_punch_day(db, employee, work_date, emp_holidays, expected,
                              today_local, existing)
 
@@ -829,7 +838,8 @@ def recompute_day(db, employee_id, work_date):
         rules = _load_rate_rules(db, s.shift_id, work_date)
         result = build_day(
             work_date=work_date, session=s, shift=sh,
-            holiday_set=emp_holidays, site_tz=tz, rules_by_key=rules)
+            holiday_set=emp_holidays, site_tz=tz, rules_by_key=rules,
+            adjustment=adj)
         for f in result.flags:
             if f not in day_flags:
                 day_flags.append(f)
@@ -854,6 +864,132 @@ def recompute_day(db, employee_id, work_date):
         first_in=first_in, last_out=last_out,
         normal=total_normal, overtime=total_ot, worked=total_worked, raw=total_raw,
         shift_id=primary_shift_id, flags=day_flags, segments=all_segments,
+        existing=existing)
+
+
+def _load_adjustments(db, employee_id, work_date):
+    """Return the latest active Adjustment for (employee, work_date), or None.
+
+    C6: adjustments are append-only; the latest one wins. If the latest is
+    outcome='revert', build_day treats it as no adjustment and uses punches.
+    """
+    return db.scalar(
+        select(Adjustment)
+        .where(
+            Adjustment.employee_id == employee_id,
+            Adjustment.work_date == work_date,
+        )
+        .order_by(Adjustment.created_at.desc(), Adjustment.id.desc())
+        .limit(1)
+    )
+
+
+def _day_snapshot(day):
+    if day is None:
+        return None
+    return {
+        "id": str(day.id),
+        "employee_id": str(day.employee_id),
+        "work_date": day.work_date.isoformat(),
+        "status": day.status,
+        "first_in": day.first_in.isoformat() if day.first_in else None,
+        "last_out": day.last_out.isoformat() if day.last_out else None,
+        "worked_minutes": day.worked_minutes,
+        "normal_minutes": day.normal_minutes,
+        "overtime_minutes": day.overtime_minutes,
+        "raw_minutes": day.raw_minutes,
+        "shift_id": str(day.shift_id) if day.shift_id else None,
+        "flags": list(day.flags or []),
+        "source_version": day.source_version,
+        "locked": day.locked,
+    }
+
+
+def _persist_adjustment(db, *, employee_id, work_date, outcome, time_in, time_out,
+                        reason_code, note, created_by, batch_id=None):
+    """Insert one Adjustment (append-only). Returns the row.
+
+    Caller orchestrates: check day is not locked, call this, call
+    recompute_day, refetch the day, set adj.new_value from the snapshot,
+    then commit. reason_code validation is the endpoint's job, not this
+    helper's (C7).
+    """
+    day_before = db.scalar(select(AttendanceDay).where(
+        AttendanceDay.employee_id == employee_id,
+        AttendanceDay.work_date == work_date,
+    ))
+    old_snapshot = _day_snapshot(day_before) if day_before is not None else None
+    minutes = None
+    if outcome == "worked" and time_in is not None and time_out is not None:
+        minutes = max(0, int((time_out - time_in).total_seconds() / 60))
+    adj = Adjustment(
+        employee_id=employee_id,
+        work_date=work_date,
+        outcome=outcome,
+        time_in=time_in,
+        time_out=time_out,
+        minutes=minutes,
+        reason_code=reason_code,
+        note=note,
+        created_by=created_by,
+        batch_id=batch_id,
+        old_value=old_snapshot,
+    )
+    db.add(adj)
+    db.flush()
+    return adj
+
+
+def _build_day_from_adjustment_only(db, employee, work_date, holidays, today_local,
+                                    adj, default_shift_id, expected_shift_id, tz, existing):
+    """Build a day from an adjustment alone (no punches in the window).
+
+    Called only when an adjustment exists, is not 'revert', and there are
+    no punch rows. leave/sick/absent/day_off are handled directly; 'worked'
+    synthesises a session from the adjustment's times.
+    """
+    if adj.outcome in ("leave", "sick", "absent", "day_off"):
+        flags = ["unreconciled_leave"] if adj.outcome in ("leave", "sick") else []
+        return _persist_day(
+            db, employee.id, work_date, status=adj.outcome,
+            first_in=None, last_out=None, normal=0, overtime=0, worked=0, raw=0,
+            shift_id=None, flags=flags, segments=[], existing=existing)
+    if adj.time_in is None or adj.time_out is None:
+        return _persist_day(
+            db, employee.id, work_date, status="missing_punch",
+            first_in=None, last_out=None, normal=0, overtime=0, worked=0, raw=0,
+            shift_id=None, flags=["incomplete_adjustment"], segments=[],
+            existing=existing)
+    shift = None
+    if default_shift_id is not None:
+        shift = db.get(Shift, default_shift_id)
+    elif expected_shift_id is not None:
+        shift = db.get(Shift, expected_shift_id)
+    if shift is None:
+        candidates = _load_shift_candidates(db)
+        local_in = adj.time_in.astimezone(tz)
+        sid, _ = detect_shift(local_in, candidates, tolerance_minutes=60)
+        if sid:
+            shift = db.get(Shift, sid)
+    if shift is None:
+        return _persist_day(
+            db, employee.id, work_date, status="no_shift_match",
+            first_in=adj.time_in, last_out=adj.time_out,
+            normal=0, overtime=0, worked=0, raw=0,
+            shift_id=None, flags=["no_shift_match"], segments=[], existing=existing)
+    rules = _load_rate_rules(db, shift.id, work_date)
+    dummy_session = Session(
+        start=adj.time_in, end=adj.time_out, shift_id=shift.id,
+        source_punch_ids=[], open=False, flags=[])
+    result = build_day(
+        work_date=work_date, session=dummy_session, shift=shift,
+        holiday_set=holidays, site_tz=tz, rules_by_key=rules, adjustment=adj)
+    return _persist_day(
+        db, employee.id, work_date, status=result.status,
+        first_in=result.first_in, last_out=result.last_out,
+        normal=result.normal_minutes, overtime=result.overtime_minutes,
+        worked=result.worked_minutes, raw=result.raw_minutes,
+        shift_id=shift.id, flags=result.flags, segments=result.segments,
         existing=existing)
 
 # END OF FILE
