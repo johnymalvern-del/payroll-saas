@@ -34,7 +34,7 @@ from app.core.errors import AppError
 from app.core.rate_lookup import find_rule_for_minute, NoApplicableRateRule
 from app.db.tenant.models.attendance import (
     Adjustment,
-    AttendanceDay, AttendanceSegment, CountryCalendar, EmployeeWorkPattern,
+    AttendanceDay, AttendanceSegment, CountryCalendar, EmployeeWorkPattern, ExceptionItem,
     PublicHolidayTenant, Punch, Shift, ShiftRateRule, WorkPattern, WorkPatternDay,
 )
 from app.db.tenant.models.organisation import Company
@@ -705,6 +705,7 @@ def _persist_day(db, employee_id, work_date, *, status, first_in, last_out,
                 overtime_status=seg.overtime_status,
                 source_refs=[str(pid) for pid in seg.source_punch_ids]))
     day.computed_at = datetime.now(timezone.utc)
+    _sync_exceptions(db, employee_id, work_date, day)
     db.commit()
     db.refresh(day)
     return day
@@ -991,5 +992,131 @@ def _build_day_from_adjustment_only(db, employee, work_date, holidays, today_loc
         worked=result.worked_minutes, raw=result.raw_minutes,
         shift_id=shift.id, flags=result.flags, segments=result.segments,
         existing=existing)
+
+
+_EXCEPTION_TYPES_FROM_FLAGS = ("missing_out", "too_long")
+_EXCEPTION_TYPES_FROM_STATUS = {
+    "absent": "absent_expected",
+    "no_shift_match": "no_shift_match",
+}
+
+
+def _expected_exception_types(db, employee_id, work_date, day):
+    """Return the set of exception types currently warranted by the day.
+
+    C4: derived from day flags, day status, pending overtime segments, and
+    low-confidence punches on the day.
+    """
+    types: set[str] = set()
+    if day is None:
+        return types
+    for f in day.flags or []:
+        if f in _EXCEPTION_TYPES_FROM_FLAGS:
+            types.add(f)
+    mapped = _EXCEPTION_TYPES_FROM_STATUS.get(day.status)
+    if mapped:
+        types.add(mapped)
+    pending_ot = db.scalar(
+        select(func.count()).select_from(AttendanceSegment).where(
+            AttendanceSegment.attendance_day_id == day.id,
+            AttendanceSegment.overtime_status == "pending",
+        )
+    )
+    if (pending_ot or 0) > 0:
+        types.add("overtime_unapproved")
+    # Low-confidence punches on the local date. Query punches by the
+    # day's local date span in UTC; ±1 day is a safe window.
+    lc = db.scalar(
+        select(func.count()).select_from(Punch).where(
+            Punch.employee_id == employee_id,
+            Punch.status == "low_confidence",
+            Punch.effective_time >= datetime.combine(
+                work_date - timedelta(days=1), time(0, 0)
+            ).replace(tzinfo=timezone.utc),
+            Punch.effective_time < datetime.combine(
+                work_date + timedelta(days=2), time(0, 0)
+            ).replace(tzinfo=timezone.utc),
+        )
+    )
+    if (lc or 0) > 0:
+        types.add("low_confidence")
+    return types
+
+
+def _suggested_fix(exception_type):
+    return {
+        "missing_out": {"action": "apply_shift_end_time"},
+        "too_long": {"action": "truncate_to_max"},
+        "no_shift_match": {"action": "choose_shift", "candidates": []},
+        "absent_expected": {"action": "mark_day_off"},
+        "overtime_unapproved": {"action": "approve_overtime"},
+        "low_confidence": {"action": "accept_punch"},
+    }.get(exception_type, {})
+
+
+def _create_exception(db, employee_id, work_date, exception_type, day):
+    db.add(ExceptionItem(
+        employee_id=employee_id,
+        work_date=work_date,
+        type=exception_type,
+        source_ref={"attendance_day_id": str(day.id)} if day is not None else {},
+        suggested_fix=_suggested_fix(exception_type),
+        status="open",
+    ))
+
+
+def _sync_exceptions(db, employee_id, work_date, day):
+    """Create new exceptions for current conditions; auto-resolve cleared ones.
+
+    C4. Never creates a new exception on a locked day. Recreates an
+    auto-resolved exception only if the day's source_version has advanced
+    past the version recorded at resolution, so a no-op recompute does not
+    resurrect it.
+    """
+    if day is None:
+        return
+    expected = _expected_exception_types(db, employee_id, work_date, day)
+
+    all_rows = db.scalars(
+        select(ExceptionItem)
+        .where(
+            ExceptionItem.employee_id == employee_id,
+            ExceptionItem.work_date == work_date,
+        )
+        .order_by(ExceptionItem.created_at.desc())
+    ).all()
+    latest_by_type: dict = {}
+    for row in all_rows:
+        if row.type not in latest_by_type:
+            latest_by_type[row.type] = row
+
+    # Auto-resolve open exceptions whose condition cleared.
+    for exception_type, latest in latest_by_type.items():
+        if exception_type not in expected and latest.status == "open":
+            latest.status = "resolved"
+            latest.resolved_at = datetime.now(timezone.utc)
+            latest.resolved_by = None
+            latest.resolution = {
+                "reason": "condition_cleared",
+                "auto": True,
+                "source_version_at_resolve": day.source_version,
+            }
+
+    if day.locked:
+        return
+
+    for exception_type in expected:
+        latest = latest_by_type.get(exception_type)
+        if latest is None:
+            _create_exception(db, employee_id, work_date, exception_type, day)
+            continue
+        if latest.status == "open":
+            continue
+        if latest.status == "dismissed":
+            continue
+        if latest.status == "resolved":
+            res = latest.resolution or {}
+            if res.get("auto") and day.source_version > res.get("source_version_at_resolve", -1):
+                _create_exception(db, employee_id, work_date, exception_type, day)
 
 # END OF FILE
