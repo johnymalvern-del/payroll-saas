@@ -120,6 +120,7 @@ class EmployeePayHistory(Base, TimestampMixin):
     )
     decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str | None] = mapped_column(String(20), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
 
 

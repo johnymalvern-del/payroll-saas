@@ -28,6 +28,7 @@ class PayHistoryOut(BaseModel):
     decided_at: datetime | None = None
     decision_reason: str | None = None
     note: str | None = None
+    source: str | None = None
     status: str
     created_at: datetime
     updated_at: datetime

@@ -107,6 +107,7 @@ def _to_out(ph: EmployeePayHistory) -> PayHistoryOut:
         decided_at=ph.decided_at,
         decision_reason=ph.decision_reason,
         note=ph.note,
+        source=ph.source,
         status=ph.status,
         created_at=ph.created_at,
         updated_at=ph.updated_at,
