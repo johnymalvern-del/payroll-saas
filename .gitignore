@@ -34,3 +34,6 @@ frontend/.vite/
 .idea/
 .vscode/
 bootstrap.ps1
+
+# one-off patch scripts (never committed)
+scripts/*.py

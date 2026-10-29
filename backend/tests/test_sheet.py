@@ -1,7 +1,8 @@
-"""Sheet endpoint tests (Chapter 2C, 2C-5d). Part 1 of 2.
+"""Sheet endpoint tests (Chapter 2C, 2C-5d).
 
-Part 1: fixtures, helpers, and 2 tests (basic sheet, C2 any-role).
-Part 2 (2C-5d-ii) appends daily, mark_reviewed, and mark_reviewed-refusal.
+Part 1: fixtures, helpers, 2 tests (basic sheet, C2 any-role).
+Part 2 (2C-5d-ii): daily one-row-per-employee, mark_reviewed happy path,
+mark_reviewed refuses open exceptions.
 """
 from __future__ import annotations
 import uuid
@@ -12,7 +13,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import inspect as sa_inspect, select, text
 from sqlalchemy.orm import Session
 
 from app.api.v1.attendance_engine import recompute_day
@@ -167,6 +168,17 @@ def _assert_no_adjustment_fields(obj, path=""):
             _assert_no_adjustment_fields(v, f"{path}[{i}]")
 
 
+def _audit_row_count(session):
+    """Count rows across any tenant table whose name contains 'audit'."""
+    session.rollback()
+    insp = sa_inspect(session.get_bind())
+    total = 0
+    for t in insp.get_table_names():
+        if "audit" in t.lower():
+            total += session.execute(text(f'SELECT COUNT(*) FROM "{t}"')).scalar() or 0
+    return total
+
+
 def test_sheet_basic_structure(api, db):
     client, tenant = api
     tok = _admin_token(client, tenant.slug)
@@ -194,11 +206,7 @@ def test_sheet_basic_structure(api, db):
 
 
 def test_sheet_no_adjustment_fields_any_role(api, db):
-    """C2: adjusted days look identical to clocked days. No field named
-    adjusted/adjustment/adjustment_id/reason_code appears in the response for
-    any role that reaches the endpoint (auditor gets 403 and is vacuously OK).
-    Uses an actual adjusted day (leave) as the payload.
-    """
+    """C2: adjusted days look identical to clocked days."""
     client, tenant = api
     admin_tok = _admin_token(client, tenant.slug)
     emp, _ = _setup_worked_day(db, code="C2-1")
@@ -227,12 +235,122 @@ def test_sheet_no_adjustment_fields_any_role(api, db):
         if r.status_code == 200:
             body = r.json()
             _assert_no_adjustment_fields(body, path=role)
-            # For roles that see the adjusted employee, the cell status must be
-            # plain 'leave', not 'adjusted' or 'leave_adjusted' or similar.
             for item in body["items"]:
                 if item["employee_id"] == str(emp.id):
                     assert item["days"][0]["status"] == "leave", (
                         f"{role}: adjusted day cell shows {item['days'][0]['status']!r}, expected 'leave'"
                     )
+
+
+def _daily(client, token, slug, **params):
+    r = client.get("/api/v1/attendance/daily", headers=_auth(token, slug), params=params)
+    return r
+
+
+_DAILY_ROW_KEYS = [
+    "employee_id", "employee_code", "employee_name", "site_id", "department_id",
+    "work_date", "status", "first_in", "last_out", "shift_id", "worked_minutes",
+    "normal_minutes", "overtime_minutes", "flags", "open_exception_count",
+    "locked", "reviewed",
+]
+
+
+def test_daily_returns_one_row_per_employee(api, db):
+    client, tenant = api
+    tok = _admin_token(client, tenant.slug)
+    _setup_worked_day(db, code="D1-1")
+    _setup_worked_day(db, code="D1-2")
+
+    r = _daily(client, tok, tenant.slug, date="2024-05-01")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body.keys()) >= {"items", "next_cursor"}
+    assert len(body["items"]) == 2, body
+    assert {row["employee_code"] for row in body["items"]} == {"D1-1", "D1-2"}
+    for row in body["items"]:
+        for k in _DAILY_ROW_KEYS:
+            assert k in row, f"daily row missing key {k!r}: {sorted(row.keys())}"
+        assert row["work_date"] == "2024-05-01"
+        assert row["status"] == "worked"
+        assert row["worked_minutes"] == 480
+        assert row["locked"] is False
+        assert row["reviewed"] is False
+
+
+def test_mark_reviewed_marks_unlocked_unreviewed(api, db):
+    client, tenant = api
+    tok = _admin_token(client, tenant.slug)
+    emp1, _ = _setup_worked_day(db, code="MR2-1")
+    emp2, _ = _setup_worked_day(db, code="MR2-2")
+
+    before = _audit_row_count(db)
+
+    r = client.post(
+        "/api/v1/attendance/mark_reviewed",
+        headers=_auth(tok, tenant.slug),
+        json={
+            "employee_ids": [str(emp1.id), str(emp2.id)],
+            "from_date": "2024-05-01",
+            "to_date": "2024-05-01",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["marked"] == 2, body
+    assert body["refused"] == 0, body
+    assert body["refused_days"] == [], body
+
+    after = _audit_row_count(db)
+    assert after > before, f"no audit rows written by mark_reviewed (before={before}, after={after})"
+
+    r = _daily(client, tok, tenant.slug, date="2024-05-01")
+    assert r.status_code == 200, r.text
+    by_code = {row["employee_code"]: row for row in r.json()["items"]}
+    assert by_code["MR2-1"]["reviewed"] is True
+    assert by_code["MR2-2"]["reviewed"] is True
+
+
+def test_mark_reviewed_refuses_open_exceptions(api, db):
+    client, tenant = api
+    tok = _admin_token(client, tenant.slug)
+
+    emp_clean, shift = _setup_worked_day(db, code="MR3-1")
+
+    emp_dirty = _mk_emp(db, "MR3-2", dflt_shift=shift.id)
+    _mk_punch(db, emp_dirty.id, _sa_utc(2024, 5, 1, 8, 0))
+    recompute_day(db, emp_dirty.id, date(2024, 5, 1))
+
+    r = _daily(client, tok, tenant.slug, date="2024-05-01")
+    assert r.status_code == 200, r.text
+    by_id = {row["employee_id"]: row for row in r.json()["items"]}
+    assert str(emp_dirty.id) in by_id, f"dirty employee not in daily list: {list(by_id)}"
+    assert by_id[str(emp_dirty.id)]["open_exception_count"] >= 1, (
+        "single-punch day produced no open exception; engine trigger needs review"
+    )
+
+    r = client.post(
+        "/api/v1/attendance/mark_reviewed",
+        headers=_auth(tok, tenant.slug),
+        json={
+            "employee_ids": [str(emp_clean.id), str(emp_dirty.id)],
+            "from_date": "2024-05-01",
+            "to_date": "2024-05-01",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["marked"] == 1, body
+    assert body["refused"] == 1, body
+    assert len(body["refused_days"]) == 1, body
+    refused = body["refused_days"][0]
+    assert refused["employee_id"] == str(emp_dirty.id), refused
+    assert refused["work_date"] == "2024-05-01", refused
+    assert isinstance(refused["reason"], str) and refused["reason"], refused
+
+    r = _daily(client, tok, tenant.slug, date="2024-05-01")
+    assert r.status_code == 200, r.text
+    by_code = {row["employee_code"]: row for row in r.json()["items"]}
+    assert by_code["MR3-1"]["reviewed"] is True
+    assert by_code["MR3-2"]["reviewed"] is False
 
 # END OF FILE

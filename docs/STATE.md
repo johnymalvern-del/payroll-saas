@@ -1,6 +1,6 @@
 # Payroll SaaS - Project State
 
-Last updated: close of Chapter 2A (Attendance Foundation).
+Last updated: close of Chapter 2C (Attendance work surface).
 
 This file is the handoff for a new chat. It is not a design document; it is
 where we are, what was decided, what comes next. Where this file and the
@@ -204,7 +204,7 @@ error dict, keep `msg`. Exposed by shift create with an invalid enum.
 - Hand-worked payslips for the payroll engine's golden tests (Chapter 4).
 - Confirmation of the A10 auditor scope decision (I followed section 6).
 
-## Exact next step
+## Exact next step (at 2A close, historical)
 
 Open 2B with a SPEC, no code. The SPEC must cover:
 
@@ -334,5 +334,64 @@ removed in a future cleanup).
 2C attendance work surface: exceptions queue, single + bulk
 adjustments, attendance sheet (monthly grid + daily list API).
 SPEC-only first, one approval, then scripts.
+
+
+## Chapter 2C closed (attendance work surface)
+
+2C delivered. 692 tests passing.
+
+### What 2C added
+
+Exceptions queue (``/attendance/exceptions``): list, single GET, resolve,
+bulk_resolve. Engine raises exceptions for missing punches, out-of-
+tolerance shifts, below-minimum overtime, missing holiday calendar.
+Resolution closes the exception and triggers recompute.
+
+Adjustments (``/attendance/adjustments``): single and bulk with dry-run
+token gate, all-or-nothing, revert. Self-adjust refused (403), locked
+days refused (409). Audit writes a day snapshot on each adjustment.
+Manager and HR both allowed; mandatory reason_code. ADJUSTED DAYS ARE
+NOT MARKED ON THE SHEET (audit log only) - C2 rule tested across every
+role.
+
+Sheet (``/attendance/sheet``, ``/attendance/daily``,
+``/attendance/mark_reviewed``): monthly grid per employee per day; daily
+list one row per employee per date with open_exception_count; bulk
+mark_reviewed that refuses any day with open_exception_count > 0 and
+returns refused_days with reason.
+
+### Decisions inside 2C (recorded)
+
+- C1 audit writes old/new snapshot for each adjustment.
+- C2 adjusted days are indistinguishable on the sheet (only audit shows).
+- C3 mark_reviewed refuses any day with open_exception_count > 0.
+- Closed (locked) attendance days cannot be adjusted; only payroll_admin
+  reopens (Phase 4 wiring).
+- Sheet column set: employee+date+status+minutes+flags+locked+reviewed.
+
+### 2C tests added
+
+- ``test_exceptions.py``: engine raising, resolve, bulk_resolve.
+- ``test_adjustments.py``: single + bulk, dry-run gate, all-or-nothing,
+  revert, self-adjust 403, locked 409, audit snapshot. Was untracked
+  in git until 2C-6; now in repo.
+- ``test_sheet.py``: basic sheet; C2 across all roles; daily
+  one-row-per-employee; mark_reviewed happy path; refuses open exceptions.
+- ``test_permissions.py``: 15 endpoint-level permission-wiring tests
+  for sheet/daily (ATTENDANCE_VIEW) and mark_reviewed
+  (ATTENDANCE_ADJUST), each across all five roles. Catches a future
+  route that forgets Depends(require_permission(...)).
+
+### Open items carried from 2C
+
+- Leave overlay not wired yet (B10). Chapter 3 approval -> recompute.
+- No scheduler. ``ensure_days`` still manual; daily sweep job needed
+  before production.
+- 5 MB batch body cap still not enforced at HTTP layer.
+- Photo happy path still not tested.
+
+### Next
+
+Chapter 3 (requests). SPEC-only first, one approval, then scripts.
 
 # END OF FILE

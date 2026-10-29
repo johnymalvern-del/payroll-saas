@@ -375,4 +375,126 @@ def test_every_route_has_an_auth_dependency_or_is_allow_listed() -> None:
         + "\n  ".join(offenders)
     )
 
+
+# ---------------------------------------------------------------------------
+# Endpoint permission wiring (2C-5e).
+#
+# SECTION_6_MATRIX above tests check_permission() in isolation. These tests
+# check that each HTTP endpoint is wired to the right Permission. A 403 means
+# "permission explicitly denied". Scope violations are 404 in this codebase,
+# so allowed roles may legitimately see 404 for single-row endpoints — but
+# never 403.
+# ---------------------------------------------------------------------------
+
+
+def _mk_loginable_user(session, *, username, role, password):
+    from datetime import date
+    from app.core.security import hash_password
+    from app.core.usernames import normalise_username
+    from app.db.tenant.models.people import Employee, User
+
+    employee_id = None
+    if role == "employee":
+        emp = Employee(
+            employee_code=f"PE-{uuid.uuid4().hex[:8]}",
+            first_name="E", last_name=username,
+            hire_date=date(2024, 1, 1), status="active",
+            employee_type="hourly", pay_basis="hourly", pay_frequency="monthly",
+        )
+        session.add(emp); session.flush()
+        employee_id = emp.id
+    user = User(
+        username=normalise_username(username),
+        password_hash=hash_password(password),
+        role=role,
+        is_active=True,
+        must_change_password=False,
+        employee_id=employee_id,
+        row_version=1,
+    )
+    session.add(user); session.commit()
+    return user
+
+
+def _login_for_perm(client, slug, username, password):
+    r = client.post(
+        "/api/v1/auth/login",
+        headers={"X-Tenant-Slug": slug},
+        json={"identifier": username, "password": password},
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["access_token"]
+
+
+_ENDPOINT_CASES = [
+    # (id, method, path, base_kwargs, permission)
+    ("sheet", "GET", "/api/v1/attendance/sheet",
+     {"params": {"from_date": "2024-05-01", "to_date": "2024-05-01"}},
+     Permission.ATTENDANCE_VIEW),
+    ("daily", "GET", "/api/v1/attendance/daily",
+     {"params": {"date": "2024-05-01"}},
+     Permission.ATTENDANCE_VIEW),
+    ("mark_reviewed", "POST", "/api/v1/attendance/mark_reviewed",
+     {"body": {"from_date": "2024-05-01", "to_date": "2024-05-01"}},
+     Permission.ATTENDANCE_ADJUST),
+]
+
+
+@pytest.mark.parametrize("role", ALL_ROLES)
+@pytest.mark.parametrize(
+    "case_id,method,path,base_kwargs,permission",
+    _ENDPOINT_CASES,
+    ids=[c[0] for c in _ENDPOINT_CASES],
+)
+def test_endpoint_enforces_section_6_permission(
+    api_client, disposable_tenant, role, case_id, method, path, base_kwargs, permission
+):
+    from datetime import date as _date
+    from app.db.tenant.models.people import Employee as _Emp
+    from app.db.tenant.session import get_tenant_engine as _gte
+    from sqlalchemy.orm import Session as _S
+
+    engine = _gte(disposable_tenant.tenant_db_name)
+    s = _S(engine)
+    try:
+        username = f"ep-{role[:3]}-{uuid.uuid4().hex[:8]}"
+        password = "EpTest12345678!"
+        _mk_loginable_user(s, username=username, role=role, password=password)
+
+        kwargs = dict(base_kwargs)
+        if "body" in base_kwargs:
+            target = _Emp(
+                employee_code=f"TGT-{uuid.uuid4().hex[:8]}",
+                first_name="T", last_name="Target",
+                hire_date=_date(2024, 1, 1), status="active",
+                employee_type="hourly", pay_basis="hourly", pay_frequency="monthly",
+            )
+            s.add(target); s.flush()
+            target_id = target.id
+            s.commit()
+            kwargs["json"] = {**base_kwargs["body"], "employee_ids": [str(target_id)]}
+            del kwargs["body"]
+    finally:
+        s.close()
+
+    tok = _login_for_perm(api_client, disposable_tenant.slug, username, password)
+    headers = {"Authorization": f"Bearer {tok}", "X-Tenant-Slug": disposable_tenant.slug}
+
+    if method.upper() == "GET":
+        r = api_client.get(path, headers=headers, **kwargs)
+    else:
+        r = api_client.post(path, headers=headers, **kwargs)
+
+    expected_allowed = SECTION_6_MATRIX[permission][role]
+    if expected_allowed:
+        assert r.status_code != 403, (
+            f"{role} has {permission.value} in section 6 but {method} {path} returned 403. "
+            f"Body: {r.text}"
+        )
+    else:
+        assert r.status_code == 403, (
+            f"{role} lacks {permission.value} in section 6 but {method} {path} returned "
+            f"{r.status_code}, not 403. Body: {r.text}"
+        )
+
 # END OF FILE
