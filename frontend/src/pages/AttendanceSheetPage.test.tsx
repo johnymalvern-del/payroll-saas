@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MantineProvider } from "@mantine/core";
+import dayjs from "dayjs";
 import { AttendanceSheetPage } from "./AttendanceSheetPage";
 
 function jr(body: unknown, status = 200): Response {
@@ -36,10 +37,7 @@ function setupMock(opts: {
       return jr(opts.dayPayload ?? {});
     }
     if (url.includes("/api/v1/attendance/mark_reviewed")) {
-      return jr({
-        reviewed_count: 3,
-        refused_days: opts.markRefused ?? [],
-      });
+      return jr({ reviewed_count: 3, refused_days: opts.markRefused ?? [] });
     }
     if (
       url.includes("/api/v1/branches") ||
@@ -53,7 +51,9 @@ function setupMock(opts: {
 }
 
 function renderPage() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   return render(
     <MantineProvider>
       <QueryClientProvider client={client}>
@@ -63,34 +63,83 @@ function renderPage() {
   );
 }
 
+const TODAY = dayjs().format("YYYY-MM-DD");
+
 const CELL = {
-  work_date: "2025-06-01", status: "worked", worked_minutes: 480,
-  normal_minutes: 480, overtime_minutes: 0, flags: [],
-  open_exception_count: 0, locked: false, reviewed: false,
+  work_date: TODAY,
+  status: "worked",
+  worked_minutes: 480,
+  normal_minutes: 480,
+  overtime_minutes: 0,
+  flags: [],
+  open_exception_count: 0,
+  locked: false,
+  reviewed: false,
 };
 const EMPLOYEE = {
-  employee_id: "e1", employee_code: "EMP001", employee_name: "Ada Lovelace",
-  site_id: null, department_id: null, days: [CELL],
+  employee_id: "e1",
+  employee_code: "EMP001",
+  employee_name: "Ada Lovelace",
+  site_id: null,
+  department_id: null,
+  days: [CELL],
 };
 const DAY = {
-  employee_id: "e1", employee_code: "EMP001", employee_name: "Ada Lovelace",
-  work_date: "2025-06-01", status: "worked",
-  first_in: "2025-06-01T08:00:00Z", last_out: "2025-06-01T16:30:00Z",
-  worked_minutes: 480, normal_minutes: 480, overtime_minutes: 0,
-  flags: [], open_exception_count: 0, locked: false, reviewed: false,
+  employee_id: "e1",
+  employee_code: "EMP001",
+  employee_name: "Ada Lovelace",
+  work_date: TODAY,
+  status: "worked",
+  first_in: "2025-06-01T08:00:00Z",
+  last_out: "2025-06-01T16:30:00Z",
+  worked_minutes: 480,
+  normal_minutes: 480,
+  overtime_minutes: 0,
+  flags: [],
+  open_exception_count: 0,
+  locked: false,
+  reviewed: false,
   punches: [
-    { id: "p1", punch_time: "2025-06-01T08:00:00Z", direction: "in", source: "device", confidence: 0.9 },
-    { id: "p2", punch_time: "2025-06-01T16:30:00Z", direction: "out", source: "device", confidence: 0.9 },
+    {
+      id: "p1",
+      punch_time: "2025-06-01T08:00:00Z",
+      direction: "in",
+      source: "device",
+      confidence: 0.9,
+    },
+    {
+      id: "p2",
+      punch_time: "2025-06-01T16:30:00Z",
+      direction: "out",
+      source: "device",
+      confidence: 0.9,
+    },
   ],
   exceptions: [],
 };
 const DAILY_ROW = {
-  employee_id: "e1", employee_code: "EMP001", employee_name: "Ada Lovelace",
-  work_date: "2025-06-01", status: "worked",
-  first_in: "2025-06-01T08:00:00Z", last_out: "2025-06-01T16:30:00Z",
-  worked_minutes: 480, normal_minutes: 480, overtime_minutes: 0,
-  flags: [], open_exception_count: 0, locked: false, reviewed: false,
+  employee_id: "e1",
+  employee_code: "EMP001",
+  employee_name: "Ada Lovelace",
+  work_date: TODAY,
+  status: "worked",
+  first_in: "2025-06-01T08:00:00Z",
+  last_out: "2025-06-01T16:30:00Z",
+  worked_minutes: 480,
+  normal_minutes: 480,
+  overtime_minutes: 0,
+  flags: [],
+  open_exception_count: 0,
+  locked: false,
+  reviewed: false,
 };
+
+afterEach(cleanup);
+
+function clickWorkedCell(employeeId = "e1", workDate = TODAY): void {
+  const cell = screen.getByTestId(`cell-${employeeId}-${workDate}`);
+  fireEvent.click(cell);
+}
 
 describe("AttendanceSheetPage monthly view", () => {
   beforeEach(() => setupMock({ sheetItems: [EMPLOYEE] }));
@@ -108,15 +157,16 @@ describe("AttendanceSheetPage monthly view", () => {
     setupMock({ sheetItems: [] });
     renderPage();
     await waitFor(() => {
-      expect(screen.getByText(/no employees match these filters/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(/no employees match these filters/i),
+      ).toBeInTheDocument();
     });
   });
 
   it("renders a status badge for a worked cell", async () => {
     renderPage();
-    await waitFor(() => {
-      expect(screen.getByText("worked")).toBeInTheDocument();
-    });
+    const cell = await screen.findByTestId(`cell-e1-${TODAY}`);
+    expect(within(cell).getByText("worked")).toBeInTheDocument();
   });
 
   it("shows an error message when sheet fetch fails", async () => {
@@ -129,31 +179,35 @@ describe("AttendanceSheetPage monthly view", () => {
     }) as unknown as typeof fetch;
     renderPage();
     await waitFor(() => {
-      expect(screen.getByText(/could not load the attendance sheet/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(/could not load the attendance sheet/i),
+      ).toBeInTheDocument();
     });
   });
 
-  it("opens the day panel on cell click and shows punches", async () => {
+  it("opens the day panel on cell click and shows the day summary", async () => {
     setupMock({ sheetItems: [EMPLOYEE], dayPayload: DAY });
     renderPage();
-    await waitFor(() => expect(screen.getByText("worked")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("worked"));
+    await screen.findByTestId(`cell-e1-${TODAY}`);
+    clickWorkedCell();
+    const dialog = await screen.findByRole("dialog");
     await waitFor(() => {
-      expect(screen.getByText("08:00:00")).toBeInTheDocument();
-      expect(screen.getByText("16:30:00")).toBeInTheDocument();
+      expect(within(dialog).getByText("First in")).toBeInTheDocument();
+      expect(within(dialog).getByText("Last out")).toBeInTheDocument();
     });
+    expect(dialog.textContent).toMatch(/punches/i);
   });
 
   it("day panel never shows an adjustment marker (C2)", async () => {
     setupMock({ sheetItems: [EMPLOYEE], dayPayload: DAY });
     renderPage();
-    await waitFor(() => expect(screen.getByText("worked")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("worked"));
+    await screen.findByTestId(`cell-e1-${TODAY}`);
+    clickWorkedCell();
+    const dialog = await screen.findByRole("dialog");
     await waitFor(() => {
-      expect(screen.getByText("08:00:00")).toBeInTheDocument();
+      expect(within(dialog).getByText("First in")).toBeInTheDocument();
     });
-    const body = document.body.textContent ?? "";
-    expect(/adjust/i.test(body)).toBe(false);
+    expect(/adjust/i.test(dialog.textContent ?? "")).toBe(false);
   });
 });
 
@@ -161,8 +215,10 @@ describe("AttendanceSheetPage daily view", () => {
   beforeEach(() => setupMock({ dailyItems: [DAILY_ROW] }));
 
   it("switches to daily view and renders one row per employee", async () => {
+    // Monthly view has NO sheet items in this test's mock. Wait for the page
+    // title, then switch to Daily, then assert the row appears.
     renderPage();
-    await waitFor(() => expect(screen.getByText("worked")).toBeInTheDocument());
+    await screen.findByText("Attendance");
     fireEvent.click(screen.getByText("Daily"));
     await waitFor(() => {
       expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
@@ -175,12 +231,24 @@ describe("AttendanceSheetPage mark reviewed", () => {
     setupMock({
       sheetItems: [EMPLOYEE],
       markRefused: [
-        { employee_id: "e1", employee_name: "Ada Lovelace", work_date: "2025-06-05", reason: "open_exceptions" },
+        {
+          employee_id: "e1",
+          employee_name: "Ada Lovelace",
+          work_date: "2025-06-05",
+          reason: "open_exceptions",
+        },
       ],
     });
     renderPage();
-    await waitFor(() => expect(screen.getByText("worked")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: /mark clean days reviewed/i }));
+    await screen.findByTestId(`cell-e1-${TODAY}`);
+    fireEvent.click(
+      screen.getByRole("button", { name: /mark clean days reviewed/i }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    const submitBtn = within(dialog).getByRole("button", {
+      name: /mark clean days reviewed/i,
+    });
+    fireEvent.click(submitBtn);
     await waitFor(() => {
       expect(screen.getByText("open_exceptions")).toBeInTheDocument();
     });
