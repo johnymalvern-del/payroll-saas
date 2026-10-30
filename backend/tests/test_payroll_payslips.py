@@ -1,0 +1,270 @@
+"""Payslip read endpoints (Chapter 4, Bundle 004b-b).
+
+Seeds payslips directly via ORM. The schema constraint
+`uq_payslip_period_employee_rev (pay_period_id, employee_id, revision)`
+means every test that adds a second payslip for the same (period, employee)
+must use a higher revision - which mirrors production, where preview runs
+always come after / ahead of finalised payslips with a higher revision
+number (see payroll_runner.run_preview: rev = prior_final_max + 1).
+"""
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy.orm import Session
+
+from app.api.v1.payroll_payslips import (
+    explain_payslip,
+    get_payslip,
+    get_payslip_pdf,
+    list_payslips,
+)
+from app.core.errors import AppError
+from app.core.security import hash_password
+from app.db.tenant.models.pay import (
+    PayPeriod, PayrollRun, Payslip, PayslipLine,
+)
+from app.db.tenant.models.people import Employee, User
+from app.db.tenant.session import get_tenant_engine
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    from app.db.control.models import Subscriber
+    from app.db.control.session import control_session
+    from app.services.provisioning import (
+        _drop_tenant_database, _tenant_db_name, provision_tenant,
+    )
+    slug = f"pay-{uuid.uuid4().hex[:10]}"
+    result = provision_tenant(
+        slug=slug, name="Payslips Test",
+        admin_username="admin",
+        admin_password_hash=hash_password("TestPassword123!"),
+    )
+    db_name = _tenant_db_name(slug)
+    try:
+        yield _DisposableTenant(
+            slug=result.slug, tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        try:
+            _drop_tenant_database(db_name)
+        except Exception:
+            pass
+        with control_session() as session:
+            row = session.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if row is not None:
+                session.delete(row)
+
+
+@pytest.fixture()
+def tenant_session(disposable_tenant):
+    engine = get_tenant_engine(disposable_tenant.tenant_db_name)
+    session = Session(engine)
+    try:
+        yield session, engine
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def _mk_emp(session, code=None):
+    code = code or f"EMP-{uuid.uuid4().hex[:6]}"
+    emp = Employee(
+        employee_code=code, first_name="A", last_name="B",
+        hire_date=date(2024, 1, 1), status="active",
+        employee_type="hourly", pay_basis="hourly", pay_frequency="monthly",
+        medical_scheme_members=0, uif_exempt=False,
+    )
+    session.add(emp)
+    session.commit()
+    return emp
+
+
+def _mk_user(session, *, role, employee_id=None):
+    u = User(
+        id=uuid.uuid4(),
+        username=f"u-{uuid.uuid4().hex[:6]}",
+        password_hash=hash_password("TestPass123!"),
+        role=role,
+        employee_id=employee_id,
+    )
+    session.add(u)
+    session.commit()
+    return u
+
+
+def _mk_period(session):
+    p = PayPeriod(
+        id=uuid.uuid4(),
+        period_key=f"2025-06-{uuid.uuid4().hex[:4]}",
+        start_date=date(2025, 6, 1),
+        end_date=date(2025, 6, 30),
+        pay_date=date(2025, 6, 30),
+        status="locked",
+        cutoff_at=datetime(2025, 6, 30, 12, 0, tzinfo=timezone.utc),
+    )
+    session.add(p)
+    session.commit()
+    return p
+
+
+def _mk_run(session, period, *, kind="final", revision=1):
+    run = PayrollRun(
+        id=uuid.uuid4(),
+        pay_period_id=period.id,
+        kind=kind,
+        revision=revision,
+        status="completed",
+        rules_snapshot={"final": True},
+        started_at=datetime.now(timezone.utc),
+        completed_at=datetime.now(timezone.utc),
+    )
+    session.add(run)
+    session.commit()
+    return run
+
+
+def _mk_payslip(
+    session, run, period, emp, *,
+    status="current", net="815.83", revision=1,
+):
+    ps = Payslip(
+        id=uuid.uuid4(),
+        payroll_run_id=run.id,
+        pay_period_id=period.id,
+        employee_id=emp.id,
+        revision=revision,
+        status=status,
+        gross=Decimal("1000.00"),
+        pre_tax_deductions=Decimal("0.00"),
+        taxable_income=Decimal("1000.00"),
+        paye=Decimal("179.17"),
+        uif_employee=Decimal("5.00"),
+        uif_employer=Decimal("5.00"),
+        sdl=Decimal("10.00"),
+        other_deductions=Decimal("0.00"),
+        reimbursements=Decimal("0.00"),
+        net=Decimal(net),
+        employer_costs={"uif_employer": "5.00", "sdl": "10.00"},
+        snapshot={"calculation_context": {"tax_method": "regular_earnings_v1"}, "tax_trace": []},
+        calculation_context={"tax_method": "regular_earnings_v1"},
+    )
+    session.add(ps)
+    session.flush()
+    session.add(PayslipLine(
+        id=uuid.uuid4(), payslip_id=ps.id,
+        line_type="tax", step="tax", sort_order=200, label="PAYE",
+        amount=Decimal("179.17"), source_ref={"method": "regular_earnings_v1"},
+    ))
+    session.commit()
+    return ps
+
+
+@pytest.fixture()
+def ctx(tenant_session):
+    session, engine = tenant_session
+    emp = _mk_emp(session)
+    period = _mk_period(session)
+    final_run = _mk_run(session, period, kind="final", revision=1)
+    ps = _mk_payslip(session, final_run, period, emp, status="current", revision=1)
+    admin = _mk_user(session, role="payroll_admin")
+    return SimpleNamespace(
+        session=session, engine=engine, emp=emp, period=period,
+        run=final_run, ps=ps, admin=admin,
+    )
+
+
+# ---------------------------------------------------------------------------
+# List
+# ---------------------------------------------------------------------------
+
+def test_list_excludes_preview_rows(ctx):
+    # Preview payslip must be at a higher revision than any current payslip
+    # (production invariant: rev = prior_final_max + 1).
+    preview_run = _mk_run(ctx.session, ctx.period, kind="preview", revision=2)
+    _mk_payslip(
+        ctx.session, preview_run, ctx.period, ctx.emp,
+        status="preview", revision=2,
+    )
+    out = list_payslips(db=ctx.session, user=ctx.admin)
+    assert len(out.items) == 1
+    assert out.items[0].id == ctx.ps.id
+
+
+def test_list_filters_by_employee(ctx):
+    other_emp = _mk_emp(ctx.session)
+    other_run = _mk_run(ctx.session, ctx.period, kind="final", revision=1)
+    _mk_payslip(ctx.session, other_run, ctx.period, other_emp, revision=1)
+    out = list_payslips(db=ctx.session, user=ctx.admin, employee_id=ctx.emp.id)
+    assert len(out.items) == 1
+    assert out.items[0].employee_id == ctx.emp.id
+
+
+# ---------------------------------------------------------------------------
+# Get
+# ---------------------------------------------------------------------------
+
+def test_get_returns_payslip(ctx):
+    out = get_payslip(payslip_id=ctx.ps.id, db=ctx.session, user=ctx.admin)
+    assert out.id == ctx.ps.id
+    assert out.net == Decimal("815.83")
+
+
+def test_get_nonexistent_404(ctx):
+    with pytest.raises(AppError) as exc_info:
+        get_payslip(payslip_id=uuid.uuid4(), db=ctx.session, user=ctx.admin)
+    assert exc_info.value.code == "not_found"
+
+
+def test_get_preview_status_404(ctx):
+    preview_run = _mk_run(ctx.session, ctx.period, kind="preview", revision=2)
+    preview = _mk_payslip(
+        ctx.session, preview_run, ctx.period, ctx.emp,
+        status="preview", revision=2,
+    )
+    with pytest.raises(AppError) as exc_info:
+        get_payslip(payslip_id=preview.id, db=ctx.session, user=ctx.admin)
+    assert exc_info.value.code == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# Explain
+# ---------------------------------------------------------------------------
+
+def test_explain_includes_lines_and_snapshot(ctx):
+    out = explain_payslip(payslip_id=ctx.ps.id, db=ctx.session, user=ctx.admin)
+    assert out.payslip.id == ctx.ps.id
+    assert len(out.lines) == 1
+    assert out.lines[0].label == "PAYE"
+    assert out.calculation_context.get("tax_method") == "regular_earnings_v1"
+
+
+# ---------------------------------------------------------------------------
+# PDF
+# ---------------------------------------------------------------------------
+
+def test_get_pdf_returns_bytes(ctx):
+    response = get_payslip_pdf(payslip_id=ctx.ps.id, db=ctx.session, user=ctx.admin)
+    assert response.media_type == "application/pdf"
+    assert response.body[:5] == b"%PDF-"
+    cd = response.headers.get("content-disposition", "")
+    assert "attachment;" in cd
+    assert "payslip-" in cd
+    assert ".pdf" in cd
+
+# END OF FILE

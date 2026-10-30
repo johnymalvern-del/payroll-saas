@@ -51,6 +51,19 @@ EXPECTED_ROUTES: list[tuple[str, str, Permission]] = [
     ("POST",  "/api/v1/payroll/change-requests/{request_id}/approve", Permission.PAY_RATE_APPROVE),
     ("POST",  "/api/v1/payroll/change-requests/{request_id}/reject", Permission.PAY_RATE_APPROVE),
     ("POST",  "/api/v1/payroll/change-requests/{request_id}/cancel", Permission.PAY_RATE_REQUEST),
+    # 004b-a — pay periods
+    ("POST",  "/api/v1/payroll/pay-periods", Permission.PAYROLL_FINALISE),
+    ("GET",   "/api/v1/payroll/pay-periods", Permission.PAYROLL_PREVIEW),
+    ("GET",   "/api/v1/payroll/pay-periods/{period_id}", Permission.PAYROLL_PREVIEW),
+    ("POST",  "/api/v1/payroll/pay-periods/{period_id}/preview", Permission.PAYROLL_PREVIEW),
+    ("POST",  "/api/v1/payroll/pay-periods/{period_id}/finalise", Permission.PAYROLL_FINALISE),
+    ("POST",  "/api/v1/payroll/pay-periods/{period_id}/reopen", Permission.PAYROLL_REOPEN),
+    ("GET",   "/api/v1/payroll/pay-periods/{period_id}/reopen-log", Permission.PAYROLL_PREVIEW),
+    # 004b-b — payslips
+    ("GET",   "/api/v1/payroll/payslips", Permission.PAYSLIP_VIEW),
+    ("GET",   "/api/v1/payroll/payslips/{payslip_id}", Permission.PAYSLIP_VIEW),
+    ("GET",   "/api/v1/payroll/payslips/{payslip_id}/explain", Permission.PAYSLIP_VIEW),
+    ("GET",   "/api/v1/payroll/payslips/{payslip_id}/pdf", Permission.PAYSLIP_VIEW),
 ]
 
 
