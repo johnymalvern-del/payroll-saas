@@ -1,10 +1,4 @@
-"""Change request mechanism (Chapter 4, Bundle 004a-iv-a).
-
-HR and payroll_admin are real persisted User rows so the FK on
-payroll_change_request.requested_by_user_id resolves. HR is linked to the
-target Employee so assert_in_scope passes; admin has no employee record so
-scope is company-wide (per scope.py).
-"""
+"""Change request mechanism (Chapter 4, Bundle 004a-iv-a)."""
 from __future__ import annotations
 
 import uuid
@@ -91,11 +85,11 @@ def _mk_emp(session, code=None):
     return emp
 
 
-def _mk_user(session, *, username, role, employee_id=None, password="TestPass123!"):
+def _mk_user(session, *, username, role, employee_id=None):
     u = User(
         id=uuid.uuid4(),
         username=username,
-        password_hash=hash_password(password),
+        password_hash=hash_password("TestPass123!"),
         role=role,
         employee_id=employee_id,
     )
@@ -121,21 +115,8 @@ def ctx(tenant_session):
     session, engine = tenant_session
     emp = _mk_emp(session)
     et = _mk_earning_type(session)
-    # HR is linked to the target employee so scope resolution passes
-    # (hr with employee_id=None has empty scope, fails closed in assert_in_scope).
-    hr = _mk_user(
-        session,
-        username=f"hr-{uuid.uuid4().hex[:6]}",
-        role="hr",
-        employee_id=emp.id,
-    )
-    # Admin has no employee record → scope resolves to company-wide
-    admin = _mk_user(
-        session,
-        username=f"pa-{uuid.uuid4().hex[:6]}",
-        role="payroll_admin",
-        employee_id=None,
-    )
+    hr = _mk_user(session, username=f"hr-{uuid.uuid4().hex[:6]}", role="hr", employee_id=emp.id)
+    admin = _mk_user(session, username=f"pa-{uuid.uuid4().hex[:6]}", role="payroll_admin", employee_id=None)
     return SimpleNamespace(
         session=session, engine=engine, emp=emp, et=et, hr=hr, admin=admin,
     )
@@ -268,7 +249,7 @@ def test_cancel_by_other_rejected(ctx):
 
 
 # ---------------------------------------------------------------------------
-# Field update
+# Field update (now requires row_version)
 # ---------------------------------------------------------------------------
 
 def test_approve_field_update_writes_employee(ctx):
@@ -276,7 +257,11 @@ def test_approve_field_update_writes_employee(ctx):
         ctx.session, ctx.hr,
         kind="employee_field_update",
         employee_id=ctx.emp.id,
-        payload={"contracted_weekly_hours": 40.0, "uif_exempt": True},
+        payload={
+            "row_version": ctx.emp.row_version,
+            "contracted_weekly_hours": 40.0,
+            "uif_exempt": True,
+        },
     )
     ctx.session.commit()
     _, applied_id = approve_change_request(ctx.session, ctx.admin, req.id)
