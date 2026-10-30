@@ -10,6 +10,7 @@ from app.api.v1.employee_work_patterns import router as employee_work_patterns_r
 from app.api.v1.employees import router as employees_router
 from app.api.v1.import_employees import router as import_employees_router
 from app.api.v1.pay_history import router as pay_history_router
+from app.api.v1.payroll_employees import router as payroll_employees_router
 from app.api.v1.payroll_settings import router as payroll_settings_router
 from app.api.v1.payroll_types import router as payroll_types_router
 from app.api.v1.public_holidays import router as public_holidays_router
@@ -51,5 +52,6 @@ api_router.include_router(adjustments_router)
 api_router.include_router(sheet_router)
 api_router.include_router(payroll_settings_router)
 api_router.include_router(payroll_types_router)
+api_router.include_router(payroll_employees_router)
 
 # END OF FILE
