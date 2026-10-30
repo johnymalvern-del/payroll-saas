@@ -1,0 +1,1147 @@
+=== FILE: backend/app/db/tenant/models/change_request.py ===
+"""Payroll change requests (Chapter 4, Bundle 004a-iv-a).
+
+F3 mechanism: HR submits, payroll_admin approves. Approver must differ from
+requester. Pending requests have zero effect on employee_earning,
+employee_deduction, or employee fields until approved. Approved requests
+write through to the target table within the same transaction.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import (
+    CheckConstraint, DateTime, ForeignKey, Integer, String, Text, func,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db.base import Base
+
+
+KINDS = (
+    "employee_earning_create",
+    "employee_earning_update",
+    "employee_earning_deactivate",
+    "employee_deduction_create",
+    "employee_deduction_update",
+    "employee_deduction_deactivate",
+    "employee_field_update",
+)
+
+STATUSES = ("pending", "approved", "rejected", "cancelled")
+
+
+class PayrollChangeRequest(Base):
+    __tablename__ = "payroll_change_request"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN (" + ",".join(f"'{k}'" for k in KINDS) + ")",
+            name="ck_payroll_change_request_kind",
+        ),
+        CheckConstraint(
+            "status IN (" + ",".join(f"'{s}'" for s in STATUSES) + ")",
+            name="ck_payroll_change_request_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    employee_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("employee.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending",
+    )
+    requested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    decided_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    applied_entity_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True,
+    )
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(),
+        onupdate=func.now(), nullable=False,
+    )
+
+# END OF FILE
+=== END FILE: backend/app/db/tenant/models/change_request.py ===
+=== FILE: backend/alembic/tenant/versions/0020_payroll_change_requests.py ===
+"""Payroll change request table (Chapter 4, Bundle 004a-iv-a).
+
+Revision ID: ten_0020
+Revises: ten_0019
+"""
+from __future__ import annotations
+
+import os
+import re
+from typing import Sequence, Union
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects import postgresql
+
+revision: str = "ten_0020"
+down_revision: Union[str, Sequence[str], None] = "ten_0019"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def _app_role() -> str:
+    role = os.environ.get("TENANT_APP_DB_ROLE", "payroll_app")
+    if not re.fullmatch(r"[a-z_][a-z0-9_]*", role):
+        raise RuntimeError(f"Invalid TENANT_APP_DB_ROLE identifier: {role!r}")
+    return role
+
+
+def upgrade() -> None:
+    op.create_table(
+        "payroll_change_request",
+        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("kind", sa.String(40), nullable=False),
+        sa.Column("employee_id", postgresql.UUID(as_uuid=True),
+                  sa.ForeignKey("employee.id", ondelete="RESTRICT"), nullable=False),
+        sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("status", sa.String(20), nullable=False, server_default="pending"),
+        sa.Column("requested_by_user_id", postgresql.UUID(as_uuid=True),
+                  sa.ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+        sa.Column("requested_at", sa.DateTime(timezone=True),
+                  server_default=sa.func.now(), nullable=False),
+        sa.Column("decided_by_user_id", postgresql.UUID(as_uuid=True),
+                  sa.ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+        sa.Column("decided_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("decision_note", sa.Text(), nullable=True),
+        sa.Column("applied_entity_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("row_version", sa.Integer(), nullable=False, server_default="1"),
+        sa.Column("created_at", sa.DateTime(timezone=True),
+                  server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True),
+                  server_default=sa.func.now(), nullable=False),
+        sa.CheckConstraint(
+            "kind IN ('employee_earning_create','employee_earning_update',"
+            "'employee_earning_deactivate','employee_deduction_create',"
+            "'employee_deduction_update','employee_deduction_deactivate',"
+            "'employee_field_update')",
+            name="ck_payroll_change_request_kind",
+        ),
+        sa.CheckConstraint(
+            "status IN ('pending','approved','rejected','cancelled')",
+            name="ck_payroll_change_request_status",
+        ),
+    )
+    op.create_index(
+        "ix_payroll_change_request_employee_status",
+        "payroll_change_request", ["employee_id", "status"],
+    )
+    op.create_index(
+        "ix_payroll_change_request_status",
+        "payroll_change_request", ["status"],
+    )
+    role = _app_role()
+    op.execute(
+        f"GRANT SELECT, INSERT, UPDATE, DELETE ON payroll_change_request TO {role}"
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_payroll_change_request_status", table_name="payroll_change_request")
+    op.drop_index("ix_payroll_change_request_employee_status", table_name="payroll_change_request")
+    op.drop_table("payroll_change_request")
+
+# END OF FILE
+=== END FILE: backend/alembic/tenant/versions/0020_payroll_change_requests.py ===
+=== FILE: backend/app/services/payroll_change_request.py ===
+"""Payroll change request service (Chapter 4, Bundle 004a-iv-a).
+
+F3: HR submits, payroll_admin approves, approver != requester. Pending
+requests never touch employee_earning / employee_deduction / employee fields.
+Approval writes through in the same transaction as the status flip.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any, Callable
+
+from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.core.errors import AppError
+from app.core.scope import ScopeViolation, assert_in_scope
+from app.db.tenant.models.change_request import KINDS, PayrollChangeRequest
+from app.db.tenant.models.pay import (
+    DeductionType, EarningType, EmployeeDeduction, EmployeeEarning,
+)
+from app.db.tenant.models.people import Employee
+from app.services.payroll_audit import write_audit
+
+
+# ---------------------------------------------------------------------------
+# Per-kind payload schemas (internal — validated at submit time)
+# ---------------------------------------------------------------------------
+
+class _EarningCreatePayload(BaseModel):
+    earning_type_id: uuid.UUID
+    amount: Decimal | None = Field(None, ge=0)
+    rate: Decimal | None = Field(None, ge=0)
+    effective_from: date
+    effective_to: date | None = None
+
+
+class _EarningUpdatePayload(BaseModel):
+    target_id: uuid.UUID
+    row_version: int
+    amount: Decimal | None = Field(None, ge=0)
+    rate: Decimal | None = Field(None, ge=0)
+    effective_from: date | None = None
+    effective_to: date | None = None
+    is_active: bool | None = None
+
+
+class _EarningDeactivatePayload(BaseModel):
+    target_id: uuid.UUID
+    row_version: int
+
+
+class _DeductionCreatePayload(BaseModel):
+    deduction_type_id: uuid.UUID
+    amount: Decimal = Field(..., ge=0)
+    effective_from: date
+    effective_to: date | None = None
+
+
+class _DeductionUpdatePayload(BaseModel):
+    target_id: uuid.UUID
+    row_version: int
+    amount: Decimal | None = Field(None, ge=0)
+    effective_from: date | None = None
+    effective_to: date | None = None
+    is_active: bool | None = None
+
+
+class _DeductionDeactivatePayload(BaseModel):
+    target_id: uuid.UUID
+    row_version: int
+
+
+class _EmployeeFieldUpdatePayload(BaseModel):
+    contracted_weekly_hours: float | None = None
+    medical_scheme_members: int | None = None
+    uif_exempt: bool | None = None
+
+
+SUBMIT_SCHEMAS: dict[str, type[BaseModel]] = {
+    "employee_earning_create": _EarningCreatePayload,
+    "employee_earning_update": _EarningUpdatePayload,
+    "employee_earning_deactivate": _EarningDeactivatePayload,
+    "employee_deduction_create": _DeductionCreatePayload,
+    "employee_deduction_update": _DeductionUpdatePayload,
+    "employee_deduction_deactivate": _DeductionDeactivatePayload,
+    "employee_field_update": _EmployeeFieldUpdatePayload,
+}
+
+
+# ---------------------------------------------------------------------------
+# Submit / approve / reject / cancel
+# ---------------------------------------------------------------------------
+
+def submit_change_request(
+    db: Session,
+    user: Any,
+    *,
+    kind: str,
+    employee_id: uuid.UUID,
+    payload: dict,
+    note: str | None = None,
+) -> PayrollChangeRequest:
+    if kind not in KINDS:
+        raise AppError(
+            "unknown_kind", f"change request kind {kind!r} is not supported", 422,
+        )
+    schema = SUBMIT_SCHEMAS[kind]
+    try:
+        validated = schema(**payload)
+    except ValidationError as exc:
+        raise AppError(
+            "invalid_payload",
+            f"payload does not match {kind} schema: {exc.errors()}",
+            422,
+        ) from None
+
+    try:
+        assert_in_scope(user, employee_id, db)
+    except ScopeViolation:
+        raise AppError("not_found", "Employee not found", 404)
+
+    emp = db.scalar(select(Employee).where(Employee.id == employee_id))
+    if emp is None:
+        raise AppError("not_found", "Employee not found", 404)
+
+    request = PayrollChangeRequest(
+        id=uuid.uuid4(),
+        kind=kind,
+        employee_id=employee_id,
+        payload=validated.model_dump(mode="json"),
+        status="pending",
+        requested_by_user_id=getattr(user, "id", None),
+        decision_note=note,
+    )
+    db.add(request)
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="payroll_change_request", entity_id=request.id, action="submit",
+        new_value={
+            "kind": kind,
+            "employee_id": str(employee_id),
+            "payload": validated.model_dump(mode="json"),
+        },
+    )
+    return request
+
+
+def approve_change_request(
+    db: Session, user: Any, request_id: uuid.UUID,
+) -> tuple[PayrollChangeRequest, uuid.UUID]:
+    request = _load_pending(db, request_id)
+    _reject_self_approval(request, user)
+
+    applied_id = _apply(db, request, approver_user=user)
+    request.status = "approved"
+    request.decided_by_user_id = getattr(user, "id", None)
+    request.decided_at = datetime.utcnow()
+    request.applied_entity_id = applied_id
+    request.row_version += 1
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="payroll_change_request", entity_id=request.id, action="approve",
+        old_value={"status": "pending"},
+        new_value={"status": "approved", "applied_entity_id": str(applied_id)},
+    )
+    return request, applied_id
+
+
+def reject_change_request(
+    db: Session, user: Any, request_id: uuid.UUID, note: str,
+) -> PayrollChangeRequest:
+    request = _load_pending(db, request_id)
+    _reject_self_approval(request, user)
+    request.status = "rejected"
+    request.decided_by_user_id = getattr(user, "id", None)
+    request.decided_at = datetime.utcnow()
+    request.decision_note = note
+    request.row_version += 1
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="payroll_change_request", entity_id=request.id, action="reject",
+        old_value={"status": "pending"},
+        new_value={"status": "rejected", "note": note},
+    )
+    return request
+
+
+def cancel_change_request(
+    db: Session, user: Any, request_id: uuid.UUID,
+) -> PayrollChangeRequest:
+    request = _load_pending(db, request_id)
+    if request.requested_by_user_id != getattr(user, "id", None):
+        raise AppError(
+            "not_requester", "Only the requester may cancel a pending change", 403,
+        )
+    request.status = "cancelled"
+    request.row_version += 1
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="payroll_change_request", entity_id=request.id, action="cancel",
+        old_value={"status": "pending"}, new_value={"status": "cancelled"},
+    )
+    return request
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
+def _load_pending(db: Session, request_id: uuid.UUID) -> PayrollChangeRequest:
+    request = db.scalar(
+        select(PayrollChangeRequest).where(PayrollChangeRequest.id == request_id)
+    )
+    if request is None:
+        raise AppError("not_found", "Change request not found", 404)
+    if request.status != "pending":
+        raise AppError(
+            "not_pending",
+            f"Change request is {request.status}, cannot transition",
+            409,
+        )
+    return request
+
+
+def _reject_self_approval(request: PayrollChangeRequest, user: Any) -> None:
+    if request.requested_by_user_id == getattr(user, "id", None):
+        raise AppError(
+            "self_approval_forbidden",
+            "Approver must differ from requester",
+            409,
+        )
+
+
+def _apply(
+    db: Session, request: PayrollChangeRequest, *, approver_user: Any,
+) -> uuid.UUID:
+    kind = request.kind
+    p = request.payload
+
+    if kind == "employee_earning_create":
+        row = EmployeeEarning(
+            id=uuid.uuid4(),
+            employee_id=request.employee_id,
+            earning_type_id=uuid.UUID(p["earning_type_id"]),
+            amount=Decimal(p["amount"]) if p.get("amount") is not None else None,
+            rate=Decimal(p["rate"]) if p.get("rate") is not None else None,
+            effective_from=date.fromisoformat(p["effective_from"]),
+            effective_to=date.fromisoformat(p["effective_to"]) if p.get("effective_to") else None,
+            is_active=True,
+        )
+        _validate_amount_or_rate(row.amount, row.rate)
+        db.add(row)
+        db.flush()
+        return row.id
+
+    if kind == "employee_earning_update":
+        row = _load_scoped(db, EmployeeEarning, request.employee_id, uuid.UUID(p["target_id"]))
+        _check_row_version(row, p["row_version"])
+        _apply_patch(row, p, {"amount", "rate", "effective_from", "effective_to", "is_active"})
+        _validate_amount_or_rate(row.amount, row.rate)
+        row.row_version += 1
+        db.flush()
+        return row.id
+
+    if kind == "employee_earning_deactivate":
+        row = _load_scoped(db, EmployeeEarning, request.employee_id, uuid.UUID(p["target_id"]))
+        _check_row_version(row, p["row_version"])
+        row.is_active = False
+        row.row_version += 1
+        db.flush()
+        return row.id
+
+    if kind == "employee_deduction_create":
+        row = EmployeeDeduction(
+            id=uuid.uuid4(),
+            employee_id=request.employee_id,
+            deduction_type_id=uuid.UUID(p["deduction_type_id"]),
+            amount=Decimal(p["amount"]),
+            balance=Decimal("0.00"),
+            effective_from=date.fromisoformat(p["effective_from"]),
+            effective_to=date.fromisoformat(p["effective_to"]) if p.get("effective_to") else None,
+            is_active=True,
+        )
+        db.add(row)
+        db.flush()
+        return row.id
+
+    if kind == "employee_deduction_update":
+        row = _load_scoped(db, EmployeeDeduction, request.employee_id, uuid.UUID(p["target_id"]))
+        _check_row_version(row, p["row_version"])
+        _apply_patch(row, p, {"amount", "effective_from", "effective_to", "is_active"})
+        row.row_version += 1
+        db.flush()
+        return row.id
+
+    if kind == "employee_deduction_deactivate":
+        row = _load_scoped(db, EmployeeDeduction, request.employee_id, uuid.UUID(p["target_id"]))
+        _check_row_version(row, p["row_version"])
+        row.is_active = False
+        row.row_version += 1
+        db.flush()
+        return row.id
+
+    if kind == "employee_field_update":
+        emp = db.scalar(select(Employee).where(Employee.id == request.employee_id))
+        if emp is None:
+            raise AppError("not_found", "Employee not found", 404)
+        for field_name in ("contracted_weekly_hours", "medical_scheme_members", "uif_exempt"):
+            if field_name in p and p[field_name] is not None:
+                setattr(emp, field_name, p[field_name])
+        emp.row_version += 1
+        db.flush()
+        return emp.id
+
+    raise AppError("unknown_kind", f"no handler for kind {kind!r}", 500)
+
+
+def _load_scoped(db: Session, model: Any, employee_id: uuid.UUID, target_id: uuid.UUID) -> Any:
+    row = db.scalar(
+        select(model).where(model.id == target_id, model.employee_id == employee_id)
+    )
+    if row is None:
+        raise AppError("not_found", "Target row not found for this employee", 404)
+    return row
+
+
+def _check_row_version(row: Any, expected: int) -> None:
+    if row.row_version != expected:
+        raise AppError(
+            "record_changed",
+            f"row_version mismatch: sent {expected}, current {row.row_version}",
+            409,
+        )
+
+
+def _apply_patch(row: Any, payload: dict, allowed: set[str]) -> None:
+    for field_name in allowed:
+        if field_name in payload and payload[field_name] is not None:
+            value = payload[field_name]
+            if field_name in ("effective_from", "effective_to") and value is not None:
+                value = date.fromisoformat(value)
+            setattr(row, field_name, value)
+
+
+def _validate_amount_or_rate(amount: Decimal | None, rate: Decimal | None) -> None:
+    if amount is None and rate is None:
+        raise AppError("amount_or_rate_required", "Provide amount or rate", 422)
+    if amount is not None and rate is not None:
+        raise AppError("amount_xor_rate", "Provide amount or rate, not both", 422)
+
+# END OF FILE
+=== END FILE: backend/app/services/payroll_change_request.py ===
+=== FILE: backend/app/api/v1/payroll_change_requests_schemas.py ===
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+ChangeKind = Literal[
+    "employee_earning_create",
+    "employee_earning_update",
+    "employee_earning_deactivate",
+    "employee_deduction_create",
+    "employee_deduction_update",
+    "employee_deduction_deactivate",
+    "employee_field_update",
+]
+
+
+class ChangeRequestSubmitIn(BaseModel):
+    kind: ChangeKind
+    employee_id: uuid.UUID
+    payload: dict[str, Any]
+    note: str | None = None
+
+
+class ChangeRequestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    kind: str
+    employee_id: uuid.UUID
+    status: str
+    requested_by_user_id: uuid.UUID | None = None
+    requested_at: datetime
+    decided_by_user_id: uuid.UUID | None = None
+    decided_at: datetime | None = None
+    decision_note: str | None = None
+    applied_entity_id: uuid.UUID | None = None
+    row_version: int
+
+
+class ChangeRequestListOut(BaseModel):
+    items: list[ChangeRequestOut]
+    next_cursor: str | None = None
+
+
+class RejectIn(BaseModel):
+    note: str = Field(..., min_length=1)
+
+# END OF FILE
+=== END FILE: backend/app/api/v1/payroll_change_requests_schemas.py ===
+=== FILE: backend/app/api/v1/payroll_change_requests.py ===
+"""Payroll change requests (Chapter 4, Bundle 004a-iv-a).
+
+HR submits via PAY_RATE_REQUEST, payroll_admin approves via PAY_RATE_APPROVE.
+List/get via PAY_RATE_VIEW (hr, payroll_admin, auditor).
+"""
+from __future__ import annotations
+
+import base64
+import json
+import uuid
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
+
+from app.api.deps import TenantDbDep
+from app.api.v1.payroll_change_requests_schemas import (
+    ChangeRequestListOut,
+    ChangeRequestOut,
+    ChangeRequestSubmitIn,
+    RejectIn,
+)
+from app.core.errors import AppError
+from app.core.permissions import Permission, require_permission
+from app.db.tenant.models.change_request import PayrollChangeRequest
+from app.services.payroll_change_request import (
+    approve_change_request,
+    cancel_change_request,
+    reject_change_request,
+    submit_change_request,
+)
+
+router = APIRouter(prefix="/payroll/change-requests", tags=["payroll-change-requests"])
+
+_DEFAULT_LIMIT = 100
+_MAX_LIMIT = 500
+
+
+def _encode_cursor(uid: uuid.UUID) -> str:
+    raw = json.dumps({"i": str(uid)}, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> uuid.UUID:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        return uuid.UUID(json.loads(raw)["i"])
+    except Exception:
+        raise AppError("invalid_cursor", "The pagination cursor is malformed", 400) from None
+
+
+@router.post("", response_model=ChangeRequestOut, status_code=201)
+def submit(
+    body: ChangeRequestSubmitIn,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_REQUEST))],
+) -> ChangeRequestOut:
+    request = submit_change_request(
+        db, user,
+        kind=body.kind,
+        employee_id=body.employee_id,
+        payload=body.payload,
+        note=body.note,
+    )
+    db.commit()
+    return ChangeRequestOut.model_validate(request)
+
+
+@router.get("", response_model=ChangeRequestListOut)
+def list_requests(
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_VIEW))],
+    status: str | None = Query(None),
+    employee_id: uuid.UUID | None = Query(None),
+    limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
+    cursor: str | None = Query(None),
+) -> ChangeRequestListOut:
+    q = select(PayrollChangeRequest)
+    if status is not None:
+        q = q.where(PayrollChangeRequest.status == status)
+    if employee_id is not None:
+        q = q.where(PayrollChangeRequest.employee_id == employee_id)
+    if cursor is not None:
+        q = q.where(PayrollChangeRequest.id > _decode_cursor(cursor))
+    q = q.order_by(PayrollChangeRequest.id.asc()).limit(limit + 1)
+    rows = list(db.scalars(q).all())
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_cursor = _encode_cursor(rows[-1].id)
+    return ChangeRequestListOut(
+        items=[ChangeRequestOut.model_validate(r) for r in rows],
+        next_cursor=next_cursor,
+    )
+
+
+@router.get("/{request_id}", response_model=ChangeRequestOut)
+def get_request(
+    request_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_VIEW))],
+) -> ChangeRequestOut:
+    row = db.scalar(
+        select(PayrollChangeRequest).where(PayrollChangeRequest.id == request_id)
+    )
+    if row is None:
+        raise AppError("not_found", "Change request not found", 404)
+    return ChangeRequestOut.model_validate(row)
+
+
+@router.post("/{request_id}/approve", response_model=ChangeRequestOut)
+def approve(
+    request_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_APPROVE))],
+) -> ChangeRequestOut:
+    request, _applied_id = approve_change_request(db, user, request_id)
+    db.commit()
+    return ChangeRequestOut.model_validate(request)
+
+
+@router.post("/{request_id}/reject", response_model=ChangeRequestOut)
+def reject(
+    request_id: uuid.UUID,
+    body: RejectIn,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_APPROVE))],
+) -> ChangeRequestOut:
+    request = reject_change_request(db, user, request_id, body.note)
+    db.commit()
+    return ChangeRequestOut.model_validate(request)
+
+
+@router.post("/{request_id}/cancel", response_model=ChangeRequestOut)
+def cancel(
+    request_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_REQUEST))],
+) -> ChangeRequestOut:
+    request = cancel_change_request(db, user, request_id)
+    db.commit()
+    return ChangeRequestOut.model_validate(request)
+
+# END OF FILE
+=== END FILE: backend/app/api/v1/payroll_change_requests.py ===
+=== FILE: backend/app/api/v1/__init__.py ===
+from fastapi import APIRouter
+
+from app.api.v1.audit_log import router as audit_log_router
+from app.api.v1.auth.router import router as auth_router
+from app.api.v1.branches import router as branches_router
+from app.api.v1.company.router import router as company_router
+from app.api.v1.departments import router as departments_router
+from app.api.v1.devices import router as devices_router
+from app.api.v1.employee_work_patterns import router as employee_work_patterns_router
+from app.api.v1.employees import router as employees_router
+from app.api.v1.import_employees import router as import_employees_router
+from app.api.v1.pay_history import router as pay_history_router
+from app.api.v1.payroll_change_requests import router as payroll_change_requests_router
+from app.api.v1.payroll_employees import router as payroll_employees_router
+from app.api.v1.payroll_formulas import router as payroll_formulas_router
+from app.api.v1.payroll_settings import router as payroll_settings_router
+from app.api.v1.payroll_types import router as payroll_types_router
+from app.api.v1.public_holidays import router as public_holidays_router
+from app.api.v1.punches import router as punches_router
+from app.api.v1.register import router as register_router
+from app.api.v1.shift_rate_rules import router as shift_rate_rules_router
+from app.api.v1.shifts import router as shifts_router
+from app.api.v1.sites import router as sites_router
+from app.api.v1.users import router as users_router
+from app.api.v1.work_patterns import router as work_patterns_router
+
+from app.api.v1.attendance import router as attendance_router
+from app.api.v1.exceptions import router as exceptions_router
+from app.api.v1.adjustments import router as adjustments_router
+from app.api.v1.sheet import router as sheet_router
+
+api_router = APIRouter(prefix="/api/v1")
+api_router.include_router(register_router)
+api_router.include_router(auth_router)
+api_router.include_router(company_router)
+api_router.include_router(branches_router)
+api_router.include_router(sites_router)
+api_router.include_router(departments_router)
+api_router.include_router(import_employees_router)
+api_router.include_router(employees_router)
+api_router.include_router(pay_history_router)
+api_router.include_router(users_router)
+api_router.include_router(audit_log_router)
+api_router.include_router(shifts_router)
+api_router.include_router(shift_rate_rules_router)
+api_router.include_router(work_patterns_router)
+api_router.include_router(employee_work_patterns_router)
+api_router.include_router(public_holidays_router)
+api_router.include_router(devices_router)
+api_router.include_router(punches_router)
+api_router.include_router(attendance_router)
+api_router.include_router(exceptions_router)
+api_router.include_router(adjustments_router)
+api_router.include_router(sheet_router)
+api_router.include_router(payroll_settings_router)
+api_router.include_router(payroll_types_router)
+api_router.include_router(payroll_employees_router)
+api_router.include_router(payroll_formulas_router)
+api_router.include_router(payroll_change_requests_router)
+
+# END OF FILE
+=== END FILE: backend/app/api/v1/__init__.py ===
+=== FILE: backend/tests/test_payroll_change_requests.py ===
+"""Change request mechanism (Chapter 4, Bundle 004a-iv-a)."""
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
+from types import SimpleNamespace
+
+import pytest
+import sqlalchemy as sa
+from sqlalchemy.orm import Session
+
+from app.core.errors import AppError
+from app.core.security import hash_password
+from app.db.tenant.models.change_request import PayrollChangeRequest
+from app.db.tenant.models.pay import EarningType, EmployeeEarning
+from app.db.tenant.models.people import Employee
+from app.db.tenant.session import get_tenant_engine
+from app.services.payroll_change_request import (
+    approve_change_request,
+    cancel_change_request,
+    reject_change_request,
+    submit_change_request,
+)
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    from app.db.control.models import Subscriber
+    from app.db.control.session import control_session
+    from app.services.provisioning import (
+        _drop_tenant_database, _tenant_db_name, provision_tenant,
+    )
+    slug = f"cr-{uuid.uuid4().hex[:10]}"
+    result = provision_tenant(
+        slug=slug, name="CR Test",
+        admin_username="admin",
+        admin_password_hash=hash_password("TestPassword123!"),
+    )
+    db_name = _tenant_db_name(slug)
+    try:
+        yield _DisposableTenant(
+            slug=result.slug, tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        try:
+            _drop_tenant_database(db_name)
+        except Exception:
+            pass
+        with control_session() as session:
+            row = session.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if row is not None:
+                session.delete(row)
+
+
+@pytest.fixture()
+def tenant_session(disposable_tenant):
+    engine = get_tenant_engine(disposable_tenant.tenant_db_name)
+    session = Session(engine)
+    try:
+        yield session, engine
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def _hr():
+    return SimpleNamespace(role="hr", id=uuid.uuid4(), employee_id=None)
+
+
+def _payroll_admin():
+    return SimpleNamespace(role="payroll_admin", id=uuid.uuid4(), employee_id=None)
+
+
+def _mk_emp(session, code="CR-1"):
+    emp = Employee(
+        employee_code=code, first_name="A", last_name=code,
+        hire_date=date(2024, 1, 1), status="active",
+        employee_type="hourly", pay_basis="hourly", pay_frequency="monthly",
+        medical_scheme_members=0, uif_exempt=False,
+    )
+    session.add(emp)
+    session.commit()
+    return emp
+
+
+def _mk_earning_type(session, code="base"):
+    et = EarningType(
+        id=uuid.uuid4(), name="Base", code=code,
+        calc_method="fixed_amount", frequency="regular",
+        is_system=False, is_active=True,
+    )
+    session.add(et)
+    session.commit()
+    return et
+
+
+# ---------------------------------------------------------------------------
+# Submit
+# ---------------------------------------------------------------------------
+
+def test_submit_creates_pending(tenant_session):
+    session, _ = tenant_session
+    emp = _mk_emp(session)
+    et = _mk_earning_type(session)
+    hr = _hr()
+    req = submit_change_request(
+        session, hr,
+        kind="employee_earning_create",
+        employee_id=emp.id,
+        payload={
+            "earning_type_id": str(et.id),
+            "amount": "1500.00",
+            "effective_from": "2025-01-01",
+        },
+    )
+    session.commit()
+    assert req.status == "pending"
+    assert req.requested_by_user_id == hr.id
+    # No EmployeeEarning row created
+    assert session.query(EmployeeEarning).count() == 0
+
+
+def test_submit_rejects_unknown_kind(tenant_session):
+    session, _ = tenant_session
+    emp = _mk_emp(session)
+    with pytest.raises(AppError) as exc_info:
+        submit_change_request(
+            session, _hr(),
+            kind="bogus_kind",
+            employee_id=emp.id,
+            payload={},
+        )
+    assert exc_info.value.code == "unknown_kind"
+
+
+def test_submit_validates_payload_shape(tenant_session):
+    session, _ = tenant_session
+    emp = _mk_emp(session)
+    with pytest.raises(AppError) as exc_info:
+        submit_change_request(
+            session, _hr(),
+            kind="employee_earning_create",
+            employee_id=emp.id,
+            payload={"earning_type_id": "not-a-uuid"},  # missing + bad
+        )
+    assert exc_info.value.code == "invalid_payload"
+
+
+# ---------------------------------------------------------------------------
+# Approve
+# ---------------------------------------------------------------------------
+
+def test_approve_creates_employee_earning(tenant_session):
+    session, _ = tenant_session
+    emp = _mk_emp(session)
+    et = _mk_earning_type(session)
+    hr = _hr()
+    admin = _payroll_admin()
+    req = submit_change_request(
+        session, hr, kind="employee_earning_create", employee_id=emp.id,
+        payload={
+            "earning_type_id": str(et.id),
+            "amount": "1500.00",
+            "effective_from": "2025-01-01",
+        },
+    )
+    session.commit()
+    req, applied_id = approve_change_request(session, admin, req.id)
+    session.commit()
+
+    assert req.status == "approved"
+    assert req.decided_by_user_id == admin.id
+    assert req.applied_entity_id == applied_id
+    row = session.query(EmployeeEarning).filter_by(id=applied_id).one()
+    assert row.amount == Decimal("1500.00")
+
+
+def test_approve_self_rejected(tenant_session):
+    session, _ = tenant_session
+    emp = _mk_emp(session)
+    et = _mk_earning_type(session)
+    hr = _hr()
+    req = submit_change_request(
+        session, hr, kind="employee_earning_create", employee_id=emp.id,
+        payload={
+            "earning_type_id": str(et.id),
+            "amount": "1500.00",
+            "effective_from": "2025-01-01",
+        },
+    )
+    session.commit()
+    with pytest.raises(AppError) as exc_info:
+        approve_change_request(session, hr, req.id)
+    assert exc_info.value.code == "self_approval_forbidden"
+
+
+def test_approve_already_decided_rejected(tenant_session):
+    session, _ = tenant_session
+    emp = _mk_emp(session)
+    et = _mk_earning_type(session)
+    hr = _hr()
+    admin = _payroll_admin()
+    req = submit_change_request(
+        session, hr, kind="employee_earning_create", employee_id=emp.id,
+        payload={
+            "earning_type_id": str(et.id),
+            "amount": "1500.00",
+            "effective_from": "2025-01-01",
+        },
+    )
+    session.commit()
+    approve_change_request(session, admin, req.id)
+    session.commit()
+    with pytest.raises(AppError) as exc_info:
+        approve_change_request(session, admin, req.id)
+    assert exc_info.value.code == "not_pending"
+
+
+# ---------------------------------------------------------------------------
+# Reject
+# ---------------------------------------------------------------------------
+
+def test_reject_sets_status(tenant_session):
+    session, _ = tenant_session
+    emp = _mk_emp(session)
+    et = _mk_earning_type(session)
+    hr = _hr()
+    admin = _payroll_admin()
+    req = submit_change_request(
+        session, hr, kind="employee_earning_create", employee_id=emp.id,
+        payload={
+            "earning_type_id": str(et.id),
+            "amount": "1500.00",
+            "effective_from": "2025-01-01",
+        },
+    )
+    session.commit()
+    reject_change_request(session, admin, req.id, "insufficient evidence")
+    session.commit()
+    session.refresh(req)
+    assert req.status == "rejected"
+    assert req.decision_note == "insufficient evidence"
+    assert session.query(EmployeeEarning).count() == 0
+
+
+def test_reject_self_rejected(tenant_session):
+    session, _ = tenant_session
+    emp = _mk_emp(session)
+    et = _mk_earning_type(session)
+    hr = _hr()
+    req = submit_change_request(
+        session, hr, kind="employee_earning_create", employee_id=emp.id,
+        payload={
+            "earning_type_id": str(et.id),
+            "amount": "1500.00",
+            "effective_from": "2025-01-01",
+        },
+    )
+    session.commit()
+    with pytest.raises(AppError) as exc_info:
+        reject_change_request(session, hr, req.id, "meh")
+    assert exc_info.value.code == "self_approval_forbidden"
+
+
+# ---------------------------------------------------------------------------
+# Cancel
+# ---------------------------------------------------------------------------
+
+def test_cancel_by_requester(tenant_session):
+    session, _ = tenant_session
+    emp = _mk_emp(session)
+    et = _mk_earning_type(session)
+    hr = _hr()
+    req = submit_change_request(
+        session, hr, kind="employee_earning_create", employee_id=emp.id,
+        payload={
+            "earning_type_id": str(et.id),
+            "amount": "1500.00",
+            "effective_from": "2025-01-01",
+        },
+    )
+    session.commit()
+    cancel_change_request(session, hr, req.id)
+    session.commit()
+    session.refresh(req)
+    assert req.status == "cancelled"
+
+
+def test_cancel_by_other_rejected(tenant_session):
+    session, _ = tenant_session
+    emp = _mk_emp(session)
+    et = _mk_earning_type(session)
+    hr = _hr()
+    admin = _payroll_admin()
+    req = submit_change_request(
+        session, hr, kind="employee_earning_create", employee_id=emp.id,
+        payload={
+            "earning_type_id": str(et.id),
+            "amount": "1500.00",
+            "effective_from": "2025-01-01",
+        },
+    )
+    session.commit()
+    with pytest.raises(AppError) as exc_info:
+        cancel_change_request(session, admin, req.id)
+    assert exc_info.value.code == "not_requester"
+
+
+# ---------------------------------------------------------------------------
+# Field update
+# ---------------------------------------------------------------------------
+
+def test_approve_field_update_writes_employee(tenant_session):
+    session, _ = tenant_session
+    emp = _mk_emp(session)
+    hr = _hr()
+    admin = _payroll_admin()
+    req = submit_change_request(
+        session, hr, kind="employee_field_update", employee_id=emp.id,
+        payload={"contracted_weekly_hours": 40.0, "uif_exempt": True},
+    )
+    session.commit()
+    _, applied_id = approve_change_request(session, admin, req.id)
+    session.commit()
+    session.refresh(emp)
+    assert emp.contracted_weekly_hours == 40.0
+    assert emp.uif_exempt is True
+    assert applied_id == emp.id
+
+# END OF FILE
+=== END FILE: backend/tests/test_payroll_change_requests.py ===
+# END OF FILE

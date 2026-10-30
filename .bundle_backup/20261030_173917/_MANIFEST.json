@@ -1,0 +1,11 @@
+{
+  "created": [
+    "backend/tests/data/payslip_cases/TEMPLATE.json",
+    "backend/tests/test_payslip_cases_framework.py",
+    "scripts/close_chapter_4_state.py"
+  ],
+  "written": [
+    "tools/apply_bundle.py"
+  ],
+  "timestamp": "20261030_173917"
+}

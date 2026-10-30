@@ -1,0 +1,720 @@
+=== FILE: backend/app/services/payroll_refusals.py ===
+"""Payroll refusals (Chapter 4).
+
+Raised by services when a computation cannot proceed because a statutory
+table, a tenant setting, or a required employee field is missing. Endpoints
+translate these into HTTP responses with the code and status supplied here.
+"""
+from __future__ import annotations
+
+
+class PayrollRefusal(Exception):
+    def __init__(self, code: str, message: str, http_status: int = 409) -> None:
+        self.code = code
+        self.message = message
+        self.http_status = http_status
+        super().__init__(message)
+
+
+# Canonical codes (subset; more land in 004a-iii for UIF/SDL/pipeline)
+STATUTORY_TABLE_MISSING = "statutory_table_missing"
+STATUTORY_TABLE_EXPIRED = "statutory_table_expired"
+STATUTORY_TABLE_INVALID = "statutory_table_invalid"
+AGE_REFERENCE_DATE_UNSET = "age_reference_date_unset"
+MISSING_DATE_OF_BIRTH = "missing_date_of_birth"
+TAX_METHOD_UNSUPPORTED = "tax_method_unsupported"
+
+# END OF FILE
+=== END FILE: backend/app/services/payroll_refusals.py ===
+=== FILE: backend/app/services/payroll_tax.py ===
+"""Tax engine (Chapter 4, Bundle 004a-ii).
+
+Computes PAYE for a single employee, single pay period, using the
+effective-dated statutory tables loaded from the control database.
+
+Method v1: REGULAR_EARNINGS only. Assumes the employee works the whole
+year at the current period's taxable income. Once-off / irregular taxable
+earnings break that assumption (annualising a one-time payment massively
+over-withholds) and are REFUSED by the pipeline in 004a-iii; the engine
+exposes TaxMethod so the pipeline can enforce that.
+
+Rounding: two decimals, half-up, applied once at the final division.
+Intermediate tax calculations use unrounded Decimal.
+"""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal, ROUND_HALF_UP
+from enum import Enum
+from typing import Any
+
+from app.services import payroll_refusals as R
+
+
+# ---------------------------------------------------------------------------
+# Method registry
+# ---------------------------------------------------------------------------
+
+class TaxMethod(str, Enum):
+    REGULAR_EARNINGS = "regular_earnings_v1"
+
+
+AVAILABLE_TAX_METHODS: frozenset[TaxMethod] = frozenset({TaxMethod.REGULAR_EARNINGS})
+
+DEFAULT_TAX_METHOD: TaxMethod = TaxMethod.REGULAR_EARNINGS
+
+
+def is_method_available(method: TaxMethod) -> bool:
+    return method in AVAILABLE_TAX_METHODS
+
+
+# ---------------------------------------------------------------------------
+# Tables + result
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TaxTables:
+    brackets: list[dict[str, Any]]
+    rebates: dict[str, Decimal]
+    thresholds: dict[str, Decimal]
+    medical_credits: dict[str, Decimal]
+    retirement_limit: dict[str, Decimal]
+    source_version: str
+
+
+@dataclass
+class BracketTraceEntry:
+    row_key: str
+    lower_bound: Decimal
+    upper_bound: Decimal | None
+    rate: Decimal
+    taxable_in_bracket: Decimal
+    tax_amount: Decimal
+
+
+@dataclass
+class TaxResult:
+    method: str
+    period_paye: Decimal
+    annual_taxable: Decimal
+    threshold_applied: Decimal
+    bracket_tax: Decimal
+    rebates_total: Decimal
+    credits_total: Decimal
+    annual_tax: Decimal
+    trace: list[BracketTraceEntry] = field(default_factory=list)
+
+    def trace_dicts(self) -> list[dict[str, str]]:
+        return [
+            {
+                "row_key": t.row_key,
+                "lower_bound": str(t.lower_bound),
+                "upper_bound": "" if t.upper_bound is None else str(t.upper_bound),
+                "rate": str(t.rate),
+                "taxable_in_bracket": str(t.taxable_in_bracket),
+                "tax_amount": str(t.tax_amount),
+            }
+            for t in self.trace
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Helpers (pure)
+# ---------------------------------------------------------------------------
+
+def compute_age(date_of_birth: date, on_date: date) -> int:
+    age = on_date.year - date_of_birth.year
+    if (on_date.month, on_date.day) < (date_of_birth.month, date_of_birth.day):
+        age -= 1
+    return age
+
+
+def _decimal(value: Any) -> Decimal:
+    return Decimal(str(value))
+
+
+def _value_of(row: dict) -> Decimal:
+    if "amount" in row:
+        return _decimal(row["amount"])
+    if "value" in row:
+        return _decimal(row["value"])
+    raise R.PayrollRefusal(
+        R.STATUTORY_TABLE_INVALID,
+        f"statutory row {row.get('row_key')!r} has neither 'amount' nor 'value'",
+        500,
+    )
+
+
+def _rows_by_key(rows: list[dict]) -> dict[str, Decimal]:
+    return {row["row_key"]: _value_of(row) for row in rows}
+
+
+def _threshold_for_age(age: int, thresholds: dict[str, Decimal]) -> Decimal:
+    if age >= 75:
+        return thresholds.get("age_75_plus", thresholds.get("below_age_65", Decimal(0)))
+    if age >= 65:
+        return thresholds.get("age_65_to_74", thresholds.get("below_age_65", Decimal(0)))
+    return thresholds.get("below_age_65", Decimal(0))
+
+
+def _rebates_for_age(age: int, rebates: dict[str, Decimal]) -> Decimal:
+    total = rebates.get("primary", Decimal(0))
+    if age >= 65:
+        total += rebates.get("secondary_65", Decimal(0))
+    if age >= 75:
+        total += rebates.get("tertiary_75", Decimal(0))
+    return total
+
+
+def _credits_for_members(members: int, credits: dict[str, Decimal]) -> Decimal:
+    """Annual credit = (first_member + additional_member * (members-1)) * 12.
+
+    Table values are MONTHLY per SARS convention (E5). Zero members -> zero.
+    Part-year employment pro-rating is deferred (E5 note).
+    """
+    if members <= 0:
+        return Decimal(0)
+    first = credits.get("first_member", Decimal(0))
+    additional = credits.get("additional_member", Decimal(0))
+    monthly = first + additional * Decimal(members - 1)
+    return monthly * Decimal(12)
+
+
+def _apply_brackets(
+    annual_taxable: Decimal, brackets: list[dict[str, Any]]
+) -> tuple[Decimal, list[BracketTraceEntry]]:
+    total = Decimal(0)
+    trace: list[BracketTraceEntry] = []
+    for row in brackets:
+        lower = _decimal(row["lower_bound"])
+        upper = None if row.get("upper_bound") is None else _decimal(row["upper_bound"])
+        rate = _decimal(row["rate"])
+        if upper is None:
+            taxable = max(Decimal(0), annual_taxable - lower)
+        else:
+            taxable = max(Decimal(0), min(annual_taxable, upper) - lower)
+        tax = taxable * rate
+        if taxable > 0:
+            trace.append(
+                BracketTraceEntry(
+                    row_key=row["row_key"],
+                    lower_bound=lower,
+                    upper_bound=upper,
+                    rate=rate,
+                    taxable_in_bracket=taxable,
+                    tax_amount=tax,
+                )
+            )
+        total += tax
+    return total, trace
+
+
+# ---------------------------------------------------------------------------
+# Table loading
+# ---------------------------------------------------------------------------
+
+def _resolve_engine(engine_or_session: Any) -> Any:
+    """Accept Engine, Connection, or Session; return something with .connect()."""
+    if hasattr(engine_or_session, "connect"):
+        return engine_or_session
+    bind = engine_or_session.get_bind()
+    if hasattr(bind, "connect"):
+        return bind
+    return bind.engine
+
+
+def load_tax_tables(
+    engine_or_session: Any,
+    on_date: date,
+    country_code: str = "ZA",
+) -> TaxTables:
+    """Load every statutory table needed for PAYE, effective on `on_date`."""
+    from app.services.statutory_loader import get_active_table
+
+    engine = _resolve_engine(engine_or_session)
+
+    def fetch(table_type: str) -> dict:
+        row = get_active_table(engine, country_code, table_type, on_date)
+        if row is None:
+            raise R.PayrollRefusal(
+                R.STATUTORY_TABLE_MISSING,
+                f"{country_code}/{table_type} has no active version covering {on_date.isoformat()}",
+                409,
+            )
+        return row
+
+    bracket_t = fetch("tax_bracket")
+    rebate_t = fetch("tax_rebate")
+    threshold_t = fetch("tax_threshold")
+    credit_t = fetch("medical_credit")
+    retirement_t = fetch("retirement_limit")
+
+    return TaxTables(
+        brackets=bracket_t["rows"],
+        rebates=_rows_by_key(rebate_t["rows"]),
+        thresholds=_rows_by_key(threshold_t["rows"]),
+        medical_credits=_rows_by_key(credit_t["rows"]),
+        retirement_limit=_rows_by_key(retirement_t["rows"]),
+        source_version=bracket_t["version"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Engine ABC + v1 implementation
+# ---------------------------------------------------------------------------
+
+class TaxEngine(ABC):
+    method: TaxMethod
+
+    @abstractmethod
+    def compute(
+        self,
+        *,
+        taxable_income: Decimal,
+        pay_periods_per_year: int,
+        employee_age: int,
+        medical_members: int,
+        tables: TaxTables,
+    ) -> TaxResult: ...
+
+
+class RegularEarningsTaxEngine(TaxEngine):
+    method = TaxMethod.REGULAR_EARNINGS
+
+    def compute(
+        self,
+        *,
+        taxable_income: Decimal,
+        pay_periods_per_year: int,
+        employee_age: int,
+        medical_members: int,
+        tables: TaxTables,
+    ) -> TaxResult:
+        if pay_periods_per_year <= 0:
+            raise R.PayrollRefusal(
+                R.STATUTORY_TABLE_INVALID,
+                "pay_periods_per_year must be positive",
+                500,
+            )
+        if taxable_income < 0:
+            raise R.PayrollRefusal(
+                R.STATUTORY_TABLE_INVALID,
+                "taxable_income must be non-negative",
+                500,
+            )
+
+        annual_taxable = taxable_income * Decimal(pay_periods_per_year)
+        threshold = _threshold_for_age(employee_age, tables.thresholds)
+
+        if annual_taxable <= threshold:
+            return TaxResult(
+                method=self.method.value,
+                period_paye=Decimal("0.00"),
+                annual_taxable=annual_taxable,
+                threshold_applied=threshold,
+                bracket_tax=Decimal(0),
+                rebates_total=Decimal(0),
+                credits_total=Decimal(0),
+                annual_tax=Decimal(0),
+                trace=[],
+            )
+
+        bracket_tax, trace = _apply_brackets(annual_taxable, tables.brackets)
+        rebates = _rebates_for_age(employee_age, tables.rebates)
+        credits = _credits_for_members(medical_members, tables.medical_credits)
+        annual_tax = max(Decimal(0), bracket_tax - rebates - credits)
+
+        period_paye = (annual_tax / Decimal(pay_periods_per_year)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+        return TaxResult(
+            method=self.method.value,
+            period_paye=period_paye,
+            annual_taxable=annual_taxable,
+            threshold_applied=threshold,
+            bracket_tax=bracket_tax,
+            rebates_total=rebates,
+            credits_total=credits,
+            annual_tax=annual_tax,
+            trace=trace,
+        )
+
+
+def default_engine() -> TaxEngine:
+    return RegularEarningsTaxEngine()
+
+# END OF FILE
+=== END FILE: backend/app/services/payroll_tax.py ===
+=== FILE: backend/tests/test_payroll_tax.py ===
+"""Tax engine tests (Chapter 4, Bundle 004a-ii).
+
+Every expected figure is hand-worked in the comment above the assertion.
+The brackets/rebates/thresholds/credits used are from the SYNTHETIC
+fixture (fake_tax_tables.json), never real SA values.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import date
+from decimal import Decimal
+
+import pytest
+
+from app.services import payroll_refusals as R
+from app.services import payroll_tax as T
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers
+# ---------------------------------------------------------------------------
+
+def test_compute_age_simple():
+    assert T.compute_age(date(1990, 5, 15), date(2025, 5, 15)) == 35
+
+
+def test_compute_age_before_birthday():
+    # 2025-04-30 is before 1990-05-15, so age is still 34
+    assert T.compute_age(date(1990, 5, 15), date(2025, 4, 30)) == 34
+
+
+def test_compute_age_on_birthday_65():
+    # age 65 reached exactly on 2025-05-15
+    assert T.compute_age(date(1960, 5, 15), date(2025, 5, 15)) == 65
+
+
+# ---------------------------------------------------------------------------
+# Bracket math (fake brackets: [0,1000)@10%, [1000,2000)@15%, [2000,null)@20%)
+# ---------------------------------------------------------------------------
+
+FAKE_BRACKETS = [
+    {"row_key": "1", "lower_bound": "0", "upper_bound": "1000", "rate": "0.10", "base_tax": "0"},
+    {"row_key": "2", "lower_bound": "1000", "upper_bound": "2000", "rate": "0.15", "base_tax": "100"},
+    {"row_key": "3", "lower_bound": "2000", "upper_bound": None, "rate": "0.20", "base_tax": "250"},
+]
+
+
+def test_apply_brackets_below_first():
+    # annual_taxable = 0 -> tax 0
+    total, trace = T._apply_brackets(Decimal(0), FAKE_BRACKETS)
+    assert total == Decimal(0)
+    assert trace == []
+
+
+def test_apply_brackets_within_first():
+    # taxable = 500 -> 500 * 0.10 = 50.00
+    total, trace = T._apply_brackets(Decimal(500), FAKE_BRACKETS)
+    assert total == Decimal("50.00")
+    assert len(trace) == 1 and trace[0].row_key == "1"
+
+
+def test_apply_brackets_spanning_two():
+    # taxable = 1500 -> 1000*0.10 + 500*0.15 = 100 + 75 = 175.00
+    total, trace = T._apply_brackets(Decimal(1500), FAKE_BRACKETS)
+    assert total == Decimal("175.00")
+    assert len(trace) == 2
+
+
+def test_apply_brackets_top_bracket_open_ended():
+    # taxable = 12000 -> 100 + 150 + (12000-2000)*0.20 = 100 + 150 + 2000 = 2250.00
+    total, trace = T._apply_brackets(Decimal(12000), FAKE_BRACKETS)
+    assert total == Decimal("2250.00")
+    assert len(trace) == 3
+    assert trace[2].taxable_in_bracket == Decimal(10000)
+
+
+# ---------------------------------------------------------------------------
+# Rebates
+# ---------------------------------------------------------------------------
+
+FAKE_REBATES = {
+    "primary": Decimal(100),
+    "secondary_65": Decimal(50),
+    "tertiary_75": Decimal(25),
+}
+
+
+def test_rebates_under_65():
+    assert T._rebates_for_age(40, FAKE_REBATES) == Decimal(100)
+
+
+def test_rebates_65_to_74():
+    assert T._rebates_for_age(65, FAKE_REBATES) == Decimal(150)
+
+
+def test_rebates_75_plus():
+    assert T._rebates_for_age(80, FAKE_REBATES) == Decimal(175)
+
+
+# ---------------------------------------------------------------------------
+# Medical credits (monthly * 12; fake amounts 10 first, 5 additional)
+# ---------------------------------------------------------------------------
+
+FAKE_CREDITS = {
+    "first_member": Decimal(10),
+    "additional_member": Decimal(5),
+    "first_dependant": Decimal(5),
+}
+
+
+def test_credits_zero_members():
+    assert T._credits_for_members(0, FAKE_CREDITS) == Decimal(0)
+
+
+def test_credits_one_member():
+    # 10 * 12 = 120
+    assert T._credits_for_members(1, FAKE_CREDITS) == Decimal(120)
+
+
+def test_credits_two_members():
+    # (10 + 5) * 12 = 180
+    assert T._credits_for_members(2, FAKE_CREDITS) == Decimal(180)
+
+
+def test_credits_three_members():
+    # (10 + 5*2) * 12 = 240
+    assert T._credits_for_members(3, FAKE_CREDITS) == Decimal(240)
+
+
+# ---------------------------------------------------------------------------
+# Thresholds
+# ---------------------------------------------------------------------------
+
+FAKE_THRESHOLDS = {
+    "below_age_65": Decimal(500),
+    "age_65_to_74": Decimal(400),
+    "age_75_plus": Decimal(300),
+}
+
+
+def test_threshold_under_65():
+    assert T._threshold_for_age(40, FAKE_THRESHOLDS) == Decimal(500)
+
+
+def test_threshold_65_to_74():
+    assert T._threshold_for_age(65, FAKE_THRESHOLDS) == Decimal(400)
+
+
+def test_threshold_75_plus():
+    assert T._threshold_for_age(80, FAKE_THRESHOLDS) == Decimal(300)
+
+
+# ---------------------------------------------------------------------------
+# Full TaxEngine.compute
+# ---------------------------------------------------------------------------
+
+def _tables():
+    return T.TaxTables(
+        brackets=FAKE_BRACKETS,
+        rebates=FAKE_REBATES,
+        thresholds=FAKE_THRESHOLDS,
+        medical_credits=FAKE_CREDITS,
+        retirement_limit={"percentage_of_taxable_income": Decimal("0.10"), "annual_cap": Decimal(1000)},
+        source_version="synthetic_fake_v1",
+    )
+
+
+def test_compute_below_threshold_paye_zero():
+    # taxable 40/month * 12 = 480 annual, below 500 threshold -> PAYE 0
+    engine = T.RegularEarningsTaxEngine()
+    r = engine.compute(
+        taxable_income=Decimal(40),
+        pay_periods_per_year=12,
+        employee_age=40,
+        medical_members=0,
+        tables=_tables(),
+    )
+    assert r.period_paye == Decimal("0.00")
+    assert r.annual_tax == Decimal(0)
+
+
+def test_compute_above_threshold_no_rebates_effect():
+    # annual_taxable 12000, brackets = 2250
+    # rebates 100, credits 0 -> annual tax 2150
+    # per month = 2150/12 = 179.1666 -> 179.17 half-up
+    engine = T.RegularEarningsTaxEngine()
+    r = engine.compute(
+        taxable_income=Decimal(1000),  # 1000 * 12 = 12000
+        pay_periods_per_year=12,
+        employee_age=40,
+        medical_members=0,
+        tables=_tables(),
+    )
+    assert r.annual_taxable == Decimal(12000)
+    assert r.bracket_tax == Decimal("2250.00")
+    assert r.rebates_total == Decimal(100)
+    assert r.credits_total == Decimal(0)
+    assert r.annual_tax == Decimal(2150)
+    assert r.period_paye == Decimal("179.17")
+
+
+def test_compute_with_65_rebate_and_medical():
+    # annual_taxable 12000, brackets 2250
+    # rebate (primary + secondary_65) = 150
+    # medical 2 members = 180
+    # annual = 2250 - 150 - 180 = 1920
+    # per month = 160.00
+    engine = T.RegularEarningsTaxEngine()
+    r = engine.compute(
+        taxable_income=Decimal(1000),
+        pay_periods_per_year=12,
+        employee_age=65,
+        medical_members=2,
+        tables=_tables(),
+    )
+    assert r.rebates_total == Decimal(150)
+    assert r.credits_total == Decimal(180)
+    assert r.annual_tax == Decimal(1920)
+    assert r.period_paye == Decimal("160.00")
+
+
+def test_compute_trace_records_brackets():
+    engine = T.RegularEarningsTaxEngine()
+    r = engine.compute(
+        taxable_income=Decimal(1000),
+        pay_periods_per_year=12,
+        employee_age=40,
+        medical_members=0,
+        tables=_tables(),
+    )
+    assert len(r.trace) == 3
+    dicts = r.trace_dicts()
+    assert dicts[0]["row_key"] == "1"
+    assert dicts[2]["taxable_in_bracket"] == "10000"
+
+
+def test_compute_rejects_non_positive_periods():
+    engine = T.RegularEarningsTaxEngine()
+    with pytest.raises(R.PayrollRefusal):
+        engine.compute(
+            taxable_income=Decimal(1000),
+            pay_periods_per_year=0,
+            employee_age=40,
+            medical_members=0,
+            tables=_tables(),
+        )
+
+
+def test_compute_rejects_negative_taxable():
+    engine = T.RegularEarningsTaxEngine()
+    with pytest.raises(R.PayrollRefusal):
+        engine.compute(
+            taxable_income=Decimal(-1),
+            pay_periods_per_year=12,
+            employee_age=40,
+            medical_members=0,
+            tables=_tables(),
+        )
+
+
+def test_default_engine_method():
+    assert T.default_engine().method == T.TaxMethod.REGULAR_EARNINGS
+
+
+def test_only_regular_earnings_method_available():
+    assert T.is_method_available(T.TaxMethod.REGULAR_EARNINGS)
+    assert len(T.AVAILABLE_TAX_METHODS) == 1
+
+
+# ---------------------------------------------------------------------------
+# Integration with fake statutory tables (control DB)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def seeded_control_tables():
+    """Seed synthetic_fake_v1 tables into the control DB (ZA) with 2099 window."""
+    import json
+    from pathlib import Path
+    from app.db.control.session import control_session
+    from app.services import statutory_loader as sl
+
+    fixtures_path = Path(__file__).resolve().parent / "fixtures" / "fake_tax_tables.json"
+    data = json.loads(fixtures_path.read_text(encoding="utf-8"))
+
+    with control_session() as s:
+        engine = s.get_bind()
+    sl.bootstrap_schema(engine)
+
+    seeded_versions = []
+    with engine.begin() as conn:
+        # Clean any prior 2099-window rows for these types (idempotent across runs)
+        for t in data["tables"]:
+            conn.execute(
+                __import__("sqlalchemy").text(
+                    "DELETE FROM statutory_table WHERE country_code=:c AND table_type=:t "
+                    "AND version=:v"
+                ),
+                {"c": t["country_code"], "t": t["table_type"], "v": t["version"]},
+            )
+
+    for t in data["tables"]:
+        # Rebrand to 2099 window so no overlap with real ZA data
+        doc = {k: v for k, v in t.items() if not k.startswith("_")}
+        doc["effective_from"] = "2099-01-01"
+        doc["effective_to"] = "2099-12-31"
+        doc["version"] = "test_004a_ii_" + doc["table_type"]
+        sl.apply_document(
+            engine, doc,
+            actor_user_id=None,
+            typed_version=doc["version"],
+        )
+        seeded_versions.append((doc["country_code"], doc["table_type"], doc["version"]))
+
+    yield engine
+
+    # Cleanup
+    with engine.begin() as conn:
+        for cc, tt, v in seeded_versions:
+            row = conn.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT id FROM statutory_table WHERE country_code=:c AND table_type=:t AND version=:v"
+                ),
+                {"c": cc, "t": tt, "v": v},
+            ).first()
+            if row:
+                conn.execute(__import__("sqlalchemy").text(
+                    "DELETE FROM statutory_table_row WHERE statutory_table_id=:id"
+                ), {"id": row[0]})
+                conn.execute(__import__("sqlalchemy").text(
+                    "DELETE FROM statutory_table_load_log WHERE statutory_table_id=:id"
+                ), {"id": row[0]})
+                conn.execute(__import__("sqlalchemy").text(
+                    "DELETE FROM statutory_table WHERE id=:id"
+                ), {"id": row[0]})
+
+
+def test_load_tax_tables_from_control_db(seeded_control_tables):
+    engine = seeded_control_tables
+    tables = T.load_tax_tables(engine, date(2099, 6, 1))
+    assert tables.source_version == "test_004a_ii_tax_bracket"
+    assert len(tables.brackets) == 3
+    assert tables.rebates["primary"] == Decimal(100)
+    assert tables.thresholds["below_age_65"] == Decimal(500)
+    assert tables.medical_credits["first_member"] == Decimal(10)
+
+
+def test_load_tax_tables_missing_on_date(seeded_control_tables):
+    engine = seeded_control_tables
+    with pytest.raises(R.PayrollRefusal) as exc_info:
+        T.load_tax_tables(engine, date(2100, 6, 1))
+    assert exc_info.value.code == R.STATUTORY_TABLE_MISSING
+
+
+def test_end_to_end_engine_with_control_db(seeded_control_tables):
+    engine = seeded_control_tables
+    tables = T.load_tax_tables(engine, date(2099, 6, 1))
+    result = T.RegularEarningsTaxEngine().compute(
+        taxable_income=Decimal(1000),
+        pay_periods_per_year=12,
+        employee_age=40,
+        medical_members=0,
+        tables=tables,
+    )
+    assert result.annual_tax == Decimal(2150)
+    assert result.period_paye == Decimal("179.17")
+
+# END OF FILE
+=== END FILE: backend/tests/test_payroll_tax.py ===
+# END OF FILE

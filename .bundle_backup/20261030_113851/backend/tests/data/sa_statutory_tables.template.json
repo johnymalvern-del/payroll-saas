@@ -1,0 +1,24 @@
+{
+  "_comment": "Empty template. Every field null or empty so the validator flags missing values. Fill in from the official SARS / Dept of Employment and Labour document, save with a filename like tax_bracket_2025-2026_v1.json, then run: scripts\\load_statutory_tables.ps1 validate <file>",
+  "country_code": null,
+  "table_type": null,
+  "version": null,
+  "tax_year": null,
+  "source_document": null,
+  "source_url": null,
+  "source_date": null,
+  "effective_from": null,
+  "effective_to": null,
+  "rows": [
+    {
+      "row_key": null,
+      "sort_order": null,
+      "lower_bound": null,
+      "upper_bound": null,
+      "rate": null,
+      "base_tax": null
+    }
+  ]
+}
+
+# END OF FILE

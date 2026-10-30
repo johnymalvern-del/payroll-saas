@@ -1,0 +1,397 @@
+$ErrorActionPreference = 'Stop'
+$root = 'C:\xampp\htdocs\Payroll'
+$backend = Join-Path $root 'backend'
+
+function Check-LastExit { param([string]$what) if ($LASTEXITCODE -ne 0) { throw "STOP: $what (exit $LASTEXITCODE)" } }
+function Write-Utf8 { param([string]$path, [string]$content) [System.IO.File]::WriteAllText($path, $content, (New-Object System.Text.UTF8Encoding($false))) }
+
+Write-Host "=== 4A-bis START ==="
+Write-Host ""
+
+# ---------- PROFILE BEFORE ----------
+Write-Host "=== BEFORE profile: tests/test_adjustments.py + tests/test_sheet.py ==="
+Push-Location $backend
+try {
+    $swb = [System.Diagnostics.Stopwatch]::StartNew()
+    $beforeOut = python -m pytest tests/test_adjustments.py tests/test_sheet.py -v --durations=25 --durations-min=0.3 --no-header 2>&1
+    $beforeExit = $LASTEXITCODE
+    $swb.Stop()
+} finally { Pop-Location }
+if ($beforeExit -ne 0) { $beforeOut | Out-String | Write-Host; throw "BEFORE pytest failed" }
+$beforeSec = [int]$swb.Elapsed.TotalSeconds
+Write-Host ("BEFORE elapsed: {0}s" -f $beforeSec)
+Write-Host "BEFORE per-test SETUP/CALL/TEARDOWN (top durations):"
+$beforeOut | Select-String -Pattern '^\d+\.\d+s\s+(setup|call|teardown)' | ForEach-Object { Write-Host ("  " + $_.Line.Trim()) }
+$beforeOut | Select-String -Pattern '\d+ passed' | Select-Object -Last 1 | ForEach-Object { Write-Host ("  " + $_.Line.Trim()) }
+
+# ---------- PATCH security.py ----------
+Write-Host ""
+Write-Host "=== patch app/core/security.py ==="
+$secPath = Join-Path $backend 'app\core\security.py'
+$secText = [System.IO.File]::ReadAllText($secPath, [System.Text.Encoding]::UTF8)
+if ($secText -match '_4A_BIS_SECURITY') {
+    Write-Host "already patched"
+} else {
+    if ($secText -notmatch 'PasswordHasher') { throw "STOP: no PasswordHasher in security.py" }
+    $secPatch = @'
+
+# --- 4A-bis: _4A_BIS_SECURITY: weak argon2 in test env only; production unchanged ---
+import os as _os_4a_sec
+from argon2 import PasswordHasher as _PH_4a_sec
+
+if _os_4a_sec.environ.get("PAYROLL_TEST_FAST_HASH") == "1":
+    _4a_fast = _PH_4a_sec(time_cost=1, memory_cost=8192, parallelism=1, hash_len=16, salt_len=8)
+    for _4a_n in list(globals().keys()):
+        _4a_o = globals().get(_4a_n)
+        if isinstance(_4a_o, _PH_4a_sec) and _4a_o is not _4a_fast:
+            globals()[_4a_n] = _4a_fast
+
+def _4a_current_hasher():
+    for _4a_n in ("_hasher", "_PH", "_password_hasher", "password_hasher", "_HASHER"):
+        _4a_o = globals().get(_4a_n)
+        if isinstance(_4a_o, _PH_4a_sec):
+            return _4a_o
+    return _PH_4a_sec()
+# --- end ---
+
+# END OF FILE
+'@
+    $secText = $secText -replace '(?s)\s*# END OF FILE\s*$', ''
+    $secText = $secText.TrimEnd() + "`r`n" + $secPatch
+    Write-Utf8 $secPath $secText
+    Write-Host "patched: security.py"
+}
+
+# ---------- PATCH provisioning.py ----------
+Write-Host ""
+Write-Host "=== patch app/services/provisioning.py ==="
+$provPath = Join-Path $backend 'app\services\provisioning.py'
+$provText = [System.IO.File]::ReadAllText($provPath, [System.Text.Encoding]::UTF8)
+foreach ($needed in @('_run_tenant_migrations','_drop_tenant_database','_admin_url','_tenant_db_name')) {
+    if ($provText -notmatch "def $needed\(") { throw "STOP: $needed missing in provisioning.py" }
+}
+if ($provText -match '_4A_BIS_PROVISIONING') {
+    Write-Host "already patched"
+} else {
+    $provPatch = @'
+
+# --- 4A-bis: _4A_BIS_PROVISIONING: template DB fast path, test-only ---
+import os as _os_4a_prov
+from pathlib import Path as _Path_4a_prov
+
+_TEST_TEMPLATE_ENABLED = False
+_TEMPLATE_NAME_CACHE = None
+_TEMPLATE_VERSION_CACHE = None
+
+def _4a_get_template_name():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    backend_dir = _Path_4a_prov(__file__).resolve().parent.parent.parent
+    cfg = Config(str(backend_dir / "alembic.ini"), ini_section="tenant")
+    cfg.set_main_option("sqlalchemy.url", "driver://")
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    return f"payroll_tpl_{head}".replace(".", "_")
+
+def _4a_bootstrap_template_db():
+    global _TEMPLATE_NAME_CACHE, _TEMPLATE_VERSION_CACHE
+    if _TEMPLATE_NAME_CACHE is None:
+        _TEMPLATE_NAME_CACHE = _4a_get_template_name()
+    template = _TEMPLATE_NAME_CACHE
+    engine = create_engine(_admin_url("postgres"), future=True, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as conn:
+            exists = conn.scalar(text("SELECT 1 FROM pg_database WHERE datname=:n"), {"n": template})
+            if not exists:
+                conn.execute(text(f'CREATE DATABASE "{template}"'))
+    finally:
+        engine.dispose()
+    from alembic import command
+    from alembic.config import Config
+    backend_dir = _Path_4a_prov(__file__).resolve().parent.parent.parent
+    cfg = Config(str(backend_dir / "alembic.ini"), ini_section="tenant")
+    cfg.set_main_option("sqlalchemy.url", _admin_url(template))
+    command.upgrade(cfg, "head")
+    engine = create_engine(_admin_url(template), future=True)
+    try:
+        with engine.connect() as conn:
+            _TEMPLATE_VERSION_CACHE = conn.scalar(text("SELECT version_num FROM alembic_version LIMIT 1"))
+    finally:
+        engine.dispose()
+
+def _4a_run_migrations_from_template(db_name):
+    assert _TEST_TEMPLATE_ENABLED
+    assert _TEMPLATE_NAME_CACHE is not None
+    assert _TEMPLATE_VERSION_CACHE is not None
+    _drop_tenant_database(db_name)
+    engine = create_engine(_admin_url("postgres"), future=True, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{db_name}" TEMPLATE "{_TEMPLATE_NAME_CACHE}"'))
+    finally:
+        engine.dispose()
+    return str(_TEMPLATE_VERSION_CACHE)
+# --- end ---
+
+# END OF FILE
+'@
+    $provText = $provText -replace '(?s)\s*# END OF FILE\s*$', ''
+    $provText = $provText.TrimEnd() + "`r`n" + $provPatch
+    Write-Utf8 $provPath $provText
+    Write-Host "patched: provisioning.py"
+}
+
+# ---------- PATCH conftest.py ----------
+Write-Host ""
+Write-Host "=== patch tests/conftest.py ==="
+$cfPath = Join-Path $backend 'tests\conftest.py'
+$cfText = [System.IO.File]::ReadAllText($cfPath, [System.Text.Encoding]::UTF8)
+if ($cfText -match '_4A_BIS_CONFTEST') {
+    Write-Host "already patched"
+} else {
+    $cfPatch = @'
+
+# --- 4A-bis: _4A_BIS_CONFTEST: fast/slow markers + template bootstrap + migration swap ---
+import os as _os_4a_cf
+import pytest as _pytest_4a_cf
+
+_4a_orig_configure = globals().get("pytest_configure")
+def pytest_configure(config):
+    config.addinivalue_line("markers", "slow: provisions a tenant; -m 'not slow' skips in mid-chapter runs")
+    config.addinivalue_line("markers", "fast: pure logic; included in mid-chapter runs")
+    if _4a_orig_configure:
+        _4a_orig_configure(config)
+
+_4a_orig_modifyitems = globals().get("pytest_collection_modifyitems")
+def pytest_collection_modifyitems(config, items):
+    if _4a_orig_modifyitems:
+        _4a_orig_modifyitems(config, items)
+    for _4a_it in items:
+        _4a_names = getattr(_4a_it, "fixturenames", []) or []
+        if "disposable_tenant" in _4a_names:
+            _4a_it.add_marker(_pytest_4a_cf.mark.slow)
+        else:
+            _4a_it.add_marker(_pytest_4a_cf.mark.fast)
+
+_4a_orig_start = globals().get("pytest_sessionstart")
+def pytest_sessionstart(session):
+    if _4a_orig_start:
+        _4a_orig_start(session)
+    if _os_4a_cf.environ.get("PAYROLL_TEST_TEMPLATE_DB") == "1":
+        from app.services import provisioning as _4a_p
+        _4a_p._TEST_TEMPLATE_ENABLED = True
+        _4a_p._run_tenant_migrations = _4a_p._4a_run_migrations_from_template
+
+@pytest.fixture(scope="session", autouse=True)
+def _4a_bootstrap_template():
+    if _os_4a_cf.environ.get("PAYROLL_TEST_TEMPLATE_DB") == "1":
+        from app.services import provisioning as _4a_p
+        _4a_p._4a_bootstrap_template_db()
+    yield
+# --- end ---
+
+# END OF FILE
+'@
+    $cfText = $cfText -replace '(?s)\s*# END OF FILE\s*$', ''
+    $cfText = $cfText.TrimEnd() + "`r`n" + $cfPatch
+    Write-Utf8 $cfPath $cfText
+    Write-Host "patched: conftest.py"
+}
+
+# ---------- WRITE guard tests ----------
+Write-Host ""
+Write-Host "=== write tests/test_security_argon2_guard.py ==="
+$guardPath = Join-Path $backend 'tests\test_security_argon2_guard.py'
+$guardContent = @'
+"""4A-bis guard tests: fast paths active only in test env; production unchanged."""
+from __future__ import annotations
+import os
+import subprocess
+import sys
+
+
+def _isolated(code, drop_env=()):
+    env = {k: v for k, v in os.environ.items() if k not in drop_env}
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=30)
+
+
+def test_argon2_default_strong_without_env():
+    r = _isolated(
+        "from app.core.security import _4a_current_hasher; h=_4a_current_hasher(); print(h.memory_cost, h.time_cost, h.parallelism)",
+        drop_env={"PAYROLL_TEST_FAST_HASH"},
+    )
+    assert r.returncode == 0, r.stderr
+    mc, tc, par = r.stdout.strip().split()
+    assert int(mc) >= 32768, f"memory_cost too low: {mc}"
+    assert int(tc) >= 2, f"time_cost too low: {tc}"
+    assert int(par) >= 1
+
+
+def test_argon2_weak_with_env_isolated():
+    env = dict(os.environ)
+    env["PAYROLL_TEST_FAST_HASH"] = "1"
+    r = subprocess.run(
+        [sys.executable, "-c", "from app.core.security import _4a_current_hasher; h=_4a_current_hasher(); print(h.memory_cost, h.time_cost)"],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert r.returncode == 0, r.stderr
+    mc, tc = r.stdout.strip().split()
+    assert int(mc) < 32768, f"expected weak, got memory_cost={mc}"
+    assert int(tc) < 3
+
+
+def test_template_flag_off_by_default():
+    r = _isolated(
+        "from app.services.provisioning import _TEST_TEMPLATE_ENABLED; assert not _TEST_TEMPLATE_ENABLED; print('ok')",
+        drop_env={"PAYROLL_TEST_TEMPLATE_DB"},
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_template_flag_off_with_env_but_no_conftest():
+    env = dict(os.environ)
+    env["PAYROLL_TEST_TEMPLATE_DB"] = "1"
+    r = subprocess.run(
+        [sys.executable, "-c", "from app.services.provisioning import _TEST_TEMPLATE_ENABLED; assert not _TEST_TEMPLATE_ENABLED; print('ok')"],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert r.returncode == 0, r.stderr
+
+# END OF FILE
+'@
+Write-Utf8 $guardPath $guardContent
+Write-Host "wrote: $guardPath"
+
+# ---------- VERIFY ----------
+Write-Host ""
+Write-Host "=== verify ast + import + collect ==="
+Push-Location $backend
+try {
+    python -c "import ast,pathlib; files=['app/core/security.py','app/services/provisioning.py','tests/conftest.py','tests/test_security_argon2_guard.py']; [ast.parse(pathlib.Path(f).read_text(encoding='utf-8')) for f in files]; print('ast OK')"
+    Check-LastExit "ast"
+    python -c "from app.main import app; print('import OK')"
+    Check-LastExit "import"
+    python -m pytest tests/test_permissions.py --collect-only -q 2>&1 | Select-Object -Last 3
+    Check-LastExit "collect test_permissions.py"
+    python -m pytest tests/test_security_argon2_guard.py --collect-only -q 2>&1 | Select-Object -Last 3
+    Check-LastExit "collect guard tests"
+} finally { Pop-Location }
+
+# ---------- RUN guard tests (env cleared) ----------
+Write-Host ""
+Write-Host "=== run guard tests (production-like env) ==="
+Push-Location $backend
+Remove-Item Env:PAYROLL_TEST_TEMPLATE_DB -ErrorAction SilentlyContinue
+Remove-Item Env:PAYROLL_TEST_FAST_HASH -ErrorAction SilentlyContinue
+try {
+    python -m pytest tests/test_security_argon2_guard.py -q --no-header 2>&1 | Select-Object -Last 6
+    Check-LastExit "guard tests"
+} finally { Pop-Location }
+
+# ---------- AFTER run #1 (bootstrap included) ----------
+Write-Host ""
+Write-Host "=== AFTER run #1 (includes template bootstrap on first tenant test) ==="
+Push-Location $backend
+$env:PAYROLL_TEST_TEMPLATE_DB = "1"
+$env:PAYROLL_TEST_FAST_HASH = "1"
+try {
+    $swa1 = [System.Diagnostics.Stopwatch]::StartNew()
+    $after1Out = python -m pytest tests/test_adjustments.py tests/test_sheet.py -v --durations=25 --durations-min=0.3 --no-header 2>&1
+    $after1Exit = $LASTEXITCODE
+    $swa1.Stop()
+} finally { Pop-Location }
+if ($after1Exit -ne 0) { $after1Out | Out-String | Write-Host; throw "AFTER run #1 failed" }
+$after1Sec = [int]$swa1.Elapsed.TotalSeconds
+Write-Host ("AFTER run #1: {0}s (bootstrap included)" -f $after1Sec)
+Write-Host "AFTER per-test SETUP/CALL/TEARDOWN (top durations):"
+$after1Out | Select-String -Pattern '^\d+\.\d+s\s+(setup|call|teardown)' | ForEach-Object { Write-Host ("  " + $_.Line.Trim()) }
+$after1Out | Select-String -Pattern '\d+ passed' | Select-Object -Last 1 | ForEach-Object { Write-Host ("  " + $_.Line.Trim()) }
+
+# ---------- AFTER run #2 (steady state) ----------
+Write-Host ""
+Write-Host "=== AFTER run #2 (steady state, no bootstrap) ==="
+Push-Location $backend
+$env:PAYROLL_TEST_TEMPLATE_DB = "1"
+$env:PAYROLL_TEST_FAST_HASH = "1"
+try {
+    $swa2 = [System.Diagnostics.Stopwatch]::StartNew()
+    $after2Out = python -m pytest tests/test_adjustments.py tests/test_sheet.py -q --no-header 2>&1
+    $after2Exit = $LASTEXITCODE
+    $swa2.Stop()
+} finally {
+    Remove-Item Env:PAYROLL_TEST_TEMPLATE_DB -ErrorAction SilentlyContinue
+    Remove-Item Env:PAYROLL_TEST_FAST_HASH -ErrorAction SilentlyContinue
+    Pop-Location
+}
+if ($after2Exit -ne 0) { $after2Out | Out-String | Write-Host; throw "AFTER run #2 failed" }
+$after2Sec = [int]$swa2.Elapsed.TotalSeconds
+Write-Host ("AFTER run #2 (steady): {0}s" -f $after2Sec)
+
+# ---------- FAST SUBSET ----------
+Write-Host ""
+Write-Host "=== fast subset: pytest tests -m 'not slow' ==="
+Push-Location $backend
+$env:PAYROLL_TEST_FAST_HASH = "1"
+try {
+    $swf = [System.Diagnostics.Stopwatch]::StartNew()
+    python -m pytest tests -q -m "not slow" --no-header 2>&1 | Select-Object -Last 6
+    $fastExit = $LASTEXITCODE
+    $swf.Stop()
+} finally {
+    Remove-Item Env:PAYROLL_TEST_FAST_HASH -ErrorAction SilentlyContinue
+    Pop-Location
+}
+if ($fastExit -ne 0) { throw "STOP: fast subset failed" }
+$fastSec = [int]$swf.Elapsed.TotalSeconds
+
+# ---------- XDIST CHECK ----------
+Write-Host ""
+Write-Host "=== xdist check ==="
+Push-Location $backend
+try {
+    python -c "import importlib.util; print('pytest-xdist: ' + ('installed' if importlib.util.find_spec('xdist') else 'NOT installed'))" 2>&1 | Write-Host
+} finally { Pop-Location }
+
+# ---------- SUMMARY ----------
+Write-Host ""
+Write-Host "=== SUMMARY ==="
+$perTestBefore = [double]$beforeSec / 15.0
+$perTestAfter  = [double]$after2Sec / 15.0
+$perTestSaved  = $perTestBefore - $perTestAfter
+$estSaved = $perTestSaved * 701
+$estFull = [int](2435 - $estSaved)
+if ($estFull -lt 300) { $estFull = 300 }
+Write-Host ("BEFORE (2 files): {0}s; per-test {1:N2}s" -f $beforeSec, $perTestBefore)
+Write-Host ("AFTER run #1 (2 files, incl bootstrap): {0}s" -f $after1Sec)
+Write-Host ("AFTER run #2 (2 files, steady): {0}s; per-test {1:N2}s" -f $after2Sec, $perTestAfter)
+Write-Host ("Per-test savings: {0:N2}s" -f $perTestSaved)
+Write-Host ("Fast subset (mid-chapter): {0}s" -f $fastSec)
+Write-Host ("Estimated full-suite time after change: ~{0}s (~{1} min) vs 2435s baseline" -f $estFull, [int]($estFull/60))
+Write-Host "  Caveat: this extrapolates uniformly across all 701 tests. Only tenant-provisioning tests benefit fully, so treat as an upper bound."
+if ($after2Sec -gt ($beforeSec * 0.85)) {
+    Write-Host "WARN: AFTER not substantially faster than BEFORE — the fast path may not have activated. Check that provision_tenant calls _run_tenant_migrations by module-level name."
+}
+
+# ---------- COMMIT ----------
+Write-Host ""
+Write-Host "=== commit (local) ==="
+Push-Location $root
+try {
+    git status --short
+    Check-LastExit "git status"
+    git add backend/app/core/security.py backend/app/services/provisioning.py backend/tests/conftest.py backend/tests/test_security_argon2_guard.py
+    Check-LastExit "git add"
+    $staged = git diff --cached --name-only
+    Check-LastExit "git diff --cached --name-only"
+    if ($staged) {
+        git commit -m "4A-bis: template DB clone fast path, weak argon2 in test env, fast/slow markers"
+        Check-LastExit "git commit"
+    } else {
+        Write-Host "nothing to commit"
+    }
+    git log --oneline -3
+    Check-LastExit "git log"
+} finally { Pop-Location }
+
+Write-Host ""
+Write-Host "DONE. 4A-bis complete. No push."
+# END OF FILE

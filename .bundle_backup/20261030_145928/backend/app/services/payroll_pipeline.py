@@ -1,0 +1,256 @@
+"""8-step payroll pipeline (Chapter 4, Bundle 004a-iii part 2).
+
+Pure orchestration: no DB writes, no clock, no side effects. Takes earnings
+lines, deduction lines, reimbursements, and a PipelineConfig that supplies
+already-loaded statutory tables + tenant settings. Returns a PayslipDraft.
+
+Steps (matching the master brief and E3/E4/E5/E7/F5/F7):
+  1. Gross                = sum of all earnings
+  2. Pre-tax deductions   = retirement capped by 11F, plus any other pre-tax line
+  3. Taxable income       = gross - pre_tax
+  4. PAYE                 = TaxEngine on taxable income (regular-earnings v1)
+  5. Statutory            = UIF employee, UIF employer, SDL (employer costs)
+  6. Other deductions     = priority order with net-pay floor; refusal on garnishee
+  7. Reimbursements       = added after tax
+  8. Net pay              = taxable - PAYE - UIF_employee - other + reimbursements
+
+Refusal semantics (F7): a garnishee that would breach the floor refuses the
+whole computation (code: deduction_exceeds_floor_legal_order). A non-legal
+deduction that would breach the floor is deferred in full (never shrunk).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Any
+
+from app.services import payroll_refusals as R
+from app.services import payroll_tax as T
+from app.services import payroll_uif_sdl as U
+
+
+ONCE_OFF_FREQUENCIES = frozenset({"once_off", "irregular"})
+
+LEGAL_ORDER_CATEGORIES = frozenset({"garnishee"})
+
+
+@dataclass
+class EarningLine:
+    label: str
+    amount: Decimal
+    frequency: str = "regular"
+    is_taxable: bool = True
+    counts_for_uif: bool = True
+    counts_for_sdl: bool = True
+    source_ref: dict = field(default_factory=dict)
+
+
+@dataclass
+class DeductionLine:
+    label: str
+    amount: Decimal
+    category: str = "other"
+    is_pre_tax: bool = False
+    priority: int = 100
+    source_ref: dict = field(default_factory=dict)
+
+
+@dataclass
+class ReimbursementLine:
+    label: str
+    amount: Decimal
+    source_ref: dict = field(default_factory=dict)
+
+
+@dataclass
+class PipelineConfig:
+    tax_engine: T.TaxEngine
+    tax_tables: T.TaxTables
+    uif_rows: list[dict]
+    sdl_rows: list[dict]
+    retirement_rows: list[dict]
+    periods_per_year: int
+    employee_age: int
+    medical_members: int
+    uif_exempt: bool
+    sdl_applies: bool | None
+    net_pay_floor: Decimal
+
+
+@dataclass
+class PayslipDraft:
+    gross: Decimal = Decimal("0.00")
+    pre_tax_deductions: Decimal = Decimal("0.00")
+    taxable_income: Decimal = Decimal("0.00")
+    paye: Decimal = Decimal("0.00")
+    uif_employee: Decimal = Decimal("0.00")
+    uif_employer: Decimal = Decimal("0.00")
+    sdl: Decimal = Decimal("0.00")
+    other_deductions: Decimal = Decimal("0.00")
+    reimbursements: Decimal = Decimal("0.00")
+    net: Decimal = Decimal("0.00")
+    retirement_excess: Decimal = Decimal("0.00")
+    floor_applied: bool = False
+    deferred_deductions: list[dict] = field(default_factory=list)
+    tax_trace: list[dict] = field(default_factory=list)
+    calculation_context: dict = field(default_factory=dict)
+    refusal_code: str | None = None
+    refusal_message: str | None = None
+
+    @property
+    def refused(self) -> bool:
+        return self.refusal_code is not None
+
+    def employer_costs(self) -> dict[str, str]:
+        return {
+            "uif_employer": str(self.uif_employer),
+            "sdl": str(self.sdl),
+        }
+
+
+def _q(amount: Decimal) -> Decimal:
+    return amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _refuse(code: str, message: str, draft: PayslipDraft) -> PayslipDraft:
+    draft.refusal_code = code
+    draft.refusal_message = message
+    return draft
+
+
+def run_pipeline(
+    config: PipelineConfig,
+    earnings: list[EarningLine],
+    deductions: list[DeductionLine],
+    reimbursements: list[ReimbursementLine] | None = None,
+) -> PayslipDraft:
+    reimb = reimbursements or []
+    draft = PayslipDraft()
+
+    # Step 0 - F5: refuse taxable once-off / irregular earnings under
+    # regular-earnings v1 (annualising a one-time payment massively over-withholds).
+    for e in earnings:
+        if e.is_taxable and e.frequency in ONCE_OFF_FREQUENCIES:
+            return _refuse(
+                R.TAX_METHOD_UNSUPPORTED,
+                f"taxable {e.frequency} earning {e.label!r} is not supported "
+                f"by the regular-earnings method",
+                draft,
+            )
+
+    # Step 1 - Gross
+    gross = _q(sum((e.amount for e in earnings), Decimal("0.00")))
+    draft.gross = gross
+
+    # Step 2 - Pre-tax deductions (retirement subject to 11F cap)
+    pre_tax_total = Decimal("0.00")
+    retirement_excess = Decimal("0.00")
+    for d in deductions:
+        if not d.is_pre_tax:
+            continue
+        if d.category == "retirement":
+            allowed, excess = U.apply_retirement_limit(
+                d.amount, gross, config.retirement_rows, config.periods_per_year,
+            )
+            pre_tax_total += allowed
+            retirement_excess += excess
+        else:
+            pre_tax_total += d.amount
+    draft.pre_tax_deductions = _q(pre_tax_total)
+    draft.retirement_excess = _q(retirement_excess)
+
+    # Step 3 - Taxable income
+    taxable = _q(gross - draft.pre_tax_deductions)
+    if taxable < 0:
+        taxable = Decimal("0.00")
+    draft.taxable_income = taxable
+
+    # Step 4 - PAYE
+    tax_result = config.tax_engine.compute(
+        taxable_income=taxable,
+        pay_periods_per_year=config.periods_per_year,
+        employee_age=config.employee_age,
+        medical_members=config.medical_members,
+        tables=config.tax_tables,
+    )
+    draft.paye = tax_result.period_paye
+    draft.tax_trace = tax_result.trace_dicts()
+
+    # Step 5 - Statutory (UIF + SDL)
+    uif_base = sum(
+        (e.amount for e in earnings if e.counts_for_uif), Decimal("0.00"),
+    )
+    sdl_base = sum(
+        (e.amount for e in earnings if e.counts_for_sdl), Decimal("0.00"),
+    )
+    draft.uif_employee = U.compute_uif_employee(
+        uif_base, config.uif_rows, config.uif_exempt,
+    )
+    draft.uif_employer = U.compute_uif_employer(
+        uif_base, config.uif_rows, config.uif_exempt,
+    )
+    draft.sdl = U.compute_sdl(sdl_base, config.sdl_rows, config.sdl_applies)
+
+    # Step 6 - Other deductions in priority order with net-pay floor
+    net_so_far = taxable - draft.paye - draft.uif_employee
+    applied_other = Decimal("0.00")
+    deferred: list[dict] = []
+
+    for d in sorted(
+        (d for d in deductions if not d.is_pre_tax),
+        key=lambda x: x.priority,
+    ):
+        projected = net_so_far - applied_other - d.amount
+        if projected >= config.net_pay_floor:
+            applied_other += d.amount
+        else:
+            if d.category in LEGAL_ORDER_CATEGORIES:
+                return _refuse(
+                    R.DEDUCTION_EXCEEDS_FLOOR_LEGAL_ORDER,
+                    f"legal-order deduction {d.label!r} "
+                    f"({d.amount}) would push net pay below floor "
+                    f"({config.net_pay_floor})",
+                    draft,
+                )
+            deferred.append({
+                "label": d.label,
+                "amount": str(d.amount),
+                "category": d.category,
+                "priority": d.priority,
+            })
+
+    draft.other_deductions = _q(applied_other)
+    draft.deferred_deductions = deferred
+    draft.floor_applied = len(deferred) > 0
+
+    # Step 7 - Reimbursements
+    reimb_total = _q(sum((r.amount for r in reimb), Decimal("0.00")))
+    draft.reimbursements = reimb_total
+
+    # Step 8 - Net pay
+    net = (
+        taxable - draft.paye - draft.uif_employee
+        - draft.other_deductions + draft.reimbursements
+    )
+    draft.net = _q(net)
+
+    draft.calculation_context = {
+        "tax_method": tax_result.method,
+        "periods_per_year": config.periods_per_year,
+        "employee_age": config.employee_age,
+        "medical_members": config.medical_members,
+        "uif_exempt": config.uif_exempt,
+        "sdl_applies": config.sdl_applies,
+        "net_pay_floor": str(config.net_pay_floor),
+        "annual_taxable": str(tax_result.annual_taxable),
+        "threshold_applied": str(tax_result.threshold_applied),
+        "bracket_tax": str(tax_result.bracket_tax),
+        "rebates_total": str(tax_result.rebates_total),
+        "credits_total": str(tax_result.credits_total),
+        "annual_tax": str(tax_result.annual_tax),
+        "source_version": config.tax_tables.source_version,
+    }
+
+    return draft
+
+# END OF FILE

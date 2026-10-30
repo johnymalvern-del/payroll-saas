@@ -1,0 +1,694 @@
+=== FILE: backend/app/api/v1/payroll_employees.py ===
+"""Per-employee earnings and deductions (Chapter 4).
+
+Writes route through the F3 change-request mechanism (Bundle 004a-iv-a):
+HR submits a pending change request via these endpoints, payroll_admin
+approves via /payroll/change-requests/{id}/approve. Pending requests have
+zero effect on employee_earning / employee_deduction until approved.
+
+Reads are direct (PAYROLL_PREVIEW); the writes return 202 with the pending
+change request envelope, not the would-be row.
+
+F3 default: submission endpoint = existing 003c URL. The change-request
+create/approve endpoints exist separately under /payroll/change-requests.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import uuid
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
+
+from app.api.deps import TenantDbDep
+from app.api.v1.payroll_change_requests_schemas import ChangeRequestOut
+from app.api.v1.payroll_employees_schemas import (
+    EmployeeDeductionListOut,
+    EmployeeDeductionOut,
+    EmployeeDeductionPatch,
+    EmployeeEarningIn,
+    EmployeeEarningListOut,
+    EmployeeEarningOut,
+    EmployeeEarningPatch,
+    EmployeeDeductionIn,
+)
+from app.core.errors import AppError
+from app.core.permissions import Permission, require_permission
+from app.core.scope import ScopeViolation, assert_in_scope
+from app.db.tenant.models.pay import EmployeeDeduction, EmployeeEarning
+from app.db.tenant.models.people import Employee
+from app.services.payroll_change_request import submit_change_request
+
+router = APIRouter(prefix="/payroll", tags=["payroll-employees"])
+
+_DEFAULT_LIMIT = 100
+_MAX_LIMIT = 500
+
+
+def _encode_uuid_cursor(uid: uuid.UUID) -> str:
+    raw = json.dumps({"i": str(uid)}, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_uuid_cursor(cursor: str) -> uuid.UUID:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        return uuid.UUID(json.loads(raw)["i"])
+    except Exception:
+        raise AppError("invalid_cursor", "The pagination cursor is malformed", 400) from None
+
+
+def _resolve_employee_or_404(db, user, employee_id: uuid.UUID) -> Employee:
+    try:
+        assert_in_scope(user, employee_id, db)
+    except ScopeViolation:
+        raise AppError("not_found", "Employee not found", 404)
+    emp = db.scalar(select(Employee).where(Employee.id == employee_id))
+    if emp is None:
+        raise AppError("not_found", "Employee not found", 404)
+    return emp
+
+
+# ---------------------------------------------------------------------------
+# Employee earnings — READ
+# ---------------------------------------------------------------------------
+
+@router.get("/employees/{employee_id}/earnings", response_model=EmployeeEarningListOut)
+def list_employee_earnings(
+    employee_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+    active_only: bool = Query(True),
+    limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
+    cursor: str | None = Query(None),
+) -> EmployeeEarningListOut:
+    _resolve_employee_or_404(db, user, employee_id)
+    q = select(EmployeeEarning).where(EmployeeEarning.employee_id == employee_id)
+    if active_only:
+        q = q.where(EmployeeEarning.is_active.is_(True))
+    if cursor is not None:
+        q = q.where(EmployeeEarning.id > _decode_uuid_cursor(cursor))
+    q = q.order_by(EmployeeEarning.id.asc()).limit(limit + 1)
+    rows = list(db.scalars(q).all())
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_cursor = _encode_uuid_cursor(rows[-1].id)
+    return EmployeeEarningListOut(
+        items=[EmployeeEarningOut.model_validate(r) for r in rows],
+        next_cursor=next_cursor,
+    )
+
+
+@router.get("/employees/{employee_id}/earnings/{item_id}", response_model=EmployeeEarningOut)
+def get_employee_earning(
+    employee_id: uuid.UUID,
+    item_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+) -> EmployeeEarningOut:
+    _resolve_employee_or_404(db, user, employee_id)
+    row = db.scalar(
+        select(EmployeeEarning).where(
+            EmployeeEarning.id == item_id,
+            EmployeeEarning.employee_id == employee_id,
+        )
+    )
+    if row is None:
+        raise AppError("not_found", "Employee earning not found", 404)
+    return EmployeeEarningOut.model_validate(row)
+
+
+# ---------------------------------------------------------------------------
+# Employee earnings — WRITE (change-request submission)
+# ---------------------------------------------------------------------------
+
+@router.post("/employees/{employee_id}/earnings", response_model=ChangeRequestOut, status_code=202)
+def create_employee_earning_request(
+    employee_id: uuid.UUID,
+    body: EmployeeEarningIn,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_REQUEST))],
+) -> ChangeRequestOut:
+    request = submit_change_request(
+        db, user,
+        kind="employee_earning_create",
+        employee_id=employee_id,
+        payload=body.model_dump(mode="json"),
+    )
+    db.commit()
+    return ChangeRequestOut.model_validate(request)
+
+
+@router.patch("/employees/{employee_id}/earnings/{item_id}", response_model=ChangeRequestOut, status_code=202)
+def patch_employee_earning_request(
+    employee_id: uuid.UUID,
+    item_id: uuid.UUID,
+    body: EmployeeEarningPatch,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_REQUEST))],
+) -> ChangeRequestOut:
+    payload = body.model_dump(mode="json", exclude_unset=True)
+    payload["target_id"] = str(item_id)
+    request = submit_change_request(
+        db, user,
+        kind="employee_earning_update",
+        employee_id=employee_id,
+        payload=payload,
+    )
+    db.commit()
+    return ChangeRequestOut.model_validate(request)
+
+
+@router.post("/employees/{employee_id}/earnings/{item_id}/deactivate", response_model=ChangeRequestOut, status_code=202)
+def deactivate_employee_earning_request(
+    employee_id: uuid.UUID,
+    item_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_REQUEST))],
+    row_version: int = Query(...),
+) -> ChangeRequestOut:
+    request = submit_change_request(
+        db, user,
+        kind="employee_earning_deactivate",
+        employee_id=employee_id,
+        payload={"target_id": str(item_id), "row_version": row_version},
+    )
+    db.commit()
+    return ChangeRequestOut.model_validate(request)
+
+
+# ---------------------------------------------------------------------------
+# Employee deductions — READ
+# ---------------------------------------------------------------------------
+
+@router.get("/employees/{employee_id}/deductions", response_model=EmployeeDeductionListOut)
+def list_employee_deductions(
+    employee_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+    active_only: bool = Query(True),
+    limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
+    cursor: str | None = Query(None),
+) -> EmployeeDeductionListOut:
+    _resolve_employee_or_404(db, user, employee_id)
+    q = select(EmployeeDeduction).where(EmployeeDeduction.employee_id == employee_id)
+    if active_only:
+        q = q.where(EmployeeDeduction.is_active.is_(True))
+    if cursor is not None:
+        q = q.where(EmployeeDeduction.id > _decode_uuid_cursor(cursor))
+    q = q.order_by(EmployeeDeduction.id.asc()).limit(limit + 1)
+    rows = list(db.scalars(q).all())
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_cursor = _encode_uuid_cursor(rows[-1].id)
+    return EmployeeDeductionListOut(
+        items=[EmployeeDeductionOut.model_validate(r) for r in rows],
+        next_cursor=next_cursor,
+    )
+
+
+@router.get("/employees/{employee_id}/deductions/{item_id}", response_model=EmployeeDeductionOut)
+def get_employee_deduction(
+    employee_id: uuid.UUID,
+    item_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+) -> EmployeeDeductionOut:
+    _resolve_employee_or_404(db, user, employee_id)
+    row = db.scalar(
+        select(EmployeeDeduction).where(
+            EmployeeDeduction.id == item_id,
+            EmployeeDeduction.employee_id == employee_id,
+        )
+    )
+    if row is None:
+        raise AppError("not_found", "Employee deduction not found", 404)
+    return EmployeeDeductionOut.model_validate(row)
+
+
+# ---------------------------------------------------------------------------
+# Employee deductions — WRITE (change-request submission)
+# ---------------------------------------------------------------------------
+
+@router.post("/employees/{employee_id}/deductions", response_model=ChangeRequestOut, status_code=202)
+def create_employee_deduction_request(
+    employee_id: uuid.UUID,
+    body: EmployeeDeductionIn,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_REQUEST))],
+) -> ChangeRequestOut:
+    request = submit_change_request(
+        db, user,
+        kind="employee_deduction_create",
+        employee_id=employee_id,
+        payload=body.model_dump(mode="json"),
+    )
+    db.commit()
+    return ChangeRequestOut.model_validate(request)
+
+
+@router.patch("/employees/{employee_id}/deductions/{item_id}", response_model=ChangeRequestOut, status_code=202)
+def patch_employee_deduction_request(
+    employee_id: uuid.UUID,
+    item_id: uuid.UUID,
+    body: EmployeeDeductionPatch,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_REQUEST))],
+) -> ChangeRequestOut:
+    payload = body.model_dump(mode="json", exclude_unset=True)
+    payload["target_id"] = str(item_id)
+    request = submit_change_request(
+        db, user,
+        kind="employee_deduction_update",
+        employee_id=employee_id,
+        payload=payload,
+    )
+    db.commit()
+    return ChangeRequestOut.model_validate(request)
+
+
+@router.post("/employees/{employee_id}/deductions/{item_id}/deactivate", response_model=ChangeRequestOut, status_code=202)
+def deactivate_employee_deduction_request(
+    employee_id: uuid.UUID,
+    item_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_REQUEST))],
+    row_version: int = Query(...),
+) -> ChangeRequestOut:
+    request = submit_change_request(
+        db, user,
+        kind="employee_deduction_deactivate",
+        employee_id=employee_id,
+        payload={"target_id": str(item_id), "row_version": row_version},
+    )
+    db.commit()
+    return ChangeRequestOut.model_validate(request)
+
+# END OF FILE
+=== END FILE: backend/app/api/v1/payroll_employees.py ===
+=== FILE: backend/tests/test_employee_earnings_write_endpoints.py ===
+"""Employee earning/deduction write endpoints now submit change requests (F3).
+
+Called as raw functions (not HTTP) — the Depends(require_permission) layer is
+asserted separately by test_payroll_endpoint_permissions. These tests verify
+the business behavior: writes create pending requests, approval writes through.
+"""
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy.orm import Session
+
+from app.api.v1.payroll_employees import (
+    create_employee_deduction_request,
+    create_employee_earning_request,
+    deactivate_employee_earning_request,
+    patch_employee_earning_request,
+)
+from app.api.v1.payroll_employees_schemas import (
+    EmployeeDeductionIn,
+    EmployeeEarningIn,
+    EmployeeEarningPatch,
+)
+from app.core.errors import AppError
+from app.core.security import hash_password
+from app.db.tenant.models.pay import DeductionType, EarningType, EmployeeEarning
+from app.db.tenant.models.people import Employee, User
+from app.db.tenant.session import get_tenant_engine
+from app.services.payroll_change_request import approve_change_request
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    from app.db.control.models import Subscriber
+    from app.db.control.session import control_session
+    from app.services.provisioning import (
+        _drop_tenant_database, _tenant_db_name, provision_tenant,
+    )
+    slug = f"pew-{uuid.uuid4().hex[:10]}"
+    result = provision_tenant(
+        slug=slug, name="PEW Test",
+        admin_username="admin",
+        admin_password_hash=hash_password("TestPassword123!"),
+    )
+    db_name = _tenant_db_name(slug)
+    try:
+        yield _DisposableTenant(
+            slug=result.slug, tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        try:
+            _drop_tenant_database(db_name)
+        except Exception:
+            pass
+        with control_session() as session:
+            row = session.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if row is not None:
+                session.delete(row)
+
+
+@pytest.fixture()
+def tenant_session(disposable_tenant):
+    engine = get_tenant_engine(disposable_tenant.tenant_db_name)
+    session = Session(engine)
+    try:
+        yield session, engine
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def _mk_emp(session, code=None):
+    code = code or f"PE-{uuid.uuid4().hex[:6]}"
+    emp = Employee(
+        employee_code=code, first_name="A", last_name=code,
+        hire_date=date(2024, 1, 1), status="active",
+        employee_type="hourly", pay_basis="hourly", pay_frequency="monthly",
+        medical_scheme_members=0, uif_exempt=False,
+    )
+    session.add(emp)
+    session.commit()
+    return emp
+
+
+def _mk_user(session, *, username, role, employee_id=None):
+    u = User(
+        id=uuid.uuid4(),
+        username=username,
+        password_hash=hash_password("TestPass123!"),
+        role=role,
+        employee_id=employee_id,
+    )
+    session.add(u)
+    session.commit()
+    return u
+
+
+def _mk_earning_type(session, code=None):
+    code = code or f"e-{uuid.uuid4().hex[:6]}"
+    et = EarningType(
+        id=uuid.uuid4(), name="E", code=code,
+        calc_method="fixed_amount", frequency="regular",
+        is_system=False, is_active=True,
+    )
+    session.add(et)
+    session.commit()
+    return et
+
+
+def _mk_deduction_type(session, code=None):
+    code = code or f"d-{uuid.uuid4().hex[:6]}"
+    dt = DeductionType(
+        id=uuid.uuid4(), name="D", code=code,
+        category="other", priority=100, is_pre_tax=False,
+        is_system=False, is_active=True,
+    )
+    session.add(dt)
+    session.commit()
+    return dt
+
+
+@pytest.fixture()
+def ctx(tenant_session):
+    session, engine = tenant_session
+    emp = _mk_emp(session)
+    et = _mk_earning_type(session)
+    dt = _mk_deduction_type(session)
+    hr = _mk_user(session, username=f"hr-{uuid.uuid4().hex[:6]}", role="hr", employee_id=emp.id)
+    admin = _mk_user(session, username=f"pa-{uuid.uuid4().hex[:6]}", role="payroll_admin", employee_id=None)
+    return SimpleNamespace(
+        session=session, engine=engine, emp=emp, et=et, dt=dt, hr=hr, admin=admin,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Create earning
+# ---------------------------------------------------------------------------
+
+def test_create_earning_returns_change_request_not_row(ctx):
+    body = EmployeeEarningIn(
+        earning_type_id=ctx.et.id,
+        amount=Decimal("1500.00"),
+        rate=None,
+        effective_from=date(2025, 1, 1),
+        effective_to=None,
+    )
+    out = create_employee_earning_request(
+        employee_id=ctx.emp.id, body=body, db=ctx.session, user=ctx.hr,
+    )
+    assert out.kind == "employee_earning_create"
+    assert out.status == "pending"
+    # No EmployeeEarning row written
+    assert ctx.session.query(EmployeeEarning).count() == 0
+
+
+def test_create_earning_then_approve_writes_row(ctx):
+    body = EmployeeEarningIn(
+        earning_type_id=ctx.et.id,
+        amount=Decimal("1500.00"),
+        rate=None,
+        effective_from=date(2025, 1, 1),
+        effective_to=None,
+    )
+    out = create_employee_earning_request(
+        employee_id=ctx.emp.id, body=body, db=ctx.session, user=ctx.hr,
+    )
+    approve_change_request(ctx.session, ctx.admin, out.id)
+    ctx.session.commit()
+    row = ctx.session.query(EmployeeEarning).filter_by(employee_id=ctx.emp.id).one()
+    assert row.amount == Decimal("1500.00")
+
+
+# ---------------------------------------------------------------------------
+# Patch earning
+# ---------------------------------------------------------------------------
+
+def test_patch_earning_returns_change_request(ctx):
+    # Seed a real row first, via direct write (bypassing F3 for test setup only)
+    row = EmployeeEarning(
+        id=uuid.uuid4(), employee_id=ctx.emp.id, earning_type_id=ctx.et.id,
+        amount=Decimal("1000.00"), rate=None,
+        effective_from=date(2025, 1, 1), is_active=True,
+    )
+    ctx.session.add(row)
+    ctx.session.commit()
+
+    body = EmployeeEarningPatch(row_version=row.row_version, amount=Decimal("1200.00"))
+    out = patch_employee_earning_request(
+        employee_id=ctx.emp.id, item_id=row.id, body=body,
+        db=ctx.session, user=ctx.hr,
+    )
+    assert out.kind == "employee_earning_update"
+    assert out.status == "pending"
+    # Row unchanged
+    ctx.session.refresh(row)
+    assert row.amount == Decimal("1000.00")
+
+
+# ---------------------------------------------------------------------------
+# Deactivate earning
+# ---------------------------------------------------------------------------
+
+def test_deactivate_earning_returns_change_request(ctx):
+    row = EmployeeEarning(
+        id=uuid.uuid4(), employee_id=ctx.emp.id, earning_type_id=ctx.et.id,
+        amount=Decimal("1000.00"), rate=None,
+        effective_from=date(2025, 1, 1), is_active=True,
+    )
+    ctx.session.add(row)
+    ctx.session.commit()
+
+    out = deactivate_employee_earning_request(
+        employee_id=ctx.emp.id, item_id=row.id,
+        row_version=row.row_version, db=ctx.session, user=ctx.hr,
+    )
+    assert out.kind == "employee_earning_deactivate"
+    ctx.session.refresh(row)
+    assert row.is_active is True  # still active — pending approval
+
+
+# ---------------------------------------------------------------------------
+# Create deduction
+# ---------------------------------------------------------------------------
+
+def test_create_deduction_returns_change_request(ctx):
+    body = EmployeeDeductionIn(
+        deduction_type_id=ctx.dt.id,
+        amount=Decimal("500.00"),
+        effective_from=date(2025, 1, 1),
+        effective_to=None,
+    )
+    out = create_employee_deduction_request(
+        employee_id=ctx.emp.id, body=body, db=ctx.session, user=ctx.hr,
+    )
+    assert out.kind == "employee_deduction_create"
+    assert out.status == "pending"
+
+
+# ---------------------------------------------------------------------------
+# HR cannot submit outside their scope
+# ---------------------------------------------------------------------------
+
+def test_hr_cannot_submit_for_other_employee(ctx):
+    other_emp = _mk_emp(ctx.session, code=f"OTHER-{uuid.uuid4().hex[:6]}")
+    body = EmployeeEarningIn(
+        earning_type_id=ctx.et.id,
+        amount=Decimal("100.00"),
+        rate=None,
+        effective_from=date(2025, 1, 1),
+        effective_to=None,
+    )
+    with pytest.raises(AppError) as exc_info:
+        create_employee_earning_request(
+            employee_id=other_emp.id, body=body, db=ctx.session, user=ctx.hr,
+        )
+    assert exc_info.value.code == "not_found"
+
+# END OF FILE
+=== END FILE: backend/tests/test_employee_earnings_write_endpoints.py ===
+=== FILE: backend/tests/test_payroll_endpoint_permissions.py ===
+"""Endpoint-level permission wiring for payroll routes (Chapter 4).
+
+Verifies each payroll route is registered at the expected (method, path)
+with the expected Permission dependency in its closure. Update the
+EXPECTED_ROUTES list whenever a new payroll route lands.
+"""
+from __future__ import annotations
+
+import pytest
+
+from app.core.permissions import Permission
+
+
+EXPECTED_ROUTES: list[tuple[str, str, Permission]] = [
+    # 003b — settings
+    ("GET",   "/api/v1/payroll/settings", Permission.PAYROLL_PREVIEW),
+    ("PATCH", "/api/v1/payroll/settings", Permission.PAYROLL_FINALISE),
+    # 003b — earning types
+    ("GET",   "/api/v1/payroll/earning-types", Permission.PAYROLL_PREVIEW),
+    ("GET",   "/api/v1/payroll/earning-types/{type_id}", Permission.PAYROLL_PREVIEW),
+    ("POST",  "/api/v1/payroll/earning-types", Permission.PAYROLL_FINALISE),
+    ("PATCH", "/api/v1/payroll/earning-types/{type_id}", Permission.PAYROLL_FINALISE),
+    ("POST",  "/api/v1/payroll/earning-types/{type_id}/deactivate", Permission.PAYROLL_FINALISE),
+    # 003b — deduction types
+    ("GET",   "/api/v1/payroll/deduction-types", Permission.PAYROLL_PREVIEW),
+    ("GET",   "/api/v1/payroll/deduction-types/{type_id}", Permission.PAYROLL_PREVIEW),
+    ("POST",  "/api/v1/payroll/deduction-types", Permission.PAYROLL_FINALISE),
+    ("PATCH", "/api/v1/payroll/deduction-types/{type_id}", Permission.PAYROLL_FINALISE),
+    ("POST",  "/api/v1/payroll/deduction-types/{type_id}/deactivate", Permission.PAYROLL_FINALISE),
+    # 003c — employee earnings (read)
+    ("GET",   "/api/v1/payroll/employees/{employee_id}/earnings", Permission.PAYROLL_PREVIEW),
+    ("GET",   "/api/v1/payroll/employees/{employee_id}/earnings/{item_id}", Permission.PAYROLL_PREVIEW),
+    # 003c → 004a-iv-b — employee earnings (write now submits change request)
+    ("POST",  "/api/v1/payroll/employees/{employee_id}/earnings", Permission.PAY_RATE_REQUEST),
+    ("PATCH", "/api/v1/payroll/employees/{employee_id}/earnings/{item_id}", Permission.PAY_RATE_REQUEST),
+    ("POST",  "/api/v1/payroll/employees/{employee_id}/earnings/{item_id}/deactivate", Permission.PAY_RATE_REQUEST),
+    # 003c — employee deductions (read)
+    ("GET",   "/api/v1/payroll/employees/{employee_id}/deductions", Permission.PAYROLL_PREVIEW),
+    ("GET",   "/api/v1/payroll/employees/{employee_id}/deductions/{item_id}", Permission.PAYROLL_PREVIEW),
+    # 003c → 004a-iv-b — employee deductions (write now submits change request)
+    ("POST",  "/api/v1/payroll/employees/{employee_id}/deductions", Permission.PAY_RATE_REQUEST),
+    ("PATCH", "/api/v1/payroll/employees/{employee_id}/deductions/{item_id}", Permission.PAY_RATE_REQUEST),
+    ("POST",  "/api/v1/payroll/employees/{employee_id}/deductions/{item_id}/deactivate", Permission.PAY_RATE_REQUEST),
+    # 004a-i — formula readiness
+    ("GET",   "/api/v1/payroll-formulas/readiness", Permission.PAYROLL_PREVIEW),
+    ("POST",  "/api/v1/payroll-formulas/{code}/acknowledge", Permission.PAYROLL_FINALISE),
+    # 004a-iv-a — change requests
+    ("POST",  "/api/v1/payroll/change-requests", Permission.PAY_RATE_REQUEST),
+    ("GET",   "/api/v1/payroll/change-requests", Permission.PAY_RATE_VIEW),
+    ("GET",   "/api/v1/payroll/change-requests/{request_id}", Permission.PAY_RATE_VIEW),
+    ("POST",  "/api/v1/payroll/change-requests/{request_id}/approve", Permission.PAY_RATE_APPROVE),
+    ("POST",  "/api/v1/payroll/change-requests/{request_id}/reject", Permission.PAY_RATE_APPROVE),
+    ("POST",  "/api/v1/payroll/change-requests/{request_id}/cancel", Permission.PAY_RATE_REQUEST),
+]
+
+
+def _route_map():
+    from fastapi.routing import APIRoute
+    from app.main import app
+    out: dict[tuple[str, str], APIRoute] = {}
+    for r in app.routes:
+        if not isinstance(r, APIRoute):
+            continue
+        for m in r.methods:
+            if m in ("HEAD", "OPTIONS"):
+                continue
+            out[(m, r.path)] = r
+    return out
+
+
+def _extract_permissions(route) -> set[Permission]:
+    found: set[Permission] = set()
+    stack = [route.dependant]
+    while stack:
+        d = stack.pop()
+        fn = getattr(d, "call", None)
+        if fn is not None and getattr(fn, "__closure__", None):
+            for cell in fn.__closure__:
+                try:
+                    v = cell.cell_contents
+                except ValueError:
+                    continue
+                if isinstance(v, Permission):
+                    found.add(v)
+        stack.extend(getattr(d, "dependencies", []) or [])
+    return found
+
+
+_IDS = [f"{m}-{p}-{perm.value}" for m, p, perm in EXPECTED_ROUTES]
+
+
+@pytest.mark.parametrize("method,path,expected_perm", EXPECTED_ROUTES, ids=_IDS)
+def test_route_registered(method: str, path: str, expected_perm: Permission) -> None:
+    routes = _route_map()
+    key = (method, path)
+    assert key in routes, (
+        f"Route {method} {path} not registered. "
+        f"Available payroll routes: {sorted(k for k in routes if 'payroll' in k[1])}"
+    )
+
+
+@pytest.mark.parametrize("method,path,expected_perm", EXPECTED_ROUTES, ids=_IDS)
+def test_route_has_expected_permission(method: str, path: str, expected_perm: Permission) -> None:
+    routes = _route_map()
+    route = routes.get((method, path))
+    assert route is not None, f"Route {method} {path} not found"
+    perms = _extract_permissions(route)
+    assert expected_perm in perms, (
+        f"{method} {path}: expected permission {expected_perm.value!r}, "
+        f"found {sorted(p.value for p in perms)}"
+    )
+
+
+def test_payroll_routes_all_have_a_permission() -> None:
+    routes = _route_map()
+    offenders = []
+    for (method, path), route in routes.items():
+        if not path.startswith("/api/v1/payroll"):
+            continue
+        if not _extract_permissions(route):
+            offenders.append(f"{method} {path}")
+    assert not offenders, f"payroll routes missing require_permission: {offenders}"
+
+# END OF FILE
+=== END FILE: backend/tests/test_payroll_endpoint_permissions.py ===
+# END OF FILE

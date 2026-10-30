@@ -1,0 +1,1054 @@
+=== FILE: backend/app/services/payroll_audit.py ===
+"""Defensive audit writer for payroll endpoints (Chapter 4).
+
+The control audit table's exact column set is not fully probed yet; this
+helper filters kwargs by column name so it works regardless. If a shared
+audit helper exists later, wire it in here in one place.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+
+def write_audit(
+    db: Session,
+    user: Any,
+    *,
+    entity_type: str,
+    entity_id: uuid.UUID,
+    action: str,
+    old_value: dict | None = None,
+    new_value: dict | None = None,
+    reason: str | None = None,
+) -> None:
+    from app.db.tenant.models.platform import AuditLog
+
+    cols = {c.name for c in AuditLog.__table__.columns}
+    kwargs: dict[str, Any] = {}
+    for k, v in (
+        ("actor_user_id", getattr(user, "id", None)),
+        ("actor_role", getattr(user, "role", None)),
+        ("entity_type", entity_type),
+        ("entity_id", entity_id),
+        ("action", action),
+        ("old_value", old_value),
+        ("new_value", new_value),
+        ("reason", reason),
+        ("occurred_at", datetime.now(timezone.utc)),
+    ):
+        if k in cols:
+            kwargs[k] = v
+    db.add(AuditLog(**kwargs))
+
+# END OF FILE
+=== END FILE: backend/app/services/payroll_audit.py ===
+=== FILE: backend/app/db/tenant/models/payroll_settings.py ===
+"""Payroll settings (Chapter 4, Bundle 003b).
+
+Singleton row per tenant. Controls E4 (sdl_applies), E6 (age_reference_date),
+D14 (net_pay_floor). GET returns defaults when no row exists; PATCH creates
+or updates the row. row_version guards concurrent edits.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from decimal import Decimal
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, func
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db.base import Base
+
+
+class PayrollSettings(Base):
+    __tablename__ = "payroll_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    age_reference_date: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    sdl_applies: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    net_pay_floor: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=Decimal("0")
+    )
+    row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user.id", ondelete="SET NULL"), nullable=True
+    )
+
+# END OF FILE
+=== END FILE: backend/app/db/tenant/models/payroll_settings.py ===
+=== FILE: backend/alembic/tenant/versions/0018_payroll_settings.py ===
+"""Payroll settings table (Chapter 4, Bundle 003b).
+
+Revision ID: ten_0018
+Revises: ten_0017
+"""
+from __future__ import annotations
+
+import os
+import re
+from typing import Sequence, Union
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects import postgresql
+
+revision: str = "ten_0018"
+down_revision: Union[str, Sequence[str], None] = "ten_0017"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def _app_role() -> str:
+    role = os.environ.get("TENANT_APP_DB_ROLE", "payroll_app")
+    if not re.fullmatch(r"[a-z_][a-z0-9_]*", role):
+        raise RuntimeError(f"Invalid TENANT_APP_DB_ROLE identifier: {role!r}")
+    return role
+
+
+def upgrade() -> None:
+    op.create_table(
+        "payroll_settings",
+        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("age_reference_date", sa.String(20), nullable=True),
+        sa.Column("sdl_applies", sa.Boolean(), nullable=True),
+        sa.Column("net_pay_floor", sa.Numeric(14, 2), nullable=False, server_default="0"),
+        sa.Column("row_version", sa.Integer(), nullable=False, server_default="1"),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_by_user_id", postgresql.UUID(as_uuid=True),
+                  sa.ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    )
+    role = _app_role()
+    op.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON payroll_settings TO {role}")
+
+
+def downgrade() -> None:
+    op.drop_table("payroll_settings")
+
+# END OF FILE
+=== END FILE: backend/alembic/tenant/versions/0018_payroll_settings.py ===
+=== FILE: backend/app/api/v1/payroll_settings_schemas.py ===
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+AgeRef = Literal["period_start", "period_end", "pay_date"]
+
+
+class PayrollSettingsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    age_reference_date: AgeRef | None = None
+    sdl_applies: bool | None = None
+    net_pay_floor: Decimal = Decimal("0.00")
+    row_version: int = 0
+
+
+class PayrollSettingsPatchIn(BaseModel):
+    age_reference_date: AgeRef | None = None
+    sdl_applies: bool | None = None
+    net_pay_floor: Decimal | None = Field(None, ge=0)
+    row_version: int
+
+# END OF FILE
+=== END FILE: backend/app/api/v1/payroll_settings_schemas.py ===
+=== FILE: backend/app/api/v1/payroll_settings.py ===
+"""Payroll settings endpoints (Chapter 4, Bundle 003b).
+
+GET /payroll/settings  - current settings, defaults when no row exists
+PATCH /payroll/settings - create or update the singleton row
+
+age_reference_date (E6) and sdl_applies (E4) are required before first
+finalise; payroll finalisation refuses if they are unset. net_pay_floor
+(D14) defaults to 0.00.
+"""
+from __future__ import annotations
+
+import uuid
+from decimal import Decimal
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends
+from sqlalchemy import select
+
+from app.api.deps import TenantDbDep
+from app.api.v1.payroll_settings_schemas import (
+    PayrollSettingsOut,
+    PayrollSettingsPatchIn,
+)
+from app.core.errors import AppError
+from app.core.permissions import Permission, require_permission
+from app.db.tenant.models.payroll_settings import PayrollSettings
+from app.services.payroll_audit import write_audit
+
+router = APIRouter(prefix="/payroll/settings", tags=["payroll-settings"])
+
+_DEFAULT_NET_PAY_FLOOR = Decimal("0.00")
+
+
+def _to_out(row: PayrollSettings | None) -> PayrollSettingsOut:
+    if row is None:
+        return PayrollSettingsOut(
+            age_reference_date=None,
+            sdl_applies=None,
+            net_pay_floor=_DEFAULT_NET_PAY_FLOOR,
+            row_version=0,
+        )
+    return PayrollSettingsOut(
+        age_reference_date=row.age_reference_date,
+        sdl_applies=row.sdl_applies,
+        net_pay_floor=row.net_pay_floor,
+        row_version=row.row_version,
+    )
+
+
+@router.get("", response_model=PayrollSettingsOut)
+def get_payroll_settings(
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+) -> PayrollSettingsOut:
+    row = db.scalar(select(PayrollSettings).limit(1))
+    return _to_out(row)
+
+
+@router.patch("", response_model=PayrollSettingsOut)
+def patch_payroll_settings(
+    body: PayrollSettingsPatchIn,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_FINALISE))],
+) -> PayrollSettingsOut:
+    row = db.scalar(select(PayrollSettings).limit(1))
+    old_snapshot = None
+    if row is None:
+        if body.row_version != 0:
+            raise AppError(
+                "record_changed",
+                "Settings do not exist; use row_version=0 to create",
+                409,
+            )
+        row = PayrollSettings(
+            id=uuid.uuid4(),
+            age_reference_date=None,
+            sdl_applies=None,
+            net_pay_floor=_DEFAULT_NET_PAY_FLOOR,
+            row_version=1,
+            updated_by_user_id=getattr(user, "id", None),
+        )
+        db.add(row)
+    else:
+        if body.row_version != row.row_version:
+            raise AppError(
+                "record_changed",
+                f"row_version mismatch: sent {body.row_version}, current {row.row_version}",
+                409,
+            )
+        old_snapshot = {
+            "age_reference_date": row.age_reference_date,
+            "sdl_applies": row.sdl_applies,
+            "net_pay_floor": str(row.net_pay_floor),
+            "row_version": row.row_version,
+        }
+        row.row_version += 1
+        row.updated_by_user_id = getattr(user, "id", None)
+
+    provided = body.model_fields_set - {"row_version"}
+    for field in provided:
+        setattr(row, field, getattr(body, field))
+    if row.net_pay_floor is None:
+        row.net_pay_floor = _DEFAULT_NET_PAY_FLOOR
+
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="payroll_settings",
+        entity_id=row.id,
+        action="update",
+        old_value=old_snapshot,
+        new_value={
+            "age_reference_date": row.age_reference_date,
+            "sdl_applies": row.sdl_applies,
+            "net_pay_floor": str(row.net_pay_floor),
+            "row_version": row.row_version,
+        },
+    )
+    db.commit()
+    return _to_out(row)
+
+# END OF FILE
+=== END FILE: backend/app/api/v1/payroll_settings.py ===
+=== FILE: backend/app/api/v1/payroll_types_schemas.py ===
+from __future__ import annotations
+
+import uuid
+from decimal import Decimal
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+CalcMethod = Literal["fixed_amount", "per_hour", "per_day", "percent_of_gross", "percent_of_basic"]
+Frequency = Literal["regular", "once_off", "irregular"]
+ProrationRule = Literal["none", "by_calendar_days", "by_work_days", "by_hours"]
+DeductionCategory = Literal["retirement", "garnishee", "loan", "advance", "other"]
+
+
+class EarningTypeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    code: str
+    calc_method: CalcMethod
+    frequency: Frequency
+    is_taxable: bool
+    counts_for_uif: bool
+    counts_for_sdl: bool
+    ledger_account: str | None = None
+    proration_rule: ProrationRule
+    eligibility_rule: dict | None = None
+    is_system: bool
+    is_active: bool
+    row_version: int
+
+
+class EarningTypeIn(BaseModel):
+    name: str = Field(..., max_length=80)
+    code: str = Field(..., max_length=40)
+    calc_method: CalcMethod
+    frequency: Frequency
+    is_taxable: bool = True
+    counts_for_uif: bool = True
+    counts_for_sdl: bool = True
+    ledger_account: str | None = Field(None, max_length=40)
+    proration_rule: ProrationRule = "none"
+    eligibility_rule: dict | None = None
+
+
+class EarningTypePatch(BaseModel):
+    name: str | None = Field(None, max_length=80)
+    calc_method: CalcMethod | None = None
+    frequency: Frequency | None = None
+    is_taxable: bool | None = None
+    counts_for_uif: bool | None = None
+    counts_for_sdl: bool | None = None
+    ledger_account: str | None = Field(None, max_length=40)
+    proration_rule: ProrationRule | None = None
+    eligibility_rule: dict | None = None
+    is_active: bool | None = None
+    row_version: int
+
+
+class EarningTypeListOut(BaseModel):
+    items: list[EarningTypeOut]
+    next_cursor: str | None = None
+
+
+class DeductionTypeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    code: str
+    category: DeductionCategory
+    priority: int
+    is_pre_tax: bool
+    is_system: bool
+    is_active: bool
+    row_version: int
+
+
+class DeductionTypeIn(BaseModel):
+    name: str = Field(..., max_length=80)
+    code: str = Field(..., max_length=40)
+    category: DeductionCategory
+    priority: int = 100
+    is_pre_tax: bool = False
+
+
+class DeductionTypePatch(BaseModel):
+    name: str | None = Field(None, max_length=80)
+    category: DeductionCategory | None = None
+    priority: int | None = None
+    is_pre_tax: bool | None = None
+    is_active: bool | None = None
+    row_version: int
+
+
+class DeductionTypeListOut(BaseModel):
+    items: list[DeductionTypeOut]
+    next_cursor: str | None = None
+
+# END OF FILE
+=== END FILE: backend/app/api/v1/payroll_types_schemas.py ===
+=== FILE: backend/app/api/v1/payroll_types.py ===
+"""Earning and deduction type configuration (Chapter 4, Bundle 003b).
+
+Reads are PAYROLL_PREVIEW (hr + payroll_admin). Writes are PAYROLL_FINALISE
+(payroll_admin only), per F3: config that affects payroll amount is
+payroll_admin.
+
+Earning types drive the payroll engine's line generation; deduction types
+drive the deduction pipeline. is_system rows are seeded by later bundles and
+cannot be deleted via the API.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import uuid
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
+
+from app.api.deps import TenantDbDep
+from app.api.v1.payroll_types_schemas import (
+    DeductionTypeIn,
+    DeductionTypeListOut,
+    DeductionTypeOut,
+    DeductionTypePatch,
+    EarningTypeIn,
+    EarningTypeListOut,
+    EarningTypeOut,
+    EarningTypePatch,
+)
+from app.core.errors import AppError
+from app.core.permissions import Permission, require_permission
+from app.db.tenant.models.pay import DeductionType, EarningType
+from app.services.payroll_audit import write_audit
+
+router = APIRouter(prefix="/payroll", tags=["payroll-types"])
+
+_DEFAULT_LIMIT = 100
+_MAX_LIMIT = 500
+
+
+def _encode_uuid_cursor(uid: uuid.UUID) -> str:
+    raw = json.dumps({"i": str(uid)}, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_uuid_cursor(cursor: str) -> uuid.UUID:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        return uuid.UUID(json.loads(raw)["i"])
+    except Exception:
+        raise AppError("invalid_cursor", "The pagination cursor is malformed", 400) from None
+
+
+# ---------------------------------------------------------------------------
+# Earning types
+# ---------------------------------------------------------------------------
+
+@router.get("/earning-types", response_model=EarningTypeListOut)
+def list_earning_types(
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+    active_only: bool = Query(True),
+    limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
+    cursor: str | None = Query(None),
+) -> EarningTypeListOut:
+    q = select(EarningType)
+    if active_only:
+        q = q.where(EarningType.is_active.is_(True))
+    if cursor is not None:
+        q = q.where(EarningType.id > _decode_uuid_cursor(cursor))
+    q = q.order_by(EarningType.id.asc()).limit(limit + 1)
+    rows = list(db.scalars(q).all())
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_cursor = _encode_uuid_cursor(rows[-1].id)
+    return EarningTypeListOut(
+        items=[EarningTypeOut.model_validate(r) for r in rows],
+        next_cursor=next_cursor,
+    )
+
+
+@router.get("/earning-types/{type_id}", response_model=EarningTypeOut)
+def get_earning_type(
+    type_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+) -> EarningTypeOut:
+    row = db.scalar(select(EarningType).where(EarningType.id == type_id))
+    if row is None:
+        raise AppError("not_found", "Earning type not found", 404)
+    return EarningTypeOut.model_validate(row)
+
+
+@router.post("/earning-types", response_model=EarningTypeOut, status_code=201)
+def create_earning_type(
+    body: EarningTypeIn,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_FINALISE))],
+) -> EarningTypeOut:
+    dup = db.scalar(select(EarningType).where(EarningType.code == body.code))
+    if dup is not None:
+        raise AppError("code_taken", f"earning_type code {body.code!r} already exists", 409)
+    row = EarningType(
+        id=uuid.uuid4(),
+        name=body.name,
+        code=body.code,
+        calc_method=body.calc_method,
+        frequency=body.frequency,
+        is_taxable=body.is_taxable,
+        counts_for_uif=body.counts_for_uif,
+        counts_for_sdl=body.counts_for_sdl,
+        ledger_account=body.ledger_account,
+        proration_rule=body.proration_rule,
+        eligibility_rule=body.eligibility_rule,
+        is_system=False,
+        is_active=True,
+    )
+    db.add(row)
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="earning_type", entity_id=row.id, action="create",
+        new_value={"code": row.code, "name": row.name, "calc_method": row.calc_method,
+                   "frequency": row.frequency, "is_taxable": row.is_taxable},
+    )
+    db.commit()
+    return EarningTypeOut.model_validate(row)
+
+
+@router.patch("/earning-types/{type_id}", response_model=EarningTypeOut)
+def patch_earning_type(
+    type_id: uuid.UUID,
+    body: EarningTypePatch,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_FINALISE))],
+) -> EarningTypeOut:
+    row = db.scalar(select(EarningType).where(EarningType.id == type_id))
+    if row is None:
+        raise AppError("not_found", "Earning type not found", 404)
+    if row.is_system:
+        raise AppError("system_row", "System earning types cannot be modified via API", 409)
+    if body.row_version != row.row_version:
+        raise AppError(
+            "record_changed",
+            f"row_version mismatch: sent {body.row_version}, current {row.row_version}",
+            409,
+        )
+    old_snapshot = {
+        "name": row.name, "calc_method": row.calc_method, "frequency": row.frequency,
+        "is_taxable": row.is_taxable, "counts_for_uif": row.counts_for_uif,
+        "counts_for_sdl": row.counts_for_sdl, "is_active": row.is_active,
+        "row_version": row.row_version,
+    }
+    provided = body.model_fields_set - {"row_version"}
+    for field in provided:
+        setattr(row, field, getattr(body, field))
+    row.row_version += 1
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="earning_type", entity_id=row.id, action="update",
+        old_value=old_snapshot,
+        new_value={
+            "name": row.name, "calc_method": row.calc_method, "frequency": row.frequency,
+            "is_taxable": row.is_taxable, "counts_for_uif": row.counts_for_uif,
+            "counts_for_sdl": row.counts_for_sdl, "is_active": row.is_active,
+            "row_version": row.row_version,
+        },
+    )
+    db.commit()
+    return EarningTypeOut.model_validate(row)
+
+
+@router.post("/earning-types/{type_id}/deactivate", response_model=EarningTypeOut)
+def deactivate_earning_type(
+    type_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_FINALISE))],
+    row_version: int = Query(...),
+) -> EarningTypeOut:
+    row = db.scalar(select(EarningType).where(EarningType.id == type_id))
+    if row is None:
+        raise AppError("not_found", "Earning type not found", 404)
+    if row.is_system:
+        raise AppError("system_row", "System earning types cannot be deactivated via API", 409)
+    if row_version != row.row_version:
+        raise AppError(
+            "record_changed",
+            f"row_version mismatch: sent {row_version}, current {row.row_version}",
+            409,
+        )
+    row.is_active = False
+    row.row_version += 1
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="earning_type", entity_id=row.id, action="deactivate",
+        old_value={"is_active": True}, new_value={"is_active": False},
+    )
+    db.commit()
+    return EarningTypeOut.model_validate(row)
+
+
+# ---------------------------------------------------------------------------
+# Deduction types
+# ---------------------------------------------------------------------------
+
+@router.get("/deduction-types", response_model=DeductionTypeListOut)
+def list_deduction_types(
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+    active_only: bool = Query(True),
+    limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
+    cursor: str | None = Query(None),
+) -> DeductionTypeListOut:
+    q = select(DeductionType)
+    if active_only:
+        q = q.where(DeductionType.is_active.is_(True))
+    if cursor is not None:
+        q = q.where(DeductionType.id > _decode_uuid_cursor(cursor))
+    q = q.order_by(DeductionType.id.asc()).limit(limit + 1)
+    rows = list(db.scalars(q).all())
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_cursor = _encode_uuid_cursor(rows[-1].id)
+    return DeductionTypeListOut(
+        items=[DeductionTypeOut.model_validate(r) for r in rows],
+        next_cursor=next_cursor,
+    )
+
+
+@router.get("/deduction-types/{type_id}", response_model=DeductionTypeOut)
+def get_deduction_type(
+    type_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+) -> DeductionTypeOut:
+    row = db.scalar(select(DeductionType).where(DeductionType.id == type_id))
+    if row is None:
+        raise AppError("not_found", "Deduction type not found", 404)
+    return DeductionTypeOut.model_validate(row)
+
+
+@router.post("/deduction-types", response_model=DeductionTypeOut, status_code=201)
+def create_deduction_type(
+    body: DeductionTypeIn,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_FINALISE))],
+) -> DeductionTypeOut:
+    dup = db.scalar(select(DeductionType).where(DeductionType.code == body.code))
+    if dup is not None:
+        raise AppError("code_taken", f"deduction_type code {body.code!r} already exists", 409)
+    row = DeductionType(
+        id=uuid.uuid4(),
+        name=body.name,
+        code=body.code,
+        category=body.category,
+        priority=body.priority,
+        is_pre_tax=body.is_pre_tax,
+        is_system=False,
+        is_active=True,
+    )
+    db.add(row)
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="deduction_type", entity_id=row.id, action="create",
+        new_value={"code": row.code, "name": row.name, "category": row.category,
+                   "priority": row.priority, "is_pre_tax": row.is_pre_tax},
+    )
+    db.commit()
+    return DeductionTypeOut.model_validate(row)
+
+
+@router.patch("/deduction-types/{type_id}", response_model=DeductionTypeOut)
+def patch_deduction_type(
+    type_id: uuid.UUID,
+    body: DeductionTypePatch,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_FINALISE))],
+) -> DeductionTypeOut:
+    row = db.scalar(select(DeductionType).where(DeductionType.id == type_id))
+    if row is None:
+        raise AppError("not_found", "Deduction type not found", 404)
+    if row.is_system:
+        raise AppError("system_row", "System deduction types cannot be modified via API", 409)
+    if body.row_version != row.row_version:
+        raise AppError(
+            "record_changed",
+            f"row_version mismatch: sent {body.row_version}, current {row.row_version}",
+            409,
+        )
+    old_snapshot = {
+        "name": row.name, "category": row.category, "priority": row.priority,
+        "is_pre_tax": row.is_pre_tax, "is_active": row.is_active,
+        "row_version": row.row_version,
+    }
+    provided = body.model_fields_set - {"row_version"}
+    for field in provided:
+        setattr(row, field, getattr(body, field))
+    row.row_version += 1
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="deduction_type", entity_id=row.id, action="update",
+        old_value=old_snapshot,
+        new_value={
+            "name": row.name, "category": row.category, "priority": row.priority,
+            "is_pre_tax": row.is_pre_tax, "is_active": row.is_active,
+            "row_version": row.row_version,
+        },
+    )
+    db.commit()
+    return DeductionTypeOut.model_validate(row)
+
+
+@router.post("/deduction-types/{type_id}/deactivate", response_model=DeductionTypeOut)
+def deactivate_deduction_type(
+    type_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_FINALISE))],
+    row_version: int = Query(...),
+) -> DeductionTypeOut:
+    row = db.scalar(select(DeductionType).where(DeductionType.id == type_id))
+    if row is None:
+        raise AppError("not_found", "Deduction type not found", 404)
+    if row.is_system:
+        raise AppError("system_row", "System deduction types cannot be deactivated via API", 409)
+    if row_version != row.row_version:
+        raise AppError(
+            "record_changed",
+            f"row_version mismatch: sent {row_version}, current {row.row_version}",
+            409,
+        )
+    row.is_active = False
+    row.row_version += 1
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="deduction_type", entity_id=row.id, action="deactivate",
+        old_value={"is_active": True}, new_value={"is_active": False},
+    )
+    db.commit()
+    return DeductionTypeOut.model_validate(row)
+
+# END OF FILE
+=== END FILE: backend/app/api/v1/payroll_types.py ===
+=== FILE: backend/app/api/v1/__init__.py ===
+from fastapi import APIRouter
+
+from app.api.v1.audit_log import router as audit_log_router
+from app.api.v1.auth.router import router as auth_router
+from app.api.v1.branches import router as branches_router
+from app.api.v1.company.router import router as company_router
+from app.api.v1.departments import router as departments_router
+from app.api.v1.devices import router as devices_router
+from app.api.v1.employee_work_patterns import router as employee_work_patterns_router
+from app.api.v1.employees import router as employees_router
+from app.api.v1.import_employees import router as import_employees_router
+from app.api.v1.pay_history import router as pay_history_router
+from app.api.v1.payroll_settings import router as payroll_settings_router
+from app.api.v1.payroll_types import router as payroll_types_router
+from app.api.v1.public_holidays import router as public_holidays_router
+from app.api.v1.punches import router as punches_router
+from app.api.v1.register import router as register_router
+from app.api.v1.shift_rate_rules import router as shift_rate_rules_router
+from app.api.v1.shifts import router as shifts_router
+from app.api.v1.sites import router as sites_router
+from app.api.v1.users import router as users_router
+from app.api.v1.work_patterns import router as work_patterns_router
+
+from app.api.v1.attendance import router as attendance_router
+from app.api.v1.exceptions import router as exceptions_router
+from app.api.v1.adjustments import router as adjustments_router
+from app.api.v1.sheet import router as sheet_router
+
+api_router = APIRouter(prefix="/api/v1")
+api_router.include_router(register_router)
+api_router.include_router(auth_router)
+api_router.include_router(company_router)
+api_router.include_router(branches_router)
+api_router.include_router(sites_router)
+api_router.include_router(departments_router)
+api_router.include_router(import_employees_router)
+api_router.include_router(employees_router)
+api_router.include_router(pay_history_router)
+api_router.include_router(users_router)
+api_router.include_router(audit_log_router)
+api_router.include_router(shifts_router)
+api_router.include_router(shift_rate_rules_router)
+api_router.include_router(work_patterns_router)
+api_router.include_router(employee_work_patterns_router)
+api_router.include_router(public_holidays_router)
+api_router.include_router(devices_router)
+api_router.include_router(punches_router)
+api_router.include_router(attendance_router)
+api_router.include_router(exceptions_router)
+api_router.include_router(adjustments_router)
+api_router.include_router(sheet_router)
+api_router.include_router(payroll_settings_router)
+api_router.include_router(payroll_types_router)
+
+# END OF FILE
+=== END FILE: backend/app/api/v1/__init__.py ===
+=== FILE: backend/tests/test_payroll_settings.py ===
+"""Payroll settings smoke + behaviour (Chapter 4, Bundle 003b)."""
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
+from decimal import Decimal
+
+import pytest
+import sqlalchemy as sa
+from sqlalchemy.orm import Session
+
+from app.core.security import hash_password
+from app.db.tenant.models.payroll_settings import PayrollSettings
+from app.db.tenant.session import get_tenant_engine
+from app.api.v1.payroll_settings import _to_out
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    from app.db.control.models import Subscriber
+    from app.db.control.session import control_session
+    from app.services.provisioning import (
+        _drop_tenant_database, _tenant_db_name, provision_tenant,
+    )
+    slug = f"pset-{uuid.uuid4().hex[:10]}"
+    result = provision_tenant(
+        slug=slug, name="Pay Settings Test",
+        admin_username="admin",
+        admin_password_hash=hash_password("TestPassword123!"),
+    )
+    db_name = _tenant_db_name(slug)
+    try:
+        yield _DisposableTenant(
+            slug=result.slug, tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        try:
+            _drop_tenant_database(db_name)
+        except Exception:
+            pass
+        with control_session() as session:
+            row = session.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if row is not None:
+                session.delete(row)
+
+
+@pytest.fixture()
+def tenant_session(disposable_tenant):
+    engine = get_tenant_engine(disposable_tenant.tenant_db_name)
+    session = Session(engine)
+    try:
+        yield session, engine
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_payroll_settings_table_exists(disposable_tenant):
+    engine = get_tenant_engine(disposable_tenant.tenant_db_name)
+    try:
+        with engine.connect() as conn:
+            tables = {r[0] for r in conn.execute(sa.text(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='public'"
+            ))}
+            assert "payroll_settings" in tables, sorted(tables)
+    finally:
+        engine.dispose()
+
+
+def test_to_out_returns_defaults_when_no_row():
+    out = _to_out(None)
+    assert out.age_reference_date is None
+    assert out.sdl_applies is None
+    assert out.net_pay_floor == Decimal("0.00")
+    assert out.row_version == 0
+
+
+def test_settings_roundtrip(tenant_session):
+    session, _ = tenant_session
+    row = PayrollSettings(
+        id=uuid.uuid4(),
+        age_reference_date="pay_date",
+        sdl_applies=True,
+        net_pay_floor=Decimal("100.00"),
+        row_version=1,
+    )
+    session.add(row)
+    session.commit()
+    fetched = session.query(PayrollSettings).one()
+    assert fetched.age_reference_date == "pay_date"
+    assert fetched.sdl_applies is True
+    assert fetched.net_pay_floor == Decimal("100.00")
+    out = _to_out(fetched)
+    assert out.age_reference_date == "pay_date"
+    assert out.sdl_applies is True
+    assert out.net_pay_floor == Decimal("100.00")
+    assert out.row_version == 1
+
+# END OF FILE
+=== END FILE: backend/tests/test_payroll_settings.py ===
+=== FILE: backend/tests/test_payroll_types_endpoints.py ===
+"""Earning/deduction type smoke + behaviour (Chapter 4, Bundle 003b)."""
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
+
+import pytest
+import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.core.security import hash_password
+from app.db.tenant.models.pay import DeductionType, EarningType
+from app.db.tenant.session import get_tenant_engine
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    from app.db.control.models import Subscriber
+    from app.db.control.session import control_session
+    from app.services.provisioning import (
+        _drop_tenant_database, _tenant_db_name, provision_tenant,
+    )
+    slug = f"ptyp-{uuid.uuid4().hex[:10]}"
+    result = provision_tenant(
+        slug=slug, name="Pay Types Test",
+        admin_username="admin",
+        admin_password_hash=hash_password("TestPassword123!"),
+    )
+    db_name = _tenant_db_name(slug)
+    try:
+        yield _DisposableTenant(
+            slug=result.slug, tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        try:
+            _drop_tenant_database(db_name)
+        except Exception:
+            pass
+        with control_session() as session:
+            row = session.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if row is not None:
+                session.delete(row)
+
+
+@pytest.fixture()
+def tenant_session(disposable_tenant):
+    engine = get_tenant_engine(disposable_tenant.tenant_db_name)
+    session = Session(engine)
+    try:
+        yield session, engine
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_types_tables_exist(disposable_tenant):
+    engine = get_tenant_engine(disposable_tenant.tenant_db_name)
+    try:
+        with engine.connect() as conn:
+            tables = {r[0] for r in conn.execute(sa.text(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='public'"
+            ))}
+            assert "earning_type" in tables, sorted(tables)
+            assert "deduction_type" in tables, sorted(tables)
+    finally:
+        engine.dispose()
+
+
+def test_earning_type_roundtrip(tenant_session):
+    session, _ = tenant_session
+    row = EarningType(
+        id=uuid.uuid4(),
+        name="Basic Salary",
+        code="basic_salary",
+        calc_method="fixed_amount",
+        frequency="regular",
+        is_taxable=True,
+        counts_for_uif=True,
+        counts_for_sdl=True,
+        proration_rule="by_calendar_days",
+        is_system=False,
+        is_active=True,
+    )
+    session.add(row)
+    session.commit()
+    fetched = session.query(EarningType).filter_by(code="basic_salary").one()
+    assert fetched.name == "Basic Salary"
+    assert fetched.is_taxable is True
+    assert fetched.proration_rule == "by_calendar_days"
+
+
+def test_deduction_type_roundtrip(tenant_session):
+    session, _ = tenant_session
+    row = DeductionType(
+        id=uuid.uuid4(),
+        name="Retirement Fund",
+        code="retirement",
+        category="retirement",
+        priority=10,
+        is_pre_tax=True,
+        is_system=False,
+        is_active=True,
+    )
+    session.add(row)
+    session.commit()
+    fetched = session.query(DeductionType).filter_by(code="retirement").one()
+    assert fetched.name == "Retirement Fund"
+    assert fetched.category == "retirement"
+    assert fetched.is_pre_tax is True
+
+
+def test_earning_type_unique_code(tenant_session):
+    session, _ = tenant_session
+    session.add(EarningType(
+        id=uuid.uuid4(), name="A", code="dup",
+        calc_method="fixed_amount", frequency="regular",
+        is_system=False, is_active=True,
+    ))
+    session.commit()
+    session.add(EarningType(
+        id=uuid.uuid4(), name="B", code="dup",
+        calc_method="fixed_amount", frequency="regular",
+        is_system=False, is_active=True,
+    ))
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+# END OF FILE
+=== END FILE: backend/tests/test_payroll_types_endpoints.py ===
+# END OF FILE

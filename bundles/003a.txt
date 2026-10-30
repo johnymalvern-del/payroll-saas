@@ -1,0 +1,153 @@
+=== FILE: scripts/probe_payroll.py ===
+"""One-shot probe for Bundle 003 (payroll endpoints).
+
+Read-only. Does not touch DB, git, or any existing file. Prints the shapes
+needed to write the payroll endpoint files and permission test without
+guessing (Bundle 001 cost three fix rounds from guessing).
+
+Usage:
+    python scripts\\probe_payroll.py > 4c_probe.out
+    notepad 4c_probe.out
+"""
+from __future__ import annotations
+
+import pathlib
+import re
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+BACKEND = ROOT / "backend"
+
+
+def list_dir(rel: str, pattern: str = "*.py") -> None:
+    p = BACKEND / rel
+    print(f"=== {rel}/{pattern} ===")
+    if not p.is_dir():
+        print(f"  (not a directory: {p})")
+        print()
+        return
+    for f in sorted(p.glob(pattern)):
+        if f.is_file():
+            print(f"  {f.name} ({f.stat().st_size} bytes)")
+    print()
+
+
+def show(rel: str, n: int | None = None) -> None:
+    p = BACKEND / rel
+    if not p.exists():
+        print(f"--- {rel} (NOT FOUND) ---")
+        print()
+        return
+    label = f"(first {n} lines)" if n else "(full)"
+    print(f"--- {rel} {label} ---")
+    lines = p.read_text(encoding="utf-8").splitlines()
+    chunk = lines[:n] if n else lines
+    for i, line in enumerate(chunk, 1):
+        print(f"{i:3d}| {line}")
+    print()
+
+
+print("#" * 70)
+print("# DIRECTORY LISTINGS")
+print("#" * 70)
+list_dir("app/api/v1")
+list_dir("app/core")
+list_dir("app/services")
+list_dir("app/schemas")
+list_dir("app/db/control")
+print()
+
+print("#" * 70)
+print("# PERMISSIONS (full)")
+print("#" * 70)
+show("app/core/permissions.py")
+print()
+
+print("#" * 70)
+print("# API DEPENDENCIES / DEPS")
+print("#" * 70)
+for cand in ("app/api/deps.py", "app/api/dependencies.py"):
+    show(cand, 200)
+print()
+
+print("#" * 70)
+print("# ROUTER REGISTRATION")
+print("#" * 70)
+show("app/api/v1/__init__.py", 120)
+print()
+
+print("#" * 70)
+print("# EXISTING ROUTER — sheet.py (pattern to copy)")
+print("#" * 70)
+show("app/api/v1/sheet.py", 250)
+print()
+
+print("#" * 70)
+print("# PERMISSION TEST STRUCTURE")
+print("#" * 70)
+show("tests/test_permissions.py", 160)
+print()
+
+print("#" * 70)
+print("# AUDIT / ERRORS HELPERS (full if present)")
+print("#" * 70)
+for cand in (
+    "app/services/audit.py",
+    "app/services/audit_log.py",
+    "app/core/audit.py",
+    "app/core/errors.py",
+    "app/core/exceptions.py",
+    "app/api/errors.py",
+):
+    show(cand)
+print()
+
+print("#" * 70)
+print("# SCOPE / AUTH HELPERS (grep for defs)")
+print("#" * 70)
+NEEDLES = (
+    "def require_permission",
+    "def get_current_user",
+    "def current_user",
+    "def apply_scope",
+    "def assert_in_scope",
+    "def get_tenant_session",
+    "def get_db",
+    "def get_session",
+)
+for f in (BACKEND / "app").rglob("*.py"):
+    try:
+        text = f.read_text(encoding="utf-8")
+    except Exception:
+        continue
+    hits = [i for i, line in enumerate(text.splitlines(), 1)
+            if any(needle in line for needle in NEEDLES)]
+    if not hits:
+        continue
+    print(f"--- {f.relative_to(BACKEND)} ---")
+    all_lines = text.splitlines()
+    for start in hits:
+        end = min(start + 35, len(all_lines))
+        for j in range(start, end + 1):
+            print(f"{j:3d}| {all_lines[j-1]}")
+        print("   ...")
+    print()
+
+print("#" * 70)
+print("# PAYROLL_PERMISSION matrix row check")
+print("#" * 70)
+for needle in ("PAYROLL_PREVIEW", "PAYROLL_FINALISE", "PAYROLL_REOPEN", "PAYSLIP_VIEW", "PAY_RATE_REQUEST", "SELF_VIEW", "SELF_SUBMIT"):
+    print(f"searching: {needle}")
+    for f in (BACKEND / "app").rglob("*.py"):
+        try:
+            text = f.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            if needle in line:
+                print(f"  {f.relative_to(BACKEND)}:{i}: {line.strip()}")
+    print()
+
+print("PROBE DONE")
+# END OF FILE
+=== END FILE: scripts/probe_payroll.py ===
+# END OF FILE

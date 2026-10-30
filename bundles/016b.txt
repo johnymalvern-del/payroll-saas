@@ -1,0 +1,863 @@
+=== FILE: backend/app/services/payroll_pdf.py ===
+"""Minimal PDF renderer for payslips (Chapter 4, Bundle 004b-b).
+
+No external dependency (no reportlab). Renders a single-page text PDF
+containing the standard payslip fields, which is sufficient for a proof-of-
+concept and a mechanical correctness check. Upgrading to a nicer layout is
+a follow-up that swaps this module only.
+
+Storage via StorageDep is deferred (documented in STATE.md at 016c). The
+endpoint returns bytes on demand.
+"""
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import Any
+
+
+def _esc(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _fmt(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, Decimal):
+        return f"{v:.2f}"
+    return str(v)
+
+
+def _payslip_text_lines(payslip: Any, employee: Any, pay_period: Any) -> list[str]:
+    code = getattr(employee, "employee_code", "") or ""
+    name = " ".join(
+        x for x in (getattr(employee, "first_name", "") or "", getattr(employee, "last_name", "") or "")
+        if x
+    ).strip()
+    period = getattr(pay_period, "period_key", "") or ""
+    pay_date = getattr(pay_period, "pay_date", "")
+    revision = getattr(payslip, "revision", 1)
+    status = getattr(payslip, "status", "")
+
+    lines = [
+        f"PAYSLIP  {period}  ({pay_date})",
+        f"Employee: {code}  {name}".rstrip(),
+        f"Revision: {revision}  Status: {status}",
+        "",
+        f"Gross                 {_fmt(getattr(payslip, 'gross', None))}",
+        f"Pre-tax deductions    {_fmt(getattr(payslip, 'pre_tax_deductions', None))}",
+        f"Taxable income        {_fmt(getattr(payslip, 'taxable_income', None))}",
+        f"PAYE                  {_fmt(getattr(payslip, 'paye', None))}",
+        f"UIF (employee)        {_fmt(getattr(payslip, 'uif_employee', None))}",
+        f"Other deductions      {_fmt(getattr(payslip, 'other_deductions', None))}",
+        f"Reimbursements        {_fmt(getattr(payslip, 'reimbursements', None))}",
+        f"NET PAY               {_fmt(getattr(payslip, 'net', None))}",
+        "",
+        "Employer costs",
+        f"UIF (employer)        {_fmt(getattr(payslip, 'uif_employer', None))}",
+        f"SDL                   {_fmt(getattr(payslip, 'sdl', None))}",
+    ]
+    return lines
+
+
+def _render_minimal_pdf(lines: list[str]) -> bytes:
+    """Construct a valid single-page PDF (Courier, 10pt) from text lines."""
+    content = ["BT", "/F1 10 Tf", "14 TL", "50 780 Td"]
+    for i, line in enumerate(lines):
+        if i > 0:
+            content.append("T*")
+        content.append(f"({_esc(line)}) Tj")
+    content.append("ET")
+    stream = "\n".join(content).encode("latin-1", errors="replace")
+
+    objs: list[bytes] = []
+    objs.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objs.append(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    objs.append(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+        b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>"
+    )
+    objs.append(
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
+    )
+    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>")
+
+    out = bytearray()
+    out += b"%PDF-1.4\n"
+    offsets = [0]
+    for i, o in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode()
+        out += o
+        out += b"\nendobj\n"
+    xref_offset = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n".encode()
+    out += b"0000000000 65535 f \n"
+    for off in offsets[1:]:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += b"trailer\n"
+    out += f"<< /Size {len(objs) + 1} /Root 1 0 R >>\n".encode()
+    out += b"startxref\n"
+    out += f"{xref_offset}\n".encode()
+    out += b"%%EOF\n"
+    return bytes(out)
+
+
+def render_payslip_pdf(payslip: Any, employee: Any, pay_period: Any) -> bytes:
+    return _render_minimal_pdf(_payslip_text_lines(payslip, employee, pay_period))
+
+# END OF FILE
+=== END FILE: backend/app/services/payroll_pdf.py ===
+=== FILE: backend/app/api/v1/payroll_payslips_schemas.py ===
+from __future__ import annotations
+
+import uuid
+from datetime import date, datetime
+from decimal import Decimal
+
+from pydantic import BaseModel, ConfigDict
+
+
+class PayslipOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    payroll_run_id: uuid.UUID
+    pay_period_id: uuid.UUID
+    employee_id: uuid.UUID
+    revision: int
+    status: str
+    gross: Decimal
+    pre_tax_deductions: Decimal
+    taxable_income: Decimal
+    paye: Decimal
+    uif_employee: Decimal
+    uif_employer: Decimal
+    sdl: Decimal
+    other_deductions: Decimal
+    reimbursements: Decimal
+    net: Decimal
+    pdf_object_key: str | None = None
+    predecessor_payslip_id: uuid.UUID | None = None
+    computed_at: datetime
+
+
+class PayslipListOut(BaseModel):
+    items: list[PayslipOut]
+    next_cursor: str | None = None
+
+
+class PayslipLineOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    line_type: str
+    step: str
+    sort_order: int
+    label: str
+    amount: Decimal
+    source_ref: dict
+
+
+class PayslipExplainOut(BaseModel):
+    payslip: PayslipOut
+    lines: list[PayslipLineOut]
+    snapshot: dict
+    calculation_context: dict
+
+# END OF FILE
+=== END FILE: backend/app/api/v1/payroll_payslips_schemas.py ===
+=== FILE: backend/app/api/v1/payroll_payslips.py ===
+"""Payslip read endpoints (Chapter 4, Bundle 004b-b).
+
+Four endpoints:
+  GET /payroll/payslips                      list (excludes preview rows)
+  GET /payroll/payslips/{id}                 get one (scope applied)
+  GET /payroll/payslips/{id}/explain         header + lines + snapshot
+  GET /payroll/payslips/{id}/pdf             bytes on demand
+
+Permission gates on PAYSLIP_VIEW (granted to all five roles per the current
+matrix). Scope enforcement via apply_scope / assert_in_scope decides which
+rows a manager or auditor may see; per-F14 role refinements are a follow-up.
+
+Storage is not used: PDF is rendered on demand and returned as bytes.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import uuid
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, Query, Response
+from sqlalchemy import select
+
+from app.api.deps import TenantDbDep
+from app.api.v1.payroll_payslips_schemas import (
+    PayslipExplainOut,
+    PayslipLineOut,
+    PayslipListOut,
+    PayslipOut,
+)
+from app.core.errors import AppError
+from app.core.permissions import Permission, require_permission
+from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
+from app.db.tenant.models.pay import PayPeriod, Payslip, PayslipLine, PayrollRun
+from app.db.tenant.models.people import Employee
+from app.services.payroll_pdf import render_payslip_pdf
+
+router = APIRouter(prefix="/payroll/payslips", tags=["payroll-payslips"])
+
+_DEFAULT_LIMIT = 100
+_MAX_LIMIT = 500
+
+
+def _encode_cursor(uid: uuid.UUID) -> str:
+    raw = json.dumps({"i": str(uid)}, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> uuid.UUID:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        return uuid.UUID(json.loads(raw)["i"])
+    except Exception:
+        raise AppError("invalid_cursor", "The pagination cursor is malformed", 400) from None
+
+
+def _load_payslip_scoped(db, user, payslip_id: uuid.UUID) -> Payslip:
+    row = db.scalar(select(Payslip).where(Payslip.id == payslip_id))
+    if row is None or row.status == "preview":
+        raise AppError("not_found", "Payslip not found", 404)
+    try:
+        assert_in_scope(user, row.employee_id, db)
+    except ScopeViolation:
+        raise AppError("not_found", "Payslip not found", 404)
+    return row
+
+
+@router.get("", response_model=PayslipListOut)
+def list_payslips(
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYSLIP_VIEW))],
+    employee_id: uuid.UUID | None = Query(None),
+    pay_period_id: uuid.UUID | None = Query(None),
+    status: str | None = Query("current"),
+    limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
+    cursor: str | None = Query(None),
+) -> PayslipListOut:
+    q = select(Payslip)
+    if status is not None:
+        q = q.where(Payslip.status == status)
+    q = q.where(Payslip.status != "preview")  # previews never surfaced here
+    if employee_id is not None:
+        q = q.where(Payslip.employee_id == employee_id)
+    if pay_period_id is not None:
+        q = q.where(Payslip.pay_period_id == pay_period_id)
+    q = apply_scope(q, user, db, model=Payslip)
+    if cursor is not None:
+        q = q.where(Payslip.id > _decode_cursor(cursor))
+    q = q.order_by(Payslip.id.asc()).limit(limit + 1)
+    rows = list(db.scalars(q).all())
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_cursor = _encode_cursor(rows[-1].id)
+    return PayslipListOut(
+        items=[PayslipOut.model_validate(r) for r in rows],
+        next_cursor=next_cursor,
+    )
+
+
+@router.get("/{payslip_id}", response_model=PayslipOut)
+def get_payslip(
+    payslip_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYSLIP_VIEW))],
+) -> PayslipOut:
+    row = _load_payslip_scoped(db, user, payslip_id)
+    return PayslipOut.model_validate(row)
+
+
+@router.get("/{payslip_id}/explain", response_model=PayslipExplainOut)
+def explain_payslip(
+    payslip_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYSLIP_VIEW))],
+) -> PayslipExplainOut:
+    row = _load_payslip_scoped(db, user, payslip_id)
+    lines = list(db.scalars(
+        select(PayslipLine).where(PayslipLine.payslip_id == row.id)
+        .order_by(PayslipLine.sort_order.asc())
+    ).all())
+    return PayslipExplainOut(
+        payslip=PayslipOut.model_validate(row),
+        lines=[PayslipLineOut.model_validate(l) for l in lines],
+        snapshot=row.snapshot or {},
+        calculation_context=row.calculation_context or {},
+    )
+
+
+@router.get("/{payslip_id}/pdf")
+def get_payslip_pdf(
+    payslip_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYSLIP_VIEW))],
+) -> Response:
+    row = _load_payslip_scoped(db, user, payslip_id)
+    employee = db.scalar(select(Employee).where(Employee.id == row.employee_id))
+    pay_period = db.scalar(select(PayPeriod).where(PayPeriod.id == row.pay_period_id))
+    if employee is None or pay_period is None:
+        raise AppError("not_found", "Payslip references missing employee or period", 500)
+    pdf_bytes = render_payslip_pdf(row, employee, pay_period)
+    filename = f"payslip-{employee.employee_code}-{pay_period.period_key}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+# END OF FILE
+=== END FILE: backend/app/api/v1/payroll_payslips.py ===
+=== FILE: backend/app/api/v1/__init__.py ===
+from fastapi import APIRouter
+
+from app.api.v1.audit_log import router as audit_log_router
+from app.api.v1.auth.router import router as auth_router
+from app.api.v1.branches import router as branches_router
+from app.api.v1.company.router import router as company_router
+from app.api.v1.departments import router as departments_router
+from app.api.v1.devices import router as devices_router
+from app.api.v1.employee_work_patterns import router as employee_work_patterns_router
+from app.api.v1.employees import router as employees_router
+from app.api.v1.import_employees import router as import_employees_router
+from app.api.v1.pay_history import router as pay_history_router
+from app.api.v1.payroll_change_requests import router as payroll_change_requests_router
+from app.api.v1.payroll_employee_fields import router as payroll_employee_fields_router
+from app.api.v1.payroll_employees import router as payroll_employees_router
+from app.api.v1.payroll_formulas import router as payroll_formulas_router
+from app.api.v1.payroll_pay_periods import router as payroll_pay_periods_router
+from app.api.v1.payroll_payslips import router as payroll_payslips_router
+from app.api.v1.payroll_settings import router as payroll_settings_router
+from app.api.v1.payroll_system_types import router as payroll_system_types_router
+from app.api.v1.payroll_types import router as payroll_types_router
+from app.api.v1.public_holidays import router as public_holidays_router
+from app.api.v1.punches import router as punches_router
+from app.api.v1.register import router as register_router
+from app.api.v1.shift_rate_rules import router as shift_rate_rules_router
+from app.api.v1.shifts import router as shifts_router
+from app.api.v1.sites import router as sites_router
+from app.api.v1.users import router as users_router
+from app.api.v1.work_patterns import router as work_patterns_router
+
+from app.api.v1.attendance import router as attendance_router
+from app.api.v1.exceptions import router as exceptions_router
+from app.api.v1.adjustments import router as adjustments_router
+from app.api.v1.sheet import router as sheet_router
+
+api_router = APIRouter(prefix="/api/v1")
+api_router.include_router(register_router)
+api_router.include_router(auth_router)
+api_router.include_router(company_router)
+api_router.include_router(branches_router)
+api_router.include_router(sites_router)
+api_router.include_router(departments_router)
+api_router.include_router(import_employees_router)
+api_router.include_router(employees_router)
+api_router.include_router(pay_history_router)
+api_router.include_router(users_router)
+api_router.include_router(audit_log_router)
+api_router.include_router(shifts_router)
+api_router.include_router(shift_rate_rules_router)
+api_router.include_router(work_patterns_router)
+api_router.include_router(employee_work_patterns_router)
+api_router.include_router(public_holidays_router)
+api_router.include_router(devices_router)
+api_router.include_router(punches_router)
+api_router.include_router(attendance_router)
+api_router.include_router(exceptions_router)
+api_router.include_router(adjustments_router)
+api_router.include_router(sheet_router)
+api_router.include_router(payroll_settings_router)
+api_router.include_router(payroll_types_router)
+api_router.include_router(payroll_employees_router)
+api_router.include_router(payroll_formulas_router)
+api_router.include_router(payroll_change_requests_router)
+api_router.include_router(payroll_employee_fields_router)
+api_router.include_router(payroll_system_types_router)
+api_router.include_router(payroll_pay_periods_router)
+api_router.include_router(payroll_payslips_router)
+
+# END OF FILE
+=== END FILE: backend/app/api/v1/__init__.py ===
+=== FILE: backend/tests/test_payroll_pdf.py ===
+"""Minimal PDF renderer (Chapter 4, Bundle 004b-b).
+
+Pure function test - no DB.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+from app.services.payroll_pdf import render_payslip_pdf
+
+
+def _fake_payslip(**_overrides):
+    base = dict(
+        id=uuid.uuid4(),
+        revision=1,
+        status="current",
+        gross=Decimal("1000.00"),
+        pre_tax_deductions=Decimal("0.00"),
+        taxable_income=Decimal("1000.00"),
+        paye=Decimal("179.17"),
+        uif_employee=Decimal("5.00"),
+        uif_employer=Decimal("5.00"),
+        sdl=Decimal("10.00"),
+        other_deductions=Decimal("0.00"),
+        reimbursements=Decimal("0.00"),
+        net=Decimal("815.83"),
+    )
+    base.update(_overrides)
+    return type("P", (), base)
+
+
+def _fake_employee():
+    return type("E", (), {
+        "employee_code": "EMP-001",
+        "first_name": "Ada",
+        "last_name": "Lovelace",
+    })
+
+
+def _fake_period():
+    return type("PP", (), {
+        "period_key": "2025-06-M",
+        "pay_date": date(2025, 6, 30),
+    })
+
+
+def test_pdf_bytes_start_with_header():
+    pdf = render_payslip_pdf(_fake_payslip(), _fake_employee(), _fake_period())
+    assert pdf[:5] == b"%PDF-"
+    assert pdf.rstrip().endswith(b"%%EOF")
+
+
+def test_pdf_contains_key_fields():
+    pdf = render_payslip_pdf(_fake_payslip(), _fake_employee(), _fake_period())
+    text = pdf.decode("latin-1")
+    assert "EMP-001" in text
+    assert "Ada Lovelace" in text
+    assert "2025-06-M" in text
+    assert "1000.00" in text
+    assert "179.17" in text
+    assert "815.83" in text
+    assert "NET PAY" in text
+
+
+def test_pdf_escapes_parentheses():
+    # A gross of 1000.00 renders as "1000.00" - parentheses only in labels
+    pdf = render_payslip_pdf(_fake_payslip(), _fake_employee(), _fake_period())
+    # Balanced parentheses in the raw file
+    text = pdf.decode("latin-1")
+    assert text.count("(") == text.count(")")
+
+# END OF FILE
+=== END FILE: backend/tests/test_payroll_pdf.py ===
+=== FILE: backend/tests/test_payroll_payslips.py ===
+"""Payslip read endpoints (Chapter 4, Bundle 004b-b).
+
+Payslips are seeded directly via ORM (no runner) so tests are fast. The
+runner's pay_period / pipeline behavior is already covered by
+test_payroll_pay_periods.py.
+"""
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy.orm import Session
+
+from app.api.v1.payroll_payslips import (
+    explain_payslip,
+    get_payslip,
+    get_payslip_pdf,
+    list_payslips,
+)
+from app.core.errors import AppError
+from app.core.security import hash_password
+from app.db.tenant.models.pay import (
+    PayPeriod, PayrollRun, Payslip, PayslipLine,
+)
+from app.db.tenant.models.people import Employee, User
+from app.db.tenant.session import get_tenant_engine
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    from app.db.control.models import Subscriber
+    from app.db.control.session import control_session
+    from app.services.provisioning import (
+        _drop_tenant_database, _tenant_db_name, provision_tenant,
+    )
+    slug = f"pay-{uuid.uuid4().hex[:10]}"
+    result = provision_tenant(
+        slug=slug, name="Payslips Test",
+        admin_username="admin",
+        admin_password_hash=hash_password("TestPassword123!"),
+    )
+    db_name = _tenant_db_name(slug)
+    try:
+        yield _DisposableTenant(
+            slug=result.slug, tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        try:
+            _drop_tenant_database(db_name)
+        except Exception:
+            pass
+        with control_session() as session:
+            row = session.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if row is not None:
+                session.delete(row)
+
+
+@pytest.fixture()
+def tenant_session(disposable_tenant):
+    engine = get_tenant_engine(disposable_tenant.tenant_db_name)
+    session = Session(engine)
+    try:
+        yield session, engine
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def _mk_emp(session, code=None):
+    code = code or f"EMP-{uuid.uuid4().hex[:6]}"
+    emp = Employee(
+        employee_code=code, first_name="A", last_name="B",
+        hire_date=date(2024, 1, 1), status="active",
+        employee_type="hourly", pay_basis="hourly", pay_frequency="monthly",
+        medical_scheme_members=0, uif_exempt=False,
+    )
+    session.add(emp)
+    session.commit()
+    return emp
+
+
+def _mk_user(session, *, role, employee_id=None):
+    u = User(
+        id=uuid.uuid4(),
+        username=f"u-{uuid.uuid4().hex[:6]}",
+        password_hash=hash_password("TestPass123!"),
+        role=role,
+        employee_id=employee_id,
+    )
+    session.add(u)
+    session.commit()
+    return u
+
+
+def _mk_period(session):
+    p = PayPeriod(
+        id=uuid.uuid4(),
+        period_key=f"2025-06-{uuid.uuid4().hex[:4]}",
+        start_date=date(2025, 6, 1),
+        end_date=date(2025, 6, 30),
+        pay_date=date(2025, 6, 30),
+        status="locked",
+        cutoff_at=datetime(2025, 6, 30, 12, 0, tzinfo=timezone.utc),
+    )
+    session.add(p)
+    session.commit()
+    return p
+
+
+def _mk_run(session, period):
+    run = PayrollRun(
+        id=uuid.uuid4(),
+        pay_period_id=period.id,
+        kind="final",
+        revision=1,
+        status="completed",
+        rules_snapshot={"final": True},
+        started_at=datetime.now(timezone.utc),
+        completed_at=datetime.now(timezone.utc),
+    )
+    session.add(run)
+    session.commit()
+    return run
+
+
+def _mk_payslip(session, run, period, emp, *, status="current", net="815.83"):
+    ps = Payslip(
+        id=uuid.uuid4(),
+        payroll_run_id=run.id,
+        pay_period_id=period.id,
+        employee_id=emp.id,
+        revision=1,
+        status=status,
+        gross=Decimal("1000.00"),
+        pre_tax_deductions=Decimal("0.00"),
+        taxable_income=Decimal("1000.00"),
+        paye=Decimal("179.17"),
+        uif_employee=Decimal("5.00"),
+        uif_employer=Decimal("5.00"),
+        sdl=Decimal("10.00"),
+        other_deductions=Decimal("0.00"),
+        reimbursements=Decimal("0.00"),
+        net=Decimal(net),
+        employer_costs={"uif_employer": "5.00", "sdl": "10.00"},
+        snapshot={"calculation_context": {"tax_method": "regular_earnings_v1"}, "tax_trace": []},
+        calculation_context={"tax_method": "regular_earnings_v1"},
+    )
+    session.add(ps)
+    session.flush()
+    session.add(PayslipLine(
+        id=uuid.uuid4(), payslip_id=ps.id,
+        line_type="tax", step="tax", sort_order=200, label="PAYE",
+        amount=Decimal("179.17"), source_ref={"method": "regular_earnings_v1"},
+    ))
+    session.commit()
+    return ps
+
+
+@pytest.fixture()
+def ctx(tenant_session):
+    session, engine = tenant_session
+    emp = _mk_emp(session)
+    period = _mk_period(session)
+    run = _mk_run(session, period)
+    ps = _mk_payslip(session, run, period, emp)
+    admin = _mk_user(session, role="payroll_admin")
+    return SimpleNamespace(
+        session=session, engine=engine, emp=emp, period=period,
+        run=run, ps=ps, admin=admin,
+    )
+
+
+# ---------------------------------------------------------------------------
+# List
+# ---------------------------------------------------------------------------
+
+def test_list_excludes_preview_rows(ctx):
+    _mk_payslip(ctx.session, ctx.run, ctx.period, ctx.emp, status="preview")
+    out = list_payslips(db=ctx.session, user=ctx.admin)
+    assert len(out.items) == 1
+    assert out.items[0].id == ctx.ps.id
+
+
+def test_list_filters_by_employee(ctx):
+    other_emp = _mk_emp(ctx.session)
+    _mk_payslip(ctx.session, ctx.run, ctx.period, other_emp)
+    out = list_payslips(db=ctx.session, user=ctx.admin, employee_id=ctx.emp.id)
+    assert len(out.items) == 1
+    assert out.items[0].employee_id == ctx.emp.id
+
+
+# ---------------------------------------------------------------------------
+# Get
+# ---------------------------------------------------------------------------
+
+def test_get_returns_payslip(ctx):
+    out = get_payslip(payslip_id=ctx.ps.id, db=ctx.session, user=ctx.admin)
+    assert out.id == ctx.ps.id
+    assert out.net == Decimal("815.83")
+
+
+def test_get_nonexistent_404(ctx):
+    with pytest.raises(AppError) as exc_info:
+        get_payslip(payslip_id=uuid.uuid4(), db=ctx.session, user=ctx.admin)
+    assert exc_info.value.code == "not_found"
+
+
+def test_get_preview_status_404(ctx):
+    preview = _mk_payslip(ctx.session, ctx.run, ctx.period, ctx.emp, status="preview")
+    with pytest.raises(AppError) as exc_info:
+        get_payslip(payslip_id=preview.id, db=ctx.session, user=ctx.admin)
+    assert exc_info.value.code == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# Explain
+# ---------------------------------------------------------------------------
+
+def test_explain_includes_lines_and_snapshot(ctx):
+    out = explain_payslip(payslip_id=ctx.ps.id, db=ctx.session, user=ctx.admin)
+    assert out.payslip.id == ctx.ps.id
+    assert len(out.lines) == 1
+    assert out.lines[0].label == "PAYE"
+    assert out.calculation_context.get("tax_method") == "regular_earnings_v1"
+
+
+# ---------------------------------------------------------------------------
+# PDF
+# ---------------------------------------------------------------------------
+
+def test_get_pdf_returns_bytes(ctx):
+    response = get_payslip_pdf(payslip_id=ctx.ps.id, db=ctx.session, user=ctx.admin)
+    assert response.media_type == "application/pdf"
+    assert response.body[:5] == b"%PDF-"
+    cd = response.headers.get("content-disposition", "")
+    assert "attachment;" in cd
+    assert "payslip-" in cd
+    assert ".pdf" in cd
+
+# END OF FILE
+=== END FILE: backend/tests/test_payroll_payslips.py ===
+=== FILE: backend/tests/test_payroll_endpoint_permissions.py ===
+"""Endpoint-level permission wiring for payroll routes (Chapter 4)."""
+from __future__ import annotations
+
+import pytest
+
+from app.core.permissions import Permission
+
+
+EXPECTED_ROUTES: list[tuple[str, str, Permission]] = [
+    # 003b — settings
+    ("GET",   "/api/v1/payroll/settings", Permission.PAYROLL_PREVIEW),
+    ("PATCH", "/api/v1/payroll/settings", Permission.PAYROLL_FINALISE),
+    # 003b — earning types
+    ("GET",   "/api/v1/payroll/earning-types", Permission.PAYROLL_PREVIEW),
+    ("GET",   "/api/v1/payroll/earning-types/{type_id}", Permission.PAYROLL_PREVIEW),
+    ("POST",  "/api/v1/payroll/earning-types", Permission.PAYROLL_FINALISE),
+    ("PATCH", "/api/v1/payroll/earning-types/{type_id}", Permission.PAYROLL_FINALISE),
+    ("POST",  "/api/v1/payroll/earning-types/{type_id}/deactivate", Permission.PAYROLL_FINALISE),
+    # 003b — deduction types
+    ("GET",   "/api/v1/payroll/deduction-types", Permission.PAYROLL_PREVIEW),
+    ("GET",   "/api/v1/payroll/deduction-types/{type_id}", Permission.PAYROLL_PREVIEW),
+    ("POST",  "/api/v1/payroll/deduction-types", Permission.PAYROLL_FINALISE),
+    ("PATCH", "/api/v1/payroll/deduction-types/{type_id}", Permission.PAYROLL_FINALISE),
+    ("POST",  "/api/v1/payroll/deduction-types/{type_id}/deactivate", Permission.PAYROLL_FINALISE),
+    # 003c — employee earnings (read)
+    ("GET",   "/api/v1/payroll/employees/{employee_id}/earnings", Permission.PAYROLL_PREVIEW),
+    ("GET",   "/api/v1/payroll/employees/{employee_id}/earnings/{item_id}", Permission.PAYROLL_PREVIEW),
+    # 004a-iv-b — employee earnings (write submits change request)
+    ("POST",  "/api/v1/payroll/employees/{employee_id}/earnings", Permission.PAY_RATE_REQUEST),
+    ("PATCH", "/api/v1/payroll/employees/{employee_id}/earnings/{item_id}", Permission.PAY_RATE_REQUEST),
+    ("POST",  "/api/v1/payroll/employees/{employee_id}/earnings/{item_id}/deactivate", Permission.PAY_RATE_REQUEST),
+    # 003c — employee deductions (read)
+    ("GET",   "/api/v1/payroll/employees/{employee_id}/deductions", Permission.PAYROLL_PREVIEW),
+    ("GET",   "/api/v1/payroll/employees/{employee_id}/deductions/{item_id}", Permission.PAYROLL_PREVIEW),
+    # 004a-iv-b — employee deductions (write submits change request)
+    ("POST",  "/api/v1/payroll/employees/{employee_id}/deductions", Permission.PAY_RATE_REQUEST),
+    ("PATCH", "/api/v1/payroll/employees/{employee_id}/deductions/{item_id}", Permission.PAY_RATE_REQUEST),
+    ("POST",  "/api/v1/payroll/employees/{employee_id}/deductions/{item_id}/deactivate", Permission.PAY_RATE_REQUEST),
+    # 004a-iv-b — employee fields
+    ("GET",   "/api/v1/payroll/employees/{employee_id}/fields", Permission.PAYROLL_PREVIEW),
+    ("POST",  "/api/v1/payroll/employees/{employee_id}/fields", Permission.PAY_RATE_REQUEST),
+    # 004a-iv-c — system types seed
+    ("POST",  "/api/v1/payroll/earning-types/ensure-system", Permission.PAYROLL_FINALISE),
+    # 004a-i — formula readiness
+    ("GET",   "/api/v1/payroll-formulas/readiness", Permission.PAYROLL_PREVIEW),
+    ("POST",  "/api/v1/payroll-formulas/{code}/acknowledge", Permission.PAYROLL_FINALISE),
+    # 004a-iv-a — change requests
+    ("POST",  "/api/v1/payroll/change-requests", Permission.PAY_RATE_REQUEST),
+    ("GET",   "/api/v1/payroll/change-requests", Permission.PAY_RATE_VIEW),
+    ("GET",   "/api/v1/payroll/change-requests/{request_id}", Permission.PAY_RATE_VIEW),
+    ("POST",  "/api/v1/payroll/change-requests/{request_id}/approve", Permission.PAY_RATE_APPROVE),
+    ("POST",  "/api/v1/payroll/change-requests/{request_id}/reject", Permission.PAY_RATE_APPROVE),
+    ("POST",  "/api/v1/payroll/change-requests/{request_id}/cancel", Permission.PAY_RATE_REQUEST),
+    # 004b-a — pay periods
+    ("POST",  "/api/v1/payroll/pay-periods", Permission.PAYROLL_FINALISE),
+    ("GET",   "/api/v1/payroll/pay-periods", Permission.PAYROLL_PREVIEW),
+    ("GET",   "/api/v1/payroll/pay-periods/{period_id}", Permission.PAYROLL_PREVIEW),
+    ("POST",  "/api/v1/payroll/pay-periods/{period_id}/preview", Permission.PAYROLL_PREVIEW),
+    ("POST",  "/api/v1/payroll/pay-periods/{period_id}/finalise", Permission.PAYROLL_FINALISE),
+    ("POST",  "/api/v1/payroll/pay-periods/{period_id}/reopen", Permission.PAYROLL_REOPEN),
+    ("GET",   "/api/v1/payroll/pay-periods/{period_id}/reopen-log", Permission.PAYROLL_PREVIEW),
+    # 004b-b — payslips
+    ("GET",   "/api/v1/payroll/payslips", Permission.PAYSLIP_VIEW),
+    ("GET",   "/api/v1/payroll/payslips/{payslip_id}", Permission.PAYSLIP_VIEW),
+    ("GET",   "/api/v1/payroll/payslips/{payslip_id}/explain", Permission.PAYSLIP_VIEW),
+    ("GET",   "/api/v1/payroll/payslips/{payslip_id}/pdf", Permission.PAYSLIP_VIEW),
+]
+
+
+def _route_map():
+    from fastapi.routing import APIRoute
+    from app.main import app
+    out: dict[tuple[str, str], APIRoute] = {}
+    for r in app.routes:
+        if not isinstance(r, APIRoute):
+            continue
+        for m in r.methods:
+            if m in ("HEAD", "OPTIONS"):
+                continue
+            out[(m, r.path)] = r
+    return out
+
+
+def _extract_permissions(route) -> set[Permission]:
+    found: set[Permission] = set()
+    stack = [route.dependant]
+    while stack:
+        d = stack.pop()
+        fn = getattr(d, "call", None)
+        if fn is not None and getattr(fn, "__closure__", None):
+            for cell in fn.__closure__:
+                try:
+                    v = cell.cell_contents
+                except ValueError:
+                    continue
+                if isinstance(v, Permission):
+                    found.add(v)
+        stack.extend(getattr(d, "dependencies", []) or [])
+    return found
+
+
+_IDS = [f"{m}-{p}-{perm.value}" for m, p, perm in EXPECTED_ROUTES]
+
+
+@pytest.mark.parametrize("method,path,expected_perm", EXPECTED_ROUTES, ids=_IDS)
+def test_route_registered(method: str, path: str, expected_perm: Permission) -> None:
+    routes = _route_map()
+    key = (method, path)
+    assert key in routes, (
+        f"Route {method} {path} not registered. "
+        f"Available payroll routes: {sorted(k for k in routes if 'payroll' in k[1])}"
+    )
+
+
+@pytest.mark.parametrize("method,path,expected_perm", EXPECTED_ROUTES, ids=_IDS)
+def test_route_has_expected_permission(method: str, path: str, expected_perm: Permission) -> None:
+    routes = _route_map()
+    route = routes.get((method, path))
+    assert route is not None, f"Route {method} {path} not found"
+    perms = _extract_permissions(route)
+    assert expected_perm in perms, (
+        f"{method} {path}: expected permission {expected_perm.value!r}, "
+        f"found {sorted(p.value for p in perms)}"
+    )
+
+
+def test_payroll_routes_all_have_a_permission() -> None:
+    routes = _route_map()
+    offenders = []
+    for (method, path), route in routes.items():
+        if not path.startswith("/api/v1/payroll"):
+            continue
+        if not _extract_permissions(route):
+            offenders.append(f"{method} {path}")
+    assert not offenders, f"payroll routes missing require_permission: {offenders}"
+
+# END OF FILE
+=== END FILE: backend/tests/test_payroll_endpoint_permissions.py ===
+# END OF FILE

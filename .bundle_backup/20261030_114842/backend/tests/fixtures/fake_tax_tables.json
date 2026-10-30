@@ -1,0 +1,115 @@
+{
+  "_comment": "SYNTHETIC - not for production. Obviously artificial values so no real SA number can be confused with a fixture.",
+  "tables": [
+    {
+      "country_code": "ZA",
+      "table_type": "tax_bracket",
+      "version": "synthetic_fake_v1",
+      "tax_year": "SYNTH-01",
+      "source_document": "SYNTHETIC - not for production",
+      "source_url": "https://example.invalid/synthetic",
+      "source_date": "2025-01-01",
+      "effective_from": "2025-01-01",
+      "effective_to": "2030-12-31",
+      "rows": [
+        {"row_key": "1", "sort_order": 1, "lower_bound": "0",    "upper_bound": "1000", "rate": "0.10", "base_tax": "0"},
+        {"row_key": "2", "sort_order": 2, "lower_bound": "1000", "upper_bound": "2000", "rate": "0.15", "base_tax": "100"},
+        {"row_key": "3", "sort_order": 3, "lower_bound": "2000", "upper_bound": null,   "rate": "0.20", "base_tax": "250"}
+      ]
+    },
+    {
+      "country_code": "ZA",
+      "table_type": "tax_rebate",
+      "version": "synthetic_fake_v1",
+      "tax_year": "SYNTH-01",
+      "source_document": "SYNTHETIC - not for production",
+      "source_url": "https://example.invalid/synthetic",
+      "source_date": "2025-01-01",
+      "effective_from": "2025-01-01",
+      "effective_to": "2030-12-31",
+      "rows": [
+        {"row_key": "primary",       "sort_order": 1, "amount": "100"},
+        {"row_key": "secondary_65",  "sort_order": 2, "amount": "50"},
+        {"row_key": "tertiary_75",   "sort_order": 3, "amount": "25"}
+      ]
+    },
+    {
+      "country_code": "ZA",
+      "table_type": "tax_threshold",
+      "version": "synthetic_fake_v1",
+      "tax_year": "SYNTH-01",
+      "source_document": "SYNTHETIC - not for production",
+      "source_url": "https://example.invalid/synthetic",
+      "source_date": "2025-01-01",
+      "effective_from": "2025-01-01",
+      "effective_to": "2030-12-31",
+      "rows": [
+        {"row_key": "below_age_65", "sort_order": 1, "amount": "500"},
+        {"row_key": "age_65_to_74", "sort_order": 2, "amount": "400"},
+        {"row_key": "age_75_plus",  "sort_order": 3, "amount": "300"}
+      ]
+    },
+    {
+      "country_code": "ZA",
+      "table_type": "medical_credit",
+      "version": "synthetic_fake_v1",
+      "tax_year": "SYNTH-01",
+      "source_document": "SYNTHETIC - not for production",
+      "source_url": "https://example.invalid/synthetic",
+      "source_date": "2025-01-01",
+      "effective_from": "2025-01-01",
+      "effective_to": "2030-12-31",
+      "rows": [
+        {"row_key": "first_member",      "sort_order": 1, "amount": "10"},
+        {"row_key": "additional_member", "sort_order": 2, "amount": "5"},
+        {"row_key": "first_dependant",   "sort_order": 3, "amount": "5"}
+      ]
+    },
+    {
+      "country_code": "ZA",
+      "table_type": "retirement_limit",
+      "version": "synthetic_fake_v1",
+      "tax_year": "SYNTH-01",
+      "source_document": "SYNTHETIC - not for production",
+      "source_url": "https://example.invalid/synthetic",
+      "source_date": "2025-01-01",
+      "effective_from": "2025-01-01",
+      "effective_to": "2030-12-31",
+      "rows": [
+        {"row_key": "percentage_of_taxable_income", "sort_order": 1, "value": "0.10"},
+        {"row_key": "annual_cap",                   "sort_order": 2, "value": "1000"}
+      ]
+    },
+    {
+      "country_code": "ZA",
+      "table_type": "uif",
+      "version": "synthetic_fake_v1",
+      "tax_year": "SYNTH-01",
+      "source_document": "SYNTHETIC - not for production",
+      "source_url": "https://example.invalid/synthetic",
+      "source_date": "2025-01-01",
+      "effective_from": "2025-01-01",
+      "effective_to": "2030-12-31",
+      "rows": [
+        {"row_key": "employee_rate",   "sort_order": 1, "value": "0.01"},
+        {"row_key": "employer_rate",   "sort_order": 2, "value": "0.01"},
+        {"row_key": "monthly_ceiling", "sort_order": 3, "value": "500"}
+      ]
+    },
+    {
+      "country_code": "ZA",
+      "table_type": "sdl",
+      "version": "synthetic_fake_v1",
+      "tax_year": "SYNTH-01",
+      "source_document": "SYNTHETIC - not for production",
+      "source_url": "https://example.invalid/synthetic",
+      "source_date": "2025-01-01",
+      "effective_from": "2025-01-01",
+      "effective_to": "2030-12-31",
+      "rows": [
+        {"row_key": "rate",                       "sort_order": 1, "value": "0.01"},
+        {"row_key": "exemption_threshold_annual", "sort_order": 2, "value": "50000"}
+      ]
+    }
+  ]
+}

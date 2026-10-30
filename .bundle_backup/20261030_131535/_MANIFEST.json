@@ -1,0 +1,15 @@
+{
+  "created": [
+    "backend/alembic/tenant/versions/0019_formula_acks.py",
+    "backend/app/services/payroll_formulas.py",
+    "backend/app/api/v1/payroll_formulas_schemas.py",
+    "backend/app/api/v1/payroll_formulas.py",
+    "backend/tests/test_payroll_formulas.py",
+    "backend/tests/test_payroll_formulas_endpoints.py"
+  ],
+  "written": [
+    "backend/app/db/tenant/models/payroll_settings.py",
+    "backend/app/api/v1/__init__.py"
+  ],
+  "timestamp": "20261030_131535"
+}

@@ -1,0 +1,291 @@
+﻿F
+================================== FAILURES ===================================
+________________ test_acknowledge_creates_settings_when_absent ________________
+
+self = <sqlalchemy.engine.base.Connection object at 0x00000216CA72B170>
+dialect = <sqlalchemy.dialects.postgresql.psycopg.PGDialect_psycopg object at 0x00000216CA613170>
+context = <sqlalchemy.dialects.postgresql.psycopg.PGExecutionContext_psycopg object at 0x00000216CA72B7D0>
+statement = <sqlalchemy.dialects.postgresql.psycopg.PGCompiler_psycopg object at 0x00000216CA728770>
+parameters = [{'age_reference_date': None, 'formula_acks': Jsonb({}), 'id': UUID('dd4aecbc-9ac0-45c6-8b17-fee680b832aa'), 'net_pay_floor': Decimal('0.00'), ...}]
+
+    def _exec_single_context(
+        self,
+        dialect: Dialect,
+        context: ExecutionContext,
+        statement: Union[str, Compiled],
+        parameters: Optional[_AnyMultiExecuteParams],
+    ) -> CursorResult[Any]:
+        """continue the _execute_context() method for a single DBAPI
+        cursor.execute() or cursor.executemany() call.
+    
+        """
+        if dialect.bind_typing is BindTyping.SETINPUTSIZES:
+            generic_setinputsizes = context._prepare_set_input_sizes()
+    
+            if generic_setinputsizes:
+                try:
+                    dialect.do_set_input_sizes(
+                        context.cursor, generic_setinputsizes, context
+                    )
+                except BaseException as e:
+                    self._handle_dbapi_exception(
+                        e, str(statement), parameters, None, context
+                    )
+    
+        cursor, str_statement, parameters = (
+            context.cursor,
+            context.statement,
+            context.parameters,
+        )
+    
+        effective_parameters: Optional[_AnyExecuteParams]
+    
+        if not context.executemany:
+            effective_parameters = parameters[0]
+        else:
+            effective_parameters = parameters
+    
+        if self._has_events or self.engine._has_events:
+            for fn in self.dispatch.before_cursor_execute:
+                str_statement, effective_parameters = fn(
+                    self,
+                    cursor,
+                    str_statement,
+                    effective_parameters,
+                    context,
+                    context.executemany,
+                )
+    
+        if self._echo:
+            self._log_info(str_statement)
+    
+            stats = context._get_cache_stats()
+    
+            if not self.engine.hide_parameters:
+                self._log_info(
+                    "[%s] %r",
+                    stats,
+                    sql_util._repr_params(
+                        effective_parameters,
+                        batches=10,
+                        ismulti=context.executemany,
+                    ),
+                )
+            else:
+                self._log_info(
+                    "[%s] [SQL parameters hidden due to hide_parameters=True]",
+                    stats,
+                )
+    
+        evt_handled: bool = False
+        try:
+            if context.execute_style is ExecuteStyle.EXECUTEMANY:
+                effective_parameters = cast(
+                    "_CoreMultiExecuteParams", effective_parameters
+                )
+                if self.dialect._has_events:
+                    for fn in self.dialect.dispatch.do_executemany:
+                        if fn(
+                            cursor,
+                            str_statement,
+                            effective_parameters,
+                            context,
+                        ):
+                            evt_handled = True
+                            break
+                if not evt_handled:
+                    self.dialect.do_executemany(
+                        cursor,
+                        str_statement,
+                        effective_parameters,
+                        context,
+                    )
+            elif not effective_parameters and context.no_parameters:
+                if self.dialect._has_events:
+                    for fn in self.dialect.dispatch.do_execute_no_params:
+                        if fn(cursor, str_statement, context):
+                            evt_handled = True
+                            break
+                if not evt_handled:
+                    self.dialect.do_execute_no_params(
+                        cursor, str_statement, context
+                    )
+            else:
+                effective_parameters = cast(
+                    "_CoreSingleExecuteParams", effective_parameters
+                )
+                if self.dialect._has_events:
+                    for fn in self.dialect.dispatch.do_execute:
+                        if fn(
+                            cursor,
+                            str_statement,
+                            effective_parameters,
+                            context,
+                        ):
+                            evt_handled = True
+                            break
+                if not evt_handled:
+>                   self.dialect.do_execute(
+                        cursor, str_statement, effective_parameters, context
+                    )
+
+..\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1976: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+..\.venv\Lib\site-packages\sqlalchemy\engine\default.py:964: in do_execute
+    cursor.execute(statement, parameters)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <psycopg.Cursor [closed] [IDLE] (host=localhost user=payroll_app database=tenant_pfml_bf8a4afb5c) at 0x216ca4ae090>
+query = 'INSERT INTO payroll_settings (id, age_reference_date, sdl_applies, net_pay_floor, formula_acks, row_version, updated_...%(formula_acks)s::JSONB, %(row_version)s::INTEGER, %(updated_by_user_id)s::UUID) RETURNING payroll_settings.updated_at'
+params = {'age_reference_date': None, 'formula_acks': Jsonb({}), 'id': UUID('dd4aecbc-9ac0-45c6-8b17-fee680b832aa'), 'net_pay_floor': Decimal('0.00'), ...}
+
+    def execute(
+        self,
+        query: Query,
+        params: Params | None = None,
+        *,
+        prepare: bool | None = None,
+        binary: bool | None = None,
+    ) -> Self:
+        """
+        Execute a query or command to the database.
+        """
+        try:
+            with self._conn.lock:
+                self._conn.wait(
+                    self._execute_gen(query, params, prepare=prepare, binary=binary)
+                )
+        except e._NO_TRACEBACK as ex:
+>           raise ex.with_traceback(None)
+E           psycopg.errors.ForeignKeyViolation: insert or update on table "payroll_settings" violates foreign key constraint "payroll_settings_updated_by_user_id_fkey"
+E           DETAIL:  Key (updated_by_user_id)=(b92dab67-caf5-455b-9795-986241601854) is not present in table "user".
+
+..\.venv\Lib\site-packages\psycopg\cursor.py:97: ForeignKeyViolation
+
+The above exception was the direct cause of the following exception:
+
+tenant_session = (<sqlalchemy.orm.session.Session object at 0x00000216CA4AAA50>, Engine(postgresql+psycopg://payroll_app:***@localhost:5432/tenant_pfml_bf8a4afb5c))
+
+    def test_acknowledge_creates_settings_when_absent(tenant_session):
+        session, _ = tenant_session
+        assert session.query(PayrollSettings).count() == 0
+>       ack = acknowledge_formula(
+            code="gen_base_salary", db=session, user=_admin(),
+        )
+
+tests\test_payroll_formulas_endpoints.py:83: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\api\v1\payroll_formulas.py:70: in acknowledge_formula
+    db.flush()
+..\.venv\Lib\site-packages\sqlalchemy\orm\session.py:4353: in flush
+    self._flush(objects)
+..\.venv\Lib\site-packages\sqlalchemy\orm\session.py:4488: in _flush
+    with util.safe_reraise():
+         ^^^^^^^^^^^^^^^^^^^
+..\.venv\Lib\site-packages\sqlalchemy\util\langhelpers.py:122: in __exit__
+    raise exc_value.with_traceback(exc_tb)
+..\.venv\Lib\site-packages\sqlalchemy\orm\session.py:4449: in _flush
+    flush_context.execute()
+..\.venv\Lib\site-packages\sqlalchemy\orm\unitofwork.py:465: in execute
+    rec.execute(self)
+..\.venv\Lib\site-packages\sqlalchemy\orm\unitofwork.py:641: in execute
+    util.preloaded.orm_persistence.save_obj(
+..\.venv\Lib\site-packages\sqlalchemy\orm\persistence.py:94: in save_obj
+    _emit_insert_statements(
+..\.venv\Lib\site-packages\sqlalchemy\orm\persistence.py:1234: in _emit_insert_statements
+    result = connection.execute(
+..\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1428: in execute
+    return meth(
+..\.venv\Lib\site-packages\sqlalchemy\sql\elements.py:526: in _execute_on_connection
+    return connection._execute_clauseelement(
+..\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1650: in _execute_clauseelement
+    ret = self._execute_context(
+..\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1855: in _execute_context
+    return self._exec_single_context(
+..\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1995: in _exec_single_context
+    self._handle_dbapi_exception(
+..\.venv\Lib\site-packages\sqlalchemy\engine\base.py:2372: in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+..\.venv\Lib\site-packages\sqlalchemy\engine\base.py:1976: in _exec_single_context
+    self.dialect.do_execute(
+..\.venv\Lib\site-packages\sqlalchemy\engine\default.py:964: in do_execute
+    cursor.execute(statement, parameters)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <psycopg.Cursor [closed] [IDLE] (host=localhost user=payroll_app database=tenant_pfml_bf8a4afb5c) at 0x216ca4ae090>
+query = 'INSERT INTO payroll_settings (id, age_reference_date, sdl_applies, net_pay_floor, formula_acks, row_version, updated_...%(formula_acks)s::JSONB, %(row_version)s::INTEGER, %(updated_by_user_id)s::UUID) RETURNING payroll_settings.updated_at'
+params = {'age_reference_date': None, 'formula_acks': Jsonb({}), 'id': UUID('dd4aecbc-9ac0-45c6-8b17-fee680b832aa'), 'net_pay_floor': Decimal('0.00'), ...}
+
+    def execute(
+        self,
+        query: Query,
+        params: Params | None = None,
+        *,
+        prepare: bool | None = None,
+        binary: bool | None = None,
+    ) -> Self:
+        """
+        Execute a query or command to the database.
+        """
+        try:
+            with self._conn.lock:
+                self._conn.wait(
+                    self._execute_gen(query, params, prepare=prepare, binary=binary)
+                )
+        except e._NO_TRACEBACK as ex:
+>           raise ex.with_traceback(None)
+E           sqlalchemy.exc.IntegrityError: (psycopg.errors.ForeignKeyViolation) insert or update on table "payroll_settings" violates foreign key constraint "payroll_settings_updated_by_user_id_fkey"
+E           DETAIL:  Key (updated_by_user_id)=(b92dab67-caf5-455b-9795-986241601854) is not present in table "user".
+E           [SQL: INSERT INTO payroll_settings (id, age_reference_date, sdl_applies, net_pay_floor, formula_acks, row_version, updated_by_user_id) VALUES (%(id)s::UUID, %(age_reference_date)s::VARCHAR, %(sdl_applies)s, %(net_pay_floor)s, %(formula_acks)s::JSONB, %(row_version)s::INTEGER, %(updated_by_user_id)s::UUID) RETURNING payroll_settings.updated_at]
+E           [parameters: {'id': UUID('dd4aecbc-9ac0-45c6-8b17-fee680b832aa'), 'age_reference_date': None, 'sdl_applies': None, 'net_pay_floor': Decimal('0.00'), 'formula_acks': Jsonb({}), 'row_version': 1, 'updated_by_user_id': UUID('b92dab67-caf5-455b-9795-986241601854')}]
+E           (Background on this error at: https://sqlalche.me/e/20/gkpj)
+
+..\.venv\Lib\site-packages\psycopg\cursor.py:97: IntegrityError
+---------------------------- Captured stdout setup ----------------------------
+{"subscriber_id": "ac5c7a20-00c4-4766-99e2-41bef0a0229c", "slug": "pfml-bf8a4afb5c", "db": "tenant_pfml_bf8a4afb5c", "event": "tenant.provisioning.start", "level": "info", "timestamp": "2026-10-30T11:22:06.843456Z"}
+{"subscriber_id": "ac5c7a20-00c4-4766-99e2-41bef0a0229c", "slug": "pfml-bf8a4afb5c", "db": "tenant_pfml_bf8a4afb5c", "schema_version": "ten_0019", "event": "tenant.provisioning.done", "level": "info", "timestamp": "2026-10-30T11:22:10.658883Z"}
+---------------------------- Captured stderr setup ----------------------------
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> ctl_0001, Initial control-database schema.
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> ten_0001, Initial tenant-database schema (Phase 1A).
+INFO  [alembic.runtime.migration] Running upgrade ten_0001 -> ten_0002, Auth: refresh-token families, individual refresh tokens, user.password_changed_at.
+INFO  [alembic.runtime.migration] Running upgrade ten_0002 -> ten_0003, Add missing constraints to user_scope.
+INFO  [alembic.runtime.migration] Running upgrade ten_0003 -> ten_0004, Add row_version to company, is_active to branch/site/department.
+INFO  [alembic.runtime.migration] Running upgrade ten_0004 -> ten_0005, Add case-insensitive unique constraint on branch.code.
+INFO  [alembic.runtime.migration] Running upgrade ten_0005 -> ten_0006, Add case-insensitive unique constraint on site.code and branch index.
+INFO  [alembic.runtime.migration] Running upgrade ten_0006 -> ten_0007, Add case-insensitive unique constraint on department.code and parent index.
+INFO  [alembic.runtime.migration] Running upgrade ten_0007 -> ten_0008, Add row_version to employee, case-insensitive employee_code index, and
+termination_date index.
+INFO  [alembic.runtime.migration] Running upgrade ten_0008 -> ten_0009, Add row_version to user, plus indexes for the list and the one-active-
+user-per-employee rule.
+INFO  [alembic.runtime.migration] Running upgrade ten_0009 -> ten_0010, Add decision columns, note, and indexes to employee_pay_history.
+INFO  [alembic.runtime.migration] Running upgrade ten_0010 -> ten_0011, Add source column to employee_pay_history for import provenance.
+INFO  [alembic.runtime.migration] Running upgrade ten_0011 -> ten_0012, Chapter 2A attendance foundation: 7 new tables + a device ALTER.
+INFO  [alembic.runtime.migration] Running upgrade ten_0012 -> ten_0013, Attendance calculation tables plus country calendar.
+INFO  [alembic.runtime.migration] Running upgrade ten_0013 -> ten_0014, Chapter 2B amendments B4 and B5: two new shift columns.
+INFO  [alembic.runtime.migration] Running upgrade ten_0014 -> ten_0015, Attendance work surface (Chapter 2C).
+INFO  [alembic.runtime.migration] Running upgrade ten_0015 -> ten_0016, Leave and requests tables (Chapter 3, 3A).
+INFO  [alembic.runtime.migration] Running upgrade ten_0016 -> ten_0017, Payroll schema (Chapter 4, Bundle 002).
+INFO  [alembic.runtime.migration] Running upgrade ten_0017 -> ten_0018, Payroll settings table (Chapter 4, Bundle 003b).
+INFO  [alembic.runtime.migration] Running upgrade ten_0018 -> ten_0019, Formula acknowledgements (Chapter 4, Bundle 004a-i).
+============================== warnings summary ===============================
+..\.venv\Lib\site-packages\starlette\testclient.py:37
+  C:\xampp\htdocs\Payroll\.venv\Lib\site-packages\starlette\testclient.py:37: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = typing.Callable[[], typing.ContextManager[anyio.abc.BlockingPortal]]
+
+..\.venv\Lib\site-packages\_pytest\cacheprovider.py:475
+  C:\xampp\htdocs\Payroll\.venv\Lib\site-packages\_pytest\cacheprovider.py:475: PytestCacheWarning: could not create cache path C:\xampp\htdocs\Payroll\backend\.pytest_cache\v\cache\nodeids: [WinError 5] Access is denied: 'C:\\xampp\\htdocs\\Payroll\\backend\\.pytest_cache\\v\\cache'
+    config.cache.set("cache/nodeids", sorted(self.cached_nodeids))
+
+..\.venv\Lib\site-packages\_pytest\cacheprovider.py:429
+  C:\xampp\htdocs\Payroll\.venv\Lib\site-packages\_pytest\cacheprovider.py:429: PytestCacheWarning: could not create cache path C:\xampp\htdocs\Payroll\backend\.pytest_cache\v\cache\lastfailed: [WinError 5] Access is denied: 'C:\\xampp\\htdocs\\Payroll\\backend\\.pytest_cache\\v\\cache'
+    config.cache.set("cache/lastfailed", self.lastfailed)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_payroll_formulas_endpoints.py::test_acknowledge_creates_settings_when_absent
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed, 3 warnings in 14.12s

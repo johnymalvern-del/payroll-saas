@@ -1,0 +1,14 @@
+{
+  "created": [
+    "backend/app/services/payroll_pdf.py",
+    "backend/app/api/v1/payroll_payslips_schemas.py",
+    "backend/app/api/v1/payroll_payslips.py",
+    "backend/tests/test_payroll_pdf.py",
+    "backend/tests/test_payroll_payslips.py"
+  ],
+  "written": [
+    "backend/app/api/v1/__init__.py",
+    "backend/tests/test_payroll_endpoint_permissions.py"
+  ],
+  "timestamp": "20261030_160113"
+}

@@ -1,0 +1,277 @@
+=== FILE: scripts/4a_bis_patch_v2.py ===
+"""4A-bis v2: robust argon2 override, works regardless of security.py shape.
+
+Runs after 4a_bis_patch.py. Idempotent via _4A_BIS_SECURITY_V2 marker.
+Rebinds every module-level PasswordHasher instance AND overrides
+hash_password/verify_password directly so the test env is fast even when
+security.py creates hasher instances per call.
+"""
+import pathlib
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+BACKEND = ROOT / "backend"
+
+PATCH = '''
+
+# --- 4A-bis v2: _4A_BIS_SECURITY_V2: robust override ---
+import os as _os_v2_sec
+from argon2 import PasswordHasher as _PH_v2_sec
+from argon2.exceptions import VerifyMismatchError as _VME_v2_sec
+
+if _os_v2_sec.environ.get("PAYROLL_TEST_FAST_HASH") == "1":
+    _4a_fast_v2 = _PH_v2_sec(time_cost=1, memory_cost=8192, parallelism=1, hash_len=16, salt_len=8)
+    for _n_v2 in list(globals().keys()):
+        _v_v2 = globals().get(_n_v2)
+        if isinstance(_v_v2, _PH_v2_sec) and _v_v2 is not _4a_fast_v2:
+            globals()[_n_v2] = _4a_fast_v2
+    if callable(globals().get("hash_password")):
+        def hash_password(password):  # type: ignore[no-redef]
+            return _4a_fast_v2.hash(password)
+    if callable(globals().get("verify_password")):
+        def verify_password(password_hash, password):  # type: ignore[no-redef]
+            try:
+                return _4a_fast_v2.verify(password_hash, password)
+            except _VME_v2_sec:
+                return False
+
+def _4a_current_hasher():
+    if _os_v2_sec.environ.get("PAYROLL_TEST_FAST_HASH") == "1":
+        return _4a_fast_v2
+    return _PH_v2_sec()
+# --- end 4A-bis v2 ---
+
+# END OF FILE
+'''
+
+
+def main() -> int:
+    path = BACKEND / "app" / "core" / "security.py"
+    raw = path.read_bytes()
+    if b"_4A_BIS_SECURITY_V2" in raw:
+        print(f"SKIP: {path.name} (v2 marker present)")
+        return 0
+    text = raw.decode("utf-8")
+    if "# END OF FILE" in text:
+        text = text.rsplit("# END OF FILE", 1)[0].rstrip() + "\r\n"
+    path.write_bytes((text + PATCH).encode("utf-8"))
+    print(f"PATCHED v2: {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+# END OF FILE
+=== END FILE: scripts/4a_bis_patch_v2.py ===
+=== FILE: scripts/4a_bis_measure.ps1 ===
+$ErrorActionPreference = 'Stop'
+$root = 'C:\xampp\htdocs\Payroll'
+$backend = Join-Path $root 'backend'
+
+Write-Host "=== step 1: apply patch v1 (idempotent) ==="
+Push-Location $root
+python scripts\4a_bis_patch.py
+$rc = $LASTEXITCODE
+Pop-Location
+if ($rc -ne 0) { throw "STOP: patch v1 failed" }
+
+Write-Host ""
+Write-Host "=== step 1b: apply patch v2 (robust argon2) ==="
+Push-Location $root
+python scripts\4a_bis_patch_v2.py
+$rc = $LASTEXITCODE
+Pop-Location
+if ($rc -ne 0) { throw "STOP: patch v2 failed" }
+
+Write-Host ""
+Write-Host "=== step 2: BEFORE (env unset) ==="
+Push-Location $backend
+Remove-Item Env:PAYROLL_TEST_TEMPLATE_DB -ErrorAction SilentlyContinue
+Remove-Item Env:PAYROLL_TEST_FAST_HASH -ErrorAction SilentlyContinue
+$swb = [System.Diagnostics.Stopwatch]::StartNew()
+$beforeOut = python -m pytest tests/test_adjustments.py tests/test_sheet.py -q --no-header 2>&1
+$beforeExit = $LASTEXITCODE
+$swb.Stop()
+Pop-Location
+if ($beforeExit -ne 0) { Write-Host $beforeOut; throw "STOP: BEFORE failed" }
+$beforeSec = [int]$swb.Elapsed.TotalSeconds
+$beforeCount = ($beforeOut | Select-String -Pattern '(\d+) passed').Matches.Groups[1].Value
+Write-Host "BEFORE elapsed: ${beforeSec}s; passed: $beforeCount"
+
+Write-Host ""
+Write-Host "=== step 3: AFTER #1 (bootstrap) ==="
+Push-Location $backend
+$env:PAYROLL_TEST_TEMPLATE_DB = '1'
+$env:PAYROLL_TEST_FAST_HASH = '1'
+$swa1 = [System.Diagnostics.Stopwatch]::StartNew()
+$after1Out = python -m pytest tests/test_adjustments.py tests/test_sheet.py -q --no-header 2>&1
+$after1Exit = $LASTEXITCODE
+$swa1.Stop()
+Pop-Location
+if ($after1Exit -ne 0) { Write-Host $after1Out; throw "STOP: AFTER #1 failed" }
+$after1Sec = [int]$swa1.Elapsed.TotalSeconds
+Write-Host "AFTER #1 elapsed: ${after1Sec}s"
+
+Write-Host ""
+Write-Host "=== step 4: AFTER #2 (steady) ==="
+Push-Location $backend
+$swa2 = [System.Diagnostics.Stopwatch]::StartNew()
+$after2Out = python -m pytest tests/test_adjustments.py tests/test_sheet.py -q --no-header 2>&1
+$after2Exit = $LASTEXITCODE
+$swa2.Stop()
+Pop-Location
+if ($after2Exit -ne 0) { Write-Host $after2Out; throw "STOP: AFTER #2 failed" }
+$after2Sec = [int]$swa2.Elapsed.TotalSeconds
+$after2Count = ($after2Out | Select-String -Pattern '(\d+) passed').Matches.Groups[1].Value
+Write-Host "AFTER #2 elapsed: ${after2Sec}s; passed: $after2Count"
+
+Write-Host ""
+Write-Host "=== step 5: guard tests (env cleared) ==="
+Push-Location $backend
+Remove-Item Env:PAYROLL_TEST_TEMPLATE_DB -ErrorAction SilentlyContinue
+Remove-Item Env:PAYROLL_TEST_FAST_HASH -ErrorAction SilentlyContinue
+$guardOut = python -m pytest tests/test_security_argon2_guard.py -q --no-header 2>&1
+$guardExit = $LASTEXITCODE
+Pop-Location
+if ($guardExit -ne 0) { Write-Host $guardOut; throw "STOP: guard failed" }
+Write-Host $guardOut
+
+Write-Host ""
+Write-Host "=== step 6: SUMMARY ==="
+$perTestBefore = [math]::Round([double]$beforeSec / [double]$beforeCount, 2)
+$perTestAfter = [math]::Round([double]$after2Sec / [double]$after2Count, 2)
+$perTestSaved = [math]::Round($perTestBefore - $perTestAfter, 2)
+$estFull = [int](2435 - ($perTestSaved * 701))
+if ($estFull -lt 300) { $estFull = 300 }
+Write-Host ("BEFORE: ${beforeSec}s ($beforeCount passed); per-test ${perTestBefore}s")
+Write-Host ("AFTER #1: ${after1Sec}s")
+Write-Host ("AFTER #2: ${after2Sec}s ($after2Count passed); per-test ${perTestAfter}s")
+Write-Host ("Per-test savings: ${perTestSaved}s")
+Write-Host ("Estimated full-suite: ~${estFull}s (~$([int]($estFull/60)) min)")
+if ($after2Sec -gt ($beforeSec * 0.85)) {
+    Write-Host "WARN: still slow - fast path may not be active"
+}
+Write-Host "DONE. 4A-bis v2 complete."
+
+Write-Host ""
+Write-Host "=== step 7: drift diagnostic ==="
+Push-Location $backend
+$driftOut = python -m pytest tests/test_schema_drift.py -x -vv --tb=long --no-header 2>&1
+$driftExit = $LASTEXITCODE
+Pop-Location
+$driftFile = Join-Path $root 'drift_diag.out'
+$driftOut | Out-File -FilePath $driftFile -Encoding utf8
+Write-Host "Drift test exit: $driftExit"
+Write-Host "Drift diag saved to: $driftFile"
+Write-Host ("--- first 60 lines ---")
+$driftOut | Select-Object -First 60 | ForEach-Object { Write-Host $_ }
+
+Write-Host ""
+Write-Host "=== step 8: git commit patched files ==="
+Push-Location $root
+git add backend/app/core/security.py
+if ($LASTEXITCODE -ne 0) { Pop-Location; throw "STOP: git add failed" }
+$staged = git diff --cached --name-only
+if ($staged) {
+    git commit -m "4A-bis v2: robust argon2 test override"
+    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "STOP: git commit failed" }
+}
+git log --oneline -3
+Pop-Location
+
+Write-Host ""
+Write-Host "ALL DONE."
+# END OF FILE
+=== END FILE: scripts/4a_bis_measure.ps1 ===
+=== FILE: backend/tests/test_security_argon2_guard.py ===
+"""4A-bis guard tests: fast paths only in test env; production unchanged."""
+from __future__ import annotations
+import os
+import subprocess
+import sys
+
+
+def _isolated(code, drop_env=()):
+    env = {k: v for k, v in os.environ.items() if k not in drop_env}
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+
+
+def test_argon2_default_strong_without_env():
+    r = _isolated(
+        "from app.core.security import _4a_current_hasher; h=_4a_current_hasher(); print(h.memory_cost, h.time_cost)",
+        drop_env={"PAYROLL_TEST_FAST_HASH"},
+    )
+    assert r.returncode == 0, r.stderr
+    mc, tc = r.stdout.strip().split()
+    assert int(mc) >= 32768, f"memory_cost too low: {mc}"
+    assert int(tc) >= 2, f"time_cost too low: {tc}"
+
+
+def test_argon2_weak_with_env_isolated():
+    env = dict(os.environ)
+    env["PAYROLL_TEST_FAST_HASH"] = "1"
+    r = subprocess.run(
+        [sys.executable, "-c", "from app.core.security import _4a_current_hasher; h=_4a_current_hasher(); print(h.memory_cost, h.time_cost)"],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert r.returncode == 0, r.stderr
+    mc, tc = r.stdout.strip().split()
+    assert int(mc) < 32768, f"expected weak, got {mc}"
+    assert int(tc) < 3, f"expected weak, got {tc}"
+
+
+def test_hash_password_uses_weak_params_when_env_set():
+    """End-to-end: hash_password output shows weak argon2 cost params."""
+    env = dict(os.environ)
+    env["PAYROLL_TEST_FAST_HASH"] = "1"
+    code = (
+        "from app.core.security import hash_password; "
+        "h = hash_password('test'); "
+        "print(h[:40])"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert r.returncode == 0, r.stderr
+    # Weak params => "$argon2id$v=19$m=8192,t=1,p=1$" (or similar)
+    prefix = r.stdout.strip()
+    assert "m=8192" in prefix or "m=16384" in prefix, (
+        f"hash_password used strong params: {prefix!r}"
+    )
+
+
+def test_hash_password_uses_strong_params_without_env():
+    r = _isolated(
+        "from app.core.security import hash_password; h = hash_password('test'); print(h[:40])",
+        drop_env={"PAYROLL_TEST_FAST_HASH"},
+    )
+    assert r.returncode == 0, r.stderr
+    prefix = r.stdout.strip()
+    # Default argon2-cffi: m=65536
+    assert "m=65536" in prefix, f"hash_password not strong: {prefix!r}"
+
+
+def test_template_flag_off_by_default():
+    r = _isolated(
+        "from app.services.provisioning import _TEST_TEMPLATE_ENABLED; assert not _TEST_TEMPLATE_ENABLED; print('ok')",
+        drop_env={"PAYROLL_TEST_TEMPLATE_DB"},
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_template_flag_off_with_env_but_no_conftest():
+    env = dict(os.environ)
+    env["PAYROLL_TEST_TEMPLATE_DB"] = "1"
+    r = subprocess.run(
+        [sys.executable, "-c", "from app.services.provisioning import _TEST_TEMPLATE_ENABLED; assert not _TEST_TEMPLATE_ENABLED; print('ok')"],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert r.returncode == 0, r.stderr
+
+# END OF FILE
+=== END FILE: backend/tests/test_security_argon2_guard.py ===
+# END OF FILE

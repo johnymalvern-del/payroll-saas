@@ -1,0 +1,14 @@
+{
+  "created": [
+    "backend/app/services/payroll_seed.py",
+    "backend/app/services/payroll_import_fields.py",
+    "backend/app/api/v1/payroll_system_types.py",
+    "backend/tests/test_payroll_seed.py",
+    "backend/tests/test_import_fields.py"
+  ],
+  "written": [
+    "backend/app/api/v1/__init__.py",
+    "backend/tests/test_payroll_endpoint_permissions.py"
+  ],
+  "timestamp": "20261030_152608"
+}

@@ -44,7 +44,39 @@ From 2B onward:
 - Every `.py` that patches other files uses `[System.IO.File]::WriteAllText`
   with an absolute path, or `pathlib.Path(...).write_text(...)`. No relative
   paths in .NET File APIs, no `python -c` with `''` escaping.
-- Every file ends with `# END OF FILE` (Python/PS) and the file-writing
+- Every file ends with `
+## Chapter 4 closed (payroll engine)
+
+Chapter 4 delivered. Payroll engine wired end to end:
+  - Control-DB statutory tables via scripts/load_statutory_tables.ps1 (F1)
+  - Eleven pay tables + three employee columns via ten_0017
+  - payroll_settings (ten_0018) + formula_acks (ten_0019)
+  - payroll_change_request (ten_0020) - F3 change-request flow
+  - TaxEngine v1 (regular-earnings only, per F5)
+  - UIF ceiling-first, SDL tenant gate, retirement 11F cap
+  - 8-step pipeline with net-pay floor and F7 legal-order refusal
+  - Pay periods: preview persists per F4, finalise, reopen
+  - Payslip endpoints + minimal PDF renderer
+  - Hand-worked payslip case framework (tests/data/payslip_cases/)
+  - apply_bundle.py now runs tests for importers of changed source files,
+    and its do_commit skips gitignored files (fixes the recurring
+    scripts/*.py staging failure)
+
+### Open items carried into Chapter 5+
+- apply_import_row_fields not wired into import_employees.py
+- provision_tenant does not auto-seed system earning types
+- Payslip PDF returns bytes; StorageDep integration deferred
+- per_hour earning types refused (calc_method_unsupported) until
+  attendance-to-earnings integration lands
+- Bank file, journals, EMP201 / EMP501 / IRP5 / IT3(a) exports
+- Photo retention policy, HMAC on punch payloads, daily sweep scheduler
+- reviewed_at not cleared when only an exception appears (from 2C)
+
+### Next
+
+Chapter 5 (payroll outputs and statutory exports). SPEC-only first.
+
+# END OF FILE` (Python/PS) and the file-writing
   script verifies that marker as its last non-empty line.
 - Register new routers in `app/api/v1/__init__.py` in the same commit that
   creates the router. Two routers shipped unregistered in 2A because that

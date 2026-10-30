@@ -286,3 +286,62 @@ def provision_tenant(
                 sub.provisioning_status = "failed"
                 sub.provisioning_error = str(exc)[:500]
         raise ProvisioningError(str(exc)) from exc
+
+# --- 4A-bis: _4A_BIS_PROVISIONING: template DB fast path, test-only ---
+import os as _os_4a_prov
+from pathlib import Path as _Path_4a_prov
+
+_TEST_TEMPLATE_ENABLED = False
+_TEMPLATE_NAME_CACHE = None
+_TEMPLATE_VERSION_CACHE = None
+
+def _4a_get_template_name():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    backend_dir = _Path_4a_prov(__file__).resolve().parent.parent.parent
+    cfg = Config(str(backend_dir / "alembic.ini"), ini_section="tenant")
+    cfg.set_main_option("sqlalchemy.url", "driver://")
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    return f"payroll_tpl_{head}".replace(".", "_")
+
+def _4a_bootstrap_template_db():
+    global _TEMPLATE_NAME_CACHE, _TEMPLATE_VERSION_CACHE
+    if _TEMPLATE_NAME_CACHE is None:
+        _TEMPLATE_NAME_CACHE = _4a_get_template_name()
+    template = _TEMPLATE_NAME_CACHE
+    engine = create_engine(_admin_url("postgres"), future=True, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as conn:
+            exists = conn.scalar(text("SELECT 1 FROM pg_database WHERE datname=:n"), {"n": template})
+            if not exists:
+                conn.execute(text(f'CREATE DATABASE "{template}"'))
+    finally:
+        engine.dispose()
+    from alembic import command
+    from alembic.config import Config
+    backend_dir = _Path_4a_prov(__file__).resolve().parent.parent.parent
+    cfg = Config(str(backend_dir / "alembic.ini"), ini_section="tenant")
+    cfg.set_main_option("sqlalchemy.url", _admin_url(template))
+    command.upgrade(cfg, "head")
+    engine = create_engine(_admin_url(template), future=True)
+    try:
+        with engine.connect() as conn:
+            _TEMPLATE_VERSION_CACHE = conn.scalar(text("SELECT version_num FROM alembic_version LIMIT 1"))
+    finally:
+        engine.dispose()
+
+def _4a_run_migrations_from_template(db_name):
+    assert _TEST_TEMPLATE_ENABLED
+    assert _TEMPLATE_NAME_CACHE is not None
+    assert _TEMPLATE_VERSION_CACHE is not None
+    _drop_tenant_database(db_name)
+    engine = create_engine(_admin_url("postgres"), future=True, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{db_name}" TEMPLATE "{_TEMPLATE_NAME_CACHE}"'))
+    finally:
+        engine.dispose()
+    return str(_TEMPLATE_VERSION_CACHE)
+# --- end ---
+
+# END OF FILE

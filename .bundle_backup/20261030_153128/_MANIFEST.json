@@ -1,0 +1,12 @@
+{
+  "created": [
+    "backend/app/services/payroll_runner.py",
+    "backend/app/api/v1/payroll_pay_periods_schemas.py",
+    "backend/app/api/v1/payroll_pay_periods.py",
+    "backend/tests/test_payroll_pay_periods.py"
+  ],
+  "written": [
+    "backend/app/api/v1/__init__.py"
+  ],
+  "timestamp": "20261030_153128"
+}

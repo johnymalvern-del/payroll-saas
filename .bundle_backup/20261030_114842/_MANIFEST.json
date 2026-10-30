@@ -1,0 +1,11 @@
+{
+  "created": [],
+  "written": [
+    "backend/app/services/statutory_loader.py",
+    "scripts/load_statutory_tables.ps1",
+    "backend/tests/data/sa_statutory_tables.template.json",
+    "backend/tests/fixtures/fake_tax_tables.json",
+    "backend/tests/test_statutory_tables.py"
+  ],
+  "timestamp": "20261030_114842"
+}

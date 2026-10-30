@@ -1,8 +1,8 @@
-"""Payroll settings (Chapter 4, Bundle 003b).
+"""Payroll settings (Chapter 4).
 
 Singleton row per tenant. Controls E4 (sdl_applies), E6 (age_reference_date),
-D14 (net_pay_floor). GET returns defaults when no row exists; PATCH creates
-or updates the row. row_version guards concurrent edits.
+D14 (net_pay_floor), and F8 (formula_acks). GET returns defaults when no row
+exists; PATCH creates or updates the row. row_version guards concurrent edits.
 """
 from __future__ import annotations
 
@@ -10,8 +10,10 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import (
+    Boolean, DateTime, ForeignKey, Integer, Numeric, String, func, text,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -25,6 +27,9 @@ class PayrollSettings(Base):
     sdl_applies: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     net_pay_floor: Mapped[Decimal] = mapped_column(
         Numeric(14, 2), nullable=False, default=Decimal("0")
+    )
+    formula_acks: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(

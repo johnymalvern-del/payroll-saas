@@ -1,0 +1,9 @@
+{
+  "created": [],
+  "written": [
+    "backend/app/services/payroll_refusals.py",
+    "backend/app/services/payroll_tax.py",
+    "backend/tests/test_payroll_tax.py"
+  ],
+  "timestamp": "20261030_144735"
+}

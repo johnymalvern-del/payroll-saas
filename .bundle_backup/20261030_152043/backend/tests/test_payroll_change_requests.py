@@ -1,0 +1,289 @@
+"""Change request mechanism (Chapter 4, Bundle 004a-iv-a).
+
+HR and payroll_admin are real persisted User rows so the FK on
+payroll_change_request.requested_by_user_id resolves. HR is linked to the
+target Employee so assert_in_scope passes; admin has no employee record so
+scope is company-wide (per scope.py).
+"""
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy.orm import Session
+
+from app.core.errors import AppError
+from app.core.security import hash_password
+from app.db.tenant.models.pay import EarningType, EmployeeEarning
+from app.db.tenant.models.people import Employee, User
+from app.db.tenant.session import get_tenant_engine
+from app.services.payroll_change_request import (
+    approve_change_request,
+    cancel_change_request,
+    reject_change_request,
+    submit_change_request,
+)
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    from app.db.control.models import Subscriber
+    from app.db.control.session import control_session
+    from app.services.provisioning import (
+        _drop_tenant_database, _tenant_db_name, provision_tenant,
+    )
+    slug = f"cr-{uuid.uuid4().hex[:10]}"
+    result = provision_tenant(
+        slug=slug, name="CR Test",
+        admin_username="admin",
+        admin_password_hash=hash_password("TestPassword123!"),
+    )
+    db_name = _tenant_db_name(slug)
+    try:
+        yield _DisposableTenant(
+            slug=result.slug, tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        try:
+            _drop_tenant_database(db_name)
+        except Exception:
+            pass
+        with control_session() as session:
+            row = session.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if row is not None:
+                session.delete(row)
+
+
+@pytest.fixture()
+def tenant_session(disposable_tenant):
+    engine = get_tenant_engine(disposable_tenant.tenant_db_name)
+    session = Session(engine)
+    try:
+        yield session, engine
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def _mk_emp(session, code=None):
+    code = code or f"CR-{uuid.uuid4().hex[:6]}"
+    emp = Employee(
+        employee_code=code, first_name="A", last_name=code,
+        hire_date=date(2024, 1, 1), status="active",
+        employee_type="hourly", pay_basis="hourly", pay_frequency="monthly",
+        medical_scheme_members=0, uif_exempt=False,
+    )
+    session.add(emp)
+    session.commit()
+    return emp
+
+
+def _mk_user(session, *, username, role, employee_id=None, password="TestPass123!"):
+    u = User(
+        id=uuid.uuid4(),
+        username=username,
+        password_hash=hash_password(password),
+        role=role,
+        employee_id=employee_id,
+    )
+    session.add(u)
+    session.commit()
+    return u
+
+
+def _mk_earning_type(session, code=None):
+    code = code or f"base-{uuid.uuid4().hex[:6]}"
+    et = EarningType(
+        id=uuid.uuid4(), name="Base", code=code,
+        calc_method="fixed_amount", frequency="regular",
+        is_system=False, is_active=True,
+    )
+    session.add(et)
+    session.commit()
+    return et
+
+
+@pytest.fixture()
+def ctx(tenant_session):
+    session, engine = tenant_session
+    emp = _mk_emp(session)
+    et = _mk_earning_type(session)
+    # HR is linked to the target employee so scope resolution passes
+    # (hr with employee_id=None has empty scope, fails closed in assert_in_scope).
+    hr = _mk_user(
+        session,
+        username=f"hr-{uuid.uuid4().hex[:6]}",
+        role="hr",
+        employee_id=emp.id,
+    )
+    # Admin has no employee record → scope resolves to company-wide
+    admin = _mk_user(
+        session,
+        username=f"pa-{uuid.uuid4().hex[:6]}",
+        role="payroll_admin",
+        employee_id=None,
+    )
+    return SimpleNamespace(
+        session=session, engine=engine, emp=emp, et=et, hr=hr, admin=admin,
+    )
+
+
+def _submit_earning(ctx):
+    return submit_change_request(
+        ctx.session, ctx.hr,
+        kind="employee_earning_create",
+        employee_id=ctx.emp.id,
+        payload={
+            "earning_type_id": str(ctx.et.id),
+            "amount": "1500.00",
+            "effective_from": "2025-01-01",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Submit
+# ---------------------------------------------------------------------------
+
+def test_submit_creates_pending(ctx):
+    req = _submit_earning(ctx)
+    ctx.session.commit()
+    assert req.status == "pending"
+    assert req.requested_by_user_id == ctx.hr.id
+    assert ctx.session.query(EmployeeEarning).count() == 0
+
+
+def test_submit_rejects_unknown_kind(ctx):
+    with pytest.raises(AppError) as exc_info:
+        submit_change_request(
+            ctx.session, ctx.hr,
+            kind="bogus_kind",
+            employee_id=ctx.emp.id,
+            payload={},
+        )
+    assert exc_info.value.code == "unknown_kind"
+
+
+def test_submit_validates_payload_shape(ctx):
+    with pytest.raises(AppError) as exc_info:
+        submit_change_request(
+            ctx.session, ctx.hr,
+            kind="employee_earning_create",
+            employee_id=ctx.emp.id,
+            payload={"earning_type_id": "not-a-uuid"},
+        )
+    assert exc_info.value.code == "invalid_payload"
+
+
+# ---------------------------------------------------------------------------
+# Approve
+# ---------------------------------------------------------------------------
+
+def test_approve_creates_employee_earning(ctx):
+    req = _submit_earning(ctx)
+    ctx.session.commit()
+    req, applied_id = approve_change_request(ctx.session, ctx.admin, req.id)
+    ctx.session.commit()
+
+    assert req.status == "approved"
+    assert req.decided_by_user_id == ctx.admin.id
+    assert req.applied_entity_id == applied_id
+    row = ctx.session.query(EmployeeEarning).filter_by(id=applied_id).one()
+    assert row.amount == Decimal("1500.00")
+
+
+def test_approve_self_rejected(ctx):
+    req = _submit_earning(ctx)
+    ctx.session.commit()
+    with pytest.raises(AppError) as exc_info:
+        approve_change_request(ctx.session, ctx.hr, req.id)
+    assert exc_info.value.code == "self_approval_forbidden"
+
+
+def test_approve_already_decided_rejected(ctx):
+    req = _submit_earning(ctx)
+    ctx.session.commit()
+    approve_change_request(ctx.session, ctx.admin, req.id)
+    ctx.session.commit()
+    with pytest.raises(AppError) as exc_info:
+        approve_change_request(ctx.session, ctx.admin, req.id)
+    assert exc_info.value.code == "not_pending"
+
+
+# ---------------------------------------------------------------------------
+# Reject
+# ---------------------------------------------------------------------------
+
+def test_reject_sets_status(ctx):
+    req = _submit_earning(ctx)
+    ctx.session.commit()
+    reject_change_request(ctx.session, ctx.admin, req.id, "insufficient evidence")
+    ctx.session.commit()
+    ctx.session.refresh(req)
+    assert req.status == "rejected"
+    assert req.decision_note == "insufficient evidence"
+    assert ctx.session.query(EmployeeEarning).count() == 0
+
+
+def test_reject_self_rejected(ctx):
+    req = _submit_earning(ctx)
+    ctx.session.commit()
+    with pytest.raises(AppError) as exc_info:
+        reject_change_request(ctx.session, ctx.hr, req.id, "meh")
+    assert exc_info.value.code == "self_approval_forbidden"
+
+
+# ---------------------------------------------------------------------------
+# Cancel
+# ---------------------------------------------------------------------------
+
+def test_cancel_by_requester(ctx):
+    req = _submit_earning(ctx)
+    ctx.session.commit()
+    cancel_change_request(ctx.session, ctx.hr, req.id)
+    ctx.session.commit()
+    ctx.session.refresh(req)
+    assert req.status == "cancelled"
+
+
+def test_cancel_by_other_rejected(ctx):
+    req = _submit_earning(ctx)
+    ctx.session.commit()
+    with pytest.raises(AppError) as exc_info:
+        cancel_change_request(ctx.session, ctx.admin, req.id)
+    assert exc_info.value.code == "not_requester"
+
+
+# ---------------------------------------------------------------------------
+# Field update
+# ---------------------------------------------------------------------------
+
+def test_approve_field_update_writes_employee(ctx):
+    req = submit_change_request(
+        ctx.session, ctx.hr,
+        kind="employee_field_update",
+        employee_id=ctx.emp.id,
+        payload={"contracted_weekly_hours": 40.0, "uif_exempt": True},
+    )
+    ctx.session.commit()
+    _, applied_id = approve_change_request(ctx.session, ctx.admin, req.id)
+    ctx.session.commit()
+    ctx.session.refresh(ctx.emp)
+    assert ctx.emp.contracted_weekly_hours == 40.0
+    assert ctx.emp.uif_exempt is True
+    assert applied_id == ctx.emp.id
+
+# END OF FILE

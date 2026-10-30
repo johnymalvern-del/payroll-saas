@@ -1,0 +1,80 @@
+﻿============================= test session starts =============================
+collecting ... collected 1 item
+
+tests/test_schema_drift.py::test_no_drift_between_models_and_db FAILED   [100%]
+
+================================== FAILURES ===================================
+_____________________ test_no_drift_between_models_and_db _____________________
+
+tenant_engine_app = Engine(postgresql+psycopg://payroll_app:***@localhost:5432/payroll_test_56d2af7cf4b3)
+
+    def test_no_drift_between_models_and_db(tenant_engine_app):
+        from app.db.base import Base
+        import app.db.tenant.models  # noqa: F401
+        import app.db.tenant.models.attendance  # noqa: F401
+        import app.db.tenant.models.devices  # noqa: F401
+    
+        drift = []
+        for name, table in Base.metadata.tables.items():
+            if name in CONTROL_TABLES:
+                continue
+            expected = {c.name for c in table.columns}
+            actual = _db_columns(tenant_engine_app, name)
+            if not actual:
+                drift.append(name + ' (no table in DB)')
+            elif expected != actual:
+                drift.append(
+                    name + ' expected_only=' + str(sorted(expected - actual))
+                    + ' db_only=' + str(sorted(actual - expected))
+                )
+>       assert not drift, 'schema drift: ' + '; '.join(drift)
+E       AssertionError: schema drift: employee expected_only=[] db_only=['contracted_weekly_hours', 'medical_scheme_members']
+E       assert not ["employee expected_only=[] db_only=['contracted_weekly_hours', 'medical_scheme_members']"]
+
+tests\test_schema_drift.py:45: AssertionError
+---------------------------- Captured stderr setup ----------------------------
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> ctl_0001, Initial control-database schema.
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> ten_0001, Initial tenant-database schema (Phase 1A).
+INFO  [alembic.runtime.migration] Running upgrade ten_0001 -> ten_0002, Auth: refresh-token families, individual refresh tokens, user.password_changed_at.
+INFO  [alembic.runtime.migration] Running upgrade ten_0002 -> ten_0003, Add missing constraints to user_scope.
+INFO  [alembic.runtime.migration] Running upgrade ten_0003 -> ten_0004, Add row_version to company, is_active to branch/site/department.
+INFO  [alembic.runtime.migration] Running upgrade ten_0004 -> ten_0005, Add case-insensitive unique constraint on branch.code.
+INFO  [alembic.runtime.migration] Running upgrade ten_0005 -> ten_0006, Add case-insensitive unique constraint on site.code and branch index.
+INFO  [alembic.runtime.migration] Running upgrade ten_0006 -> ten_0007, Add case-insensitive unique constraint on department.code and parent index.
+INFO  [alembic.runtime.migration] Running upgrade ten_0007 -> ten_0008, Add row_version to employee, case-insensitive employee_code index, and
+termination_date index.
+INFO  [alembic.runtime.migration] Running upgrade ten_0008 -> ten_0009, Add row_version to user, plus indexes for the list and the one-active-
+user-per-employee rule.
+INFO  [alembic.runtime.migration] Running upgrade ten_0009 -> ten_0010, Add decision columns, note, and indexes to employee_pay_history.
+INFO  [alembic.runtime.migration] Running upgrade ten_0010 -> ten_0011, Add source column to employee_pay_history for import provenance.
+INFO  [alembic.runtime.migration] Running upgrade ten_0011 -> ten_0012, Chapter 2A attendance foundation: 7 new tables + a device ALTER.
+INFO  [alembic.runtime.migration] Running upgrade ten_0012 -> ten_0013, Attendance calculation tables plus country calendar.
+INFO  [alembic.runtime.migration] Running upgrade ten_0013 -> ten_0014, Chapter 2B amendments B4 and B5: two new shift columns.
+INFO  [alembic.runtime.migration] Running upgrade ten_0014 -> ten_0015, Attendance work surface (Chapter 2C).
+INFO  [alembic.runtime.migration] Running upgrade ten_0015 -> ten_0016, Leave and requests tables (Chapter 3, 3A).
+INFO  [alembic.runtime.migration] Running upgrade ten_0016 -> ten_0017, Payroll schema (Chapter 4, Bundle 002).
+INFO  [alembic.runtime.migration] Running upgrade ten_0017 -> ten_0018, Payroll settings table (Chapter 4, Bundle 003b).
+INFO  [alembic.runtime.migration] Running upgrade ten_0018 -> ten_0019, Formula acknowledgements (Chapter 4, Bundle 004a-i).
+============================== warnings summary ===============================
+..\.venv\Lib\site-packages\starlette\testclient.py:37
+  C:\xampp\htdocs\Payroll\.venv\Lib\site-packages\starlette\testclient.py:37: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = typing.Callable[[], typing.ContextManager[anyio.abc.BlockingPortal]]
+
+..\.venv\Lib\site-packages\_pytest\cacheprovider.py:475
+  C:\xampp\htdocs\Payroll\.venv\Lib\site-packages\_pytest\cacheprovider.py:475: PytestCacheWarning: could not create cache path C:\xampp\htdocs\Payroll\backend\.pytest_cache\v\cache\nodeids: [WinError 5] Access is denied: 'C:\\xampp\\htdocs\\Payroll\\backend\\.pytest_cache\\v\\cache'
+    config.cache.set("cache/nodeids", sorted(self.cached_nodeids))
+
+..\.venv\Lib\site-packages\_pytest\cacheprovider.py:429
+  C:\xampp\htdocs\Payroll\.venv\Lib\site-packages\_pytest\cacheprovider.py:429: PytestCacheWarning: could not create cache path C:\xampp\htdocs\Payroll\backend\.pytest_cache\v\cache\lastfailed: [WinError 5] Access is denied: 'C:\\xampp\\htdocs\\Payroll\\backend\\.pytest_cache\\v\\cache'
+    config.cache.set("cache/lastfailed", self.lastfailed)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_schema_drift.py::test_no_drift_between_models_and_db - AssertionError: schema drift: employee expected_only=[] db_only=['contracted_weekly_hours', 'medical_scheme_members']
+assert not ["employee expected_only=[] db_only=['contracted_weekly_hours', 'medical_scheme_members']"]
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+======================== 1 failed, 3 warnings in 9.51s ========================

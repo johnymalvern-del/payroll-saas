@@ -1,0 +1,13 @@
+{
+  "_warning": "FAKE TEST DATA - not real tax tables. Do not use in production.",
+  "country_code": "ZA",
+  "tax_year": 9999,
+  "brackets": [
+    { "from": 0, "to": 100000, "rate": 0.10 },
+    { "from": 100000, "to": null, "rate": 0.20 }
+  ],
+  "rebates": { "primary": 1000, "secondary": 500, "tertiary": 300 },
+  "threshold": 50000,
+  "uif": { "rate": 0.01, "ceiling_monthly": 99999 },
+  "sdl": { "rate": 0.005, "exemption_threshold": 500000 }
+}

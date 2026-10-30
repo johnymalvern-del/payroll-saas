@@ -1,0 +1,17 @@
+{
+  "created": [
+    "backend/app/services/payroll_audit.py",
+    "backend/app/db/tenant/models/payroll_settings.py",
+    "backend/alembic/tenant/versions/0018_payroll_settings.py",
+    "backend/app/api/v1/payroll_settings_schemas.py",
+    "backend/app/api/v1/payroll_settings.py",
+    "backend/app/api/v1/payroll_types_schemas.py",
+    "backend/app/api/v1/payroll_types.py",
+    "backend/tests/test_payroll_settings.py",
+    "backend/tests/test_payroll_types_endpoints.py"
+  ],
+  "written": [
+    "backend/app/api/v1/__init__.py"
+  ],
+  "timestamp": "20261030_130045"
+}
