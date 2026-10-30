@@ -1,0 +1,33 @@
+{
+  "_comment": "Hand-worked payslip case template. Copy this file, fill every field from a payslip computed BY HAND (show every step in hand_work), save as <case_id>.json. The harness test_payslip_cases_framework.py runs every *.json except TEMPLATE.json through the pipeline against the synthetic fixture and asserts against expected. If any expected value is null, that case is skipped. Do NOT put real statutory numbers here - use only the synthetic fixture.",
+  "case_id": null,
+  "description": null,
+  "employee": {
+    "monthly_salary": null,
+    "contracted_weekly_hours": null,
+    "pay_frequency": null,
+    "age_years": null,
+    "medical_scheme_members": null,
+    "uif_exempt": null
+  },
+  "pay_period": {
+    "start_date": null,
+    "end_date": null,
+    "pay_date": null
+  },
+  "earnings": [
+    {"label": "Base", "amount": null}
+  ],
+  "synthetic_fixture": "fake_tax_tables",
+  "expected": {
+    "gross": null,
+    "paye": null,
+    "uif_employee": null,
+    "uif_employer": null,
+    "sdl": null,
+    "net": null
+  },
+  "hand_work": "REQUIRED - show every calculation step here, or the reviewer rejects the case"
+}
+
+# END OF FILE
