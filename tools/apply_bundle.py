@@ -1,24 +1,25 @@
 """tools/apply_bundle.py - apply a bundle of complete file writes.
 
-Two improvements over the earlier version:
-  1. find_dependent_tests(written) - runs pytest not just on changed test
-     files but on any test file that imports a changed source file. Capped
-     at 20 test files (beyond that, warn and require the full suite).
-  2. do_commit skips gitignored files - the recurring failure where a
-     scripts/*.py helper was written by the bundle but refused by git add
-     is now silent (the file is on disk, just not staged).
+Modes:
+  default (backend)   ast.parse every .py, import app.main, collect-only + pytest
+                      on touched test files and importers of changed sources.
+  --frontend          node/npm/npx resolved via shutil.which, launched through
+                      cmd.exe /c on Windows (.cmd/.bat); version gate; npm
+                      install on package.json change; npx tsc --noEmit on TS
+                      change; npx vitest run on touched test files; npm run
+                      build only with --build.
+
+Both modes:
+  refuse malformed bundles; back up overwritten files; write UTF-8 without BOM;
+  full output to bundles/last_run.log; on failure print first error line per
+  failure AND the last 15 lines of the log; --commit "<msg>" with repeatable
+  --also <path> to include extra files in the commit; --rollback <timestamp>;
+  gitignored-safe staging; --push; --record-full-suite-pass.
 
 Bundle format:
-    === FILE: backend/app/x.py ===
+    === FILE: <path> ===
     <content>
-    === END FILE: backend/app/x.py ===
-
-Commands:
-    python tools\\apply_bundle.py bundles\\NNN.txt --commit "msg"
-    python tools\\apply_bundle.py bundles\\NNN.txt --fast
-    python tools\\apply_bundle.py --rollback <timestamp>
-    python tools\\apply_bundle.py --record-full-suite-pass
-    python tools\\apply_bundle.py --push
+    === END FILE: <path> ===
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ import argparse
 import ast
 import datetime
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -35,17 +37,111 @@ import sys
 REPO = pathlib.Path(__file__).resolve().parent.parent
 BACKUP_ROOT = REPO / ".bundle_backup"
 FULL_SUITE_MARKER = REPO / ".last_full_suite_ok"
+FRONTEND_DIR = REPO / "frontend"
+LOG_FILE = REPO / "bundles" / "last_run.log"
 
 FILE_RE = re.compile(r"^=== FILE: (.+?) ===\s*$")
 END_RE = re.compile(r"^=== END FILE: (.+?) ===\s*$")
 
 _MAX_DEPENDENT_TESTS = 20
+_LOG_TAIL_LINES = 15
 
 
-def parse_bundle(path):
+# ---------------------------------------------------------------------------
+# Log
+# ---------------------------------------------------------------------------
+
+def _truncate_log() -> None:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LOG_FILE.write_text("", encoding="utf-8")
+
+
+def log_line(text: str) -> None:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(text.rstrip() + "\n")
+
+
+def print_log_tail(n: int = _LOG_TAIL_LINES) -> None:
+    if not LOG_FILE.exists():
+        return
+    try:
+        lines = LOG_FILE.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+    tail = lines[-n:] if len(lines) > n else lines
+    if not tail:
+        return
+    try:
+        rel = LOG_FILE.relative_to(REPO)
+    except ValueError:
+        rel = LOG_FILE
+    print(f"\n--- last {len(tail)} lines of {rel} ---")
+    for line in tail:
+        print(line)
+
+
+# ---------------------------------------------------------------------------
+# External program resolution (Windows-safe for .cmd / .bat)
+# ---------------------------------------------------------------------------
+
+def resolve_launcher(name: str) -> list[str]:
+    """Return argv prefix that launches `name` on this OS.
+
+    On Windows, npm/npx/node-gyp shims are .cmd files. subprocess cannot run
+    them via CreateProcess directly, so route them through cmd.exe /c. The
+    path is emitted as a list element and Python's list2cmdline quotes it when
+    it contains spaces; cmd.exe /c preserves those quotes when the string
+    names an executable (see cmd /? for the quote rules).
+    """
+    path = shutil.which(name)
+    if path is None:
+        raise FileNotFoundError(f"{name} not found on PATH")
+    if os.name == "nt" and path.lower().endswith((".cmd", ".bat")):
+        return ["cmd.exe", "/c", path]
+    return [path]
+
+
+# ---------------------------------------------------------------------------
+# Command runner (never raises; always returns CompletedProcess; logs)
+# ---------------------------------------------------------------------------
+
+def run_cmd(args: list, cwd: pathlib.Path, timeout: int = 1800) -> subprocess.CompletedProcess:
+    try:
+        r = subprocess.run(
+            args, cwd=str(cwd), capture_output=True, text=True, timeout=timeout
+        )
+        log_line(f"$ {' '.join(str(a) for a in args)} (cwd={cwd})")
+        if r.stdout:
+            log_line("stdout:")
+            log_line(r.stdout)
+        if r.stderr:
+            log_line("stderr:")
+            log_line(r.stderr)
+        log_line(f"exit={r.returncode}")
+        return r
+    except FileNotFoundError as e:
+        msg = f"executable not found: {e}"
+        log_line(f"$ {' '.join(str(a) for a in args)} -> {msg}")
+        return subprocess.CompletedProcess(args, returncode=127, stdout="", stderr=msg)
+    except OSError as e:
+        msg = f"OSError launching command: {e}"
+        log_line(f"$ {' '.join(str(a) for a in args)} -> {msg}")
+        return subprocess.CompletedProcess(args, returncode=126, stdout="", stderr=msg)
+    except subprocess.TimeoutExpired as e:
+        msg = f"timeout after {e.timeout}s"
+        log_line(f"$ {' '.join(str(a) for a in args)} -> {msg}")
+        return subprocess.CompletedProcess(args, returncode=124, stdout="", stderr=msg)
+
+
+# ---------------------------------------------------------------------------
+# Bundle parse / write / rollback
+# ---------------------------------------------------------------------------
+
+def parse_bundle(path: pathlib.Path) -> list[tuple[str, str]]:
     text = path.read_text(encoding="utf-8-sig")
     lines = text.splitlines(keepends=True)
-    files = []
+    files: list[tuple[str, str]] = []
     i = 0
     while i < len(lines):
         m = FILE_RE.match(lines[i].rstrip("\r\n"))
@@ -54,7 +150,7 @@ def parse_bundle(path):
             continue
         rel = m.group(1).strip()
         i += 1
-        buf = []
+        buf: list[str] = []
         ended = False
         while i < len(lines):
             em = END_RE.match(lines[i].rstrip("\r\n"))
@@ -78,10 +174,10 @@ def parse_bundle(path):
     return files
 
 
-def write_files(files, ts):
+def write_files(files: list[tuple[str, str]], ts: str) -> list[str]:
     backup_dir = BACKUP_ROOT / ts
     backup_dir.mkdir(parents=True, exist_ok=True)
-    manifest = {"created": [], "written": [], "timestamp": ts}
+    manifest: dict = {"created": [], "written": [], "timestamp": ts}
     for rel, content in files:
         target = REPO / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -93,15 +189,17 @@ def write_files(files, ts):
         else:
             manifest["created"].append(rel)
         target.write_text(content, encoding="utf-8", newline="")
-    (backup_dir / "_MANIFEST.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    (backup_dir / "_MANIFEST.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
     return manifest["written"] + manifest["created"]
 
 
-def rollback(ts):
+def rollback(ts: str) -> list[str]:
     backup_dir = BACKUP_ROOT / ts
     if not backup_dir.exists():
         raise ValueError(f"no backup at {backup_dir}")
-    restored = []
+    restored: list[str] = []
     manifest_path = backup_dir / "_MANIFEST.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -119,15 +217,12 @@ def rollback(ts):
     return restored
 
 
-def run_cmd(args, cwd, timeout=1800):
-    try:
-        return subprocess.run(args, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        return subprocess.CompletedProcess(args, returncode=124, stdout="", stderr=f"timeout {e.timeout}s")
+# ---------------------------------------------------------------------------
+# Backend gates
+# ---------------------------------------------------------------------------
 
-
-def ast_check(files):
-    out = {}
+def ast_check(files: list[str]) -> dict[str, tuple[bool, str]]:
+    out: dict[str, tuple[bool, str]] = {}
     for rel in files:
         if not rel.endswith(".py"):
             out[rel] = (True, "")
@@ -140,14 +235,14 @@ def ast_check(files):
     return out
 
 
-def import_check():
+def import_check() -> tuple[bool, str]:
     backend = REPO / "backend"
     r = run_cmd([sys.executable, "-c", "from app.main import app; print('ok')"], backend, timeout=120)
     return (r.returncode == 0, (r.stdout + r.stderr).strip())
 
 
-def collect_check(test_files):
-    out = {}
+def collect_check(test_files: list[str]) -> dict[str, tuple[bool, str]]:
+    out: dict[str, tuple[bool, str]] = {}
     backend = REPO / "backend"
     for rel in test_files:
         if not rel.startswith("backend/tests/test_") or not rel.endswith(".py"):
@@ -158,8 +253,8 @@ def collect_check(test_files):
     return out
 
 
-def pytest_check(test_files, fast):
-    out = {}
+def pytest_check(test_files: list[str], fast: bool) -> dict[str, tuple[bool, str]]:
+    out: dict[str, tuple[bool, str]] = {}
     backend = REPO / "backend"
     extra = ["-m", "not slow"] if fast else []
     for rel in test_files:
@@ -171,23 +266,18 @@ def pytest_check(test_files, fast):
     return out
 
 
-def find_dependent_tests(written):
-    """Test files that import any changed source file. Capped at 20."""
-    source_changed = [
-        f for f in written
-        if f.endswith(".py") and f.startswith("backend/app/")
-    ]
+def find_dependent_tests(written: list[str]) -> list[str]:
+    source_changed = [f for f in written if f.endswith(".py") and f.startswith("backend/app/")]
     if not source_changed:
         return []
     modules = []
     for f in source_changed:
         rel = f[len("backend/"):]
-        mod = rel[:-3].replace("/", ".").replace("\\", ".")
-        modules.append(mod)
+        modules.append(rel[:-3].replace("/", ".").replace("\\", "."))
     tests_dir = REPO / "backend" / "tests"
     if not tests_dir.is_dir():
         return []
-    hits = []
+    hits: list[str] = []
     for t in tests_dir.rglob("test_*.py"):
         try:
             txt = t.read_text(encoding="utf-8")
@@ -199,22 +289,131 @@ def find_dependent_tests(written):
                 break
     hits = sorted(set(hits))
     if len(hits) > _MAX_DEPENDENT_TESTS:
-        print(f"WARN: {len(hits)} test files import changed sources; capped at "
-              f"{_MAX_DEPENDENT_TESTS}. Run the full suite for complete coverage.")
+        print(f"WARN: {len(hits)} tests import changed sources; capped at {_MAX_DEPENDENT_TESTS}")
         hits = hits[:_MAX_DEPENDENT_TESTS]
     return hits
 
 
-def first_fail(text):
+# ---------------------------------------------------------------------------
+# Frontend gates
+# ---------------------------------------------------------------------------
+
+def node_version_check() -> tuple[bool, str]:
+    try:
+        node = resolve_launcher("node")
+        npm = resolve_launcher("npm")
+    except FileNotFoundError as e:
+        return False, str(e)
+    r = run_cmd(node + ["--version"], REPO, timeout=30)
+    if r.returncode != 0:
+        return False, f"node --version failed (exit {r.returncode}): {r.stderr.strip()[:200]}"
+    m = re.match(r"v(\d+)\.", r.stdout.strip())
+    if not m:
+        return False, f"cannot parse node version: {r.stdout.strip()!r}"
+    major = int(m.group(1))
+    if major < 20:
+        return False, f"node major {major} < 20 (need Node 20 LTS or newer)"
+    r2 = run_cmd(npm + ["--version"], REPO, timeout=30)
+    if r2.returncode != 0:
+        return False, f"npm --version failed (exit {r2.returncode}): {r2.stderr.strip()[:200]}"
+    return True, f"node v{major}, npm {r2.stdout.strip()}"
+
+
+def frontend_npm_install(written: list[str]) -> tuple[bool, str]:
+    pkg = FRONTEND_DIR / "package.json"
+    if not pkg.exists():
+        return True, "skip: no frontend/package.json"
+    if "frontend/package.json" not in written:
+        return True, "skip: package.json unchanged"
+    try:
+        npm = resolve_launcher("npm")
+    except FileNotFoundError as e:
+        return False, str(e)
+    r = run_cmd(npm + ["install"], FRONTEND_DIR, timeout=900)
+    if r.returncode != 0:
+        return False, "npm install FAILED"
+    return True, "npm install ok"
+
+
+def frontend_tsc(written: list[str]) -> tuple[bool, str]:
+    if not FRONTEND_DIR.exists():
+        return True, "skip: no frontend dir"
+    ts_changed = any(
+        (f.endswith(".ts") or f.endswith(".tsx")) and f.startswith("frontend/")
+        for f in written
+    )
+    if not ts_changed:
+        return True, "skip: no TS change"
+    if not (FRONTEND_DIR / "node_modules").exists():
+        return True, "skip: node_modules missing (run npm install first)"
+    try:
+        npx = resolve_launcher("npx")
+    except FileNotFoundError as e:
+        return False, str(e)
+    r = run_cmd(npx + ["tsc", "--noEmit"], FRONTEND_DIR, timeout=600)
+    if r.returncode != 0:
+        return False, "tsc FAILED"
+    return True, "tsc ok"
+
+
+def frontend_vitest(written: list[str]) -> tuple[bool, str, dict[str, tuple[bool, str]]]:
+    if not FRONTEND_DIR.exists():
+        return True, "skip: no frontend dir", {}
+    test_files = [
+        f for f in written
+        if f.startswith("frontend/") and (".test." in f or ".spec." in f)
+    ]
+    if not test_files:
+        return True, "skip: no test files changed", {}
+    if not (FRONTEND_DIR / "node_modules").exists():
+        return True, "skip: node_modules missing", {}
+    try:
+        npx = resolve_launcher("npx")
+    except FileNotFoundError as e:
+        return False, str(e), {}
+    results: dict[str, tuple[bool, str]] = {}
+    for f in test_files:
+        rel = f[len("frontend/"):]
+        r = run_cmd(npx + ["vitest", "run", rel], FRONTEND_DIR, timeout=300)
+        results[f] = (r.returncode == 0, (r.stdout + r.stderr).strip())
+    overall = all(ok for ok, _ in results.values())
+    return overall, f"vitest on {len(test_files)} file(s)", results
+
+
+def frontend_build(enabled: bool) -> tuple[bool, str]:
+    if not enabled:
+        return True, "skip: --build not set"
+    if not (FRONTEND_DIR / "package.json").exists():
+        return True, "skip: no frontend/package.json"
+    if not (FRONTEND_DIR / "node_modules").exists():
+        return True, "skip: node_modules missing"
+    try:
+        npm = resolve_launcher("npm")
+    except FileNotFoundError as e:
+        return False, str(e)
+    r = run_cmd(npm + ["run", "build"], FRONTEND_DIR, timeout=900)
+    if r.returncode != 0:
+        return False, "npm run build FAILED"
+    return True, "build ok"
+
+
+# ---------------------------------------------------------------------------
+# Table printing
+# ---------------------------------------------------------------------------
+
+def first_fail(text: str) -> str:
     for line in text.splitlines():
         s = line.strip()
-        if "FAILED" in s or s.startswith("ERROR") or "AssertionError" in s or "SyntaxError" in s:
+        if (
+            "FAILED" in s or s.startswith("ERROR") or "AssertionError" in s
+            or "SyntaxError" in s or "error TS" in s
+        ):
             return s
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     return lines[-1] if lines else ""
 
 
-def print_table(written, ast_res, imp_res, collect_res, pytest_res):
+def print_table_backend(written, ast_res, imp_res, collect_res, pytest_res) -> bool:
     print(f"{'FILE':<55} {'WRITTEN':<8} {'PARSE':<6} {'TESTS':<10}")
     print("-" * 82)
     ok = True
@@ -246,28 +445,66 @@ def print_table(written, ast_res, imp_res, collect_res, pytest_res):
     return ok
 
 
-def do_commit(files, message):
+def print_table_frontend(written, ast_res, node_res, npm_res, tsc_res, vitest_res, build_res) -> bool:
+    _, _, vitest_map = vitest_res
+    print(f"{'FILE':<55} {'WRITTEN':<8} {'PARSE':<6} {'TESTS':<10}")
+    print("-" * 82)
+    ok = True
+    for rel in written:
+        parse_ok = ast_res.get(rel, (True, ""))[0]
+        parse_s = "ok" if parse_ok else "FAIL"
+        if not parse_ok:
+            ok = False
+        test_s = "-"
+        if rel in vitest_map:
+            t_ok, _ = vitest_map[rel]
+            test_s = "pass" if t_ok else "FAIL"
+            if not t_ok:
+                ok = False
+        print(f"{rel:<55} {'yes':<8} {parse_s:<6} {test_s:<10}")
+    for label, res in [
+        ("NODE", node_res), ("NPM", npm_res),
+        ("TSC", tsc_res), ("VITEST", vitest_res), ("BUILD", build_res),
+    ]:
+        r_ok = res[0]
+        r_msg = res[1] if len(res) > 1 else ""
+        if not r_ok:
+            ok = False
+            print(f"\n{label} FAIL: {r_msg}")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Git
+# ---------------------------------------------------------------------------
+
+def do_commit(files: list[str], message: str) -> bool:
     if not files:
         print("commit: no files")
         return True
-    tracked = []
-    skipped = []
+    try:
+        git = resolve_launcher("git")
+    except FileNotFoundError as e:
+        print(f"git not found: {e}")
+        return False
+    tracked: list[str] = []
+    skipped: list[str] = []
     for f in files:
-        r = run_cmd(["git", "check-ignore", "-q", f], REPO, timeout=30)
+        r = run_cmd(git + ["check-ignore", "-q", f], REPO, timeout=30)
         if r.returncode == 0:
             skipped.append(f)
             continue
         tracked.append(f)
     if skipped:
-        print(f"commit: skipping gitignored files: {skipped}")
+        print(f"commit: skipping gitignored: {skipped}")
     if not tracked:
-        print("commit: no tracked files to commit")
+        print("commit: no tracked files")
         return True
-    r = run_cmd(["git", "add", *tracked], REPO, timeout=120)
+    r = run_cmd(git + ["add", *tracked], REPO, timeout=120)
     if r.returncode != 0:
         print(f"git add failed: {r.stderr.strip()}")
         return False
-    r = run_cmd(["git", "commit", "-m", message], REPO, timeout=120)
+    r = run_cmd(git + ["commit", "-m", message], REPO, timeout=120)
     if r.returncode != 0:
         print(f"git commit failed: {r.stderr.strip() or r.stdout.strip()}")
         return False
@@ -275,8 +512,13 @@ def do_commit(files, message):
     return True
 
 
-def do_push():
-    r = run_cmd(["git", "status", "--porcelain"], REPO, timeout=60)
+def do_push() -> bool:
+    try:
+        git = resolve_launcher("git")
+    except FileNotFoundError as e:
+        print(f"git not found: {e}")
+        return False
+    r = run_cmd(git + ["status", "--porcelain"], REPO, timeout=60)
     if r.returncode != 0:
         print(f"git status failed: {r.stderr.strip()}")
         return False
@@ -286,9 +528,9 @@ def do_push():
         return False
     if not FULL_SUITE_MARKER.exists():
         print("push refused: no recorded full-suite pass")
-        print("run the full suite, then: python tools\\apply_bundle.py --record-full-suite-pass")
+        print("run full suite, then: python tools\\apply_bundle.py --record-full-suite-pass")
         return False
-    r = run_cmd(["git", "push", "origin", "main"], REPO, timeout=300)
+    r = run_cmd(git + ["push", "origin", "main"], REPO, timeout=300)
     if r.returncode != 0:
         print(f"push failed: {r.stderr.strip()}")
         return False
@@ -296,15 +538,29 @@ def do_push():
     return True
 
 
-def record_full_suite_pass():
+def record_full_suite_pass() -> None:
     FULL_SUITE_MARKER.write_text(datetime.datetime.now().isoformat(), encoding="utf-8")
     print(f"recorded full-suite pass at {FULL_SUITE_MARKER}")
 
 
-def main():
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
     p = argparse.ArgumentParser(description="Apply a bundle of complete file writes.")
     p.add_argument("bundle", nargs="?")
+    p.add_argument("--frontend", action="store_true")
+    p.add_argument("--build", action="store_true")
     p.add_argument("--fast", action="store_true")
+    p.add_argument(
+        "--also",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Additional path to include in --commit (repeatable). "
+             "Useful for including tools/apply_bundle.py itself.",
+    )
     p.add_argument("--commit", metavar="MSG")
     p.add_argument("--push", action="store_true")
     p.add_argument("--rollback", metavar="TS")
@@ -325,10 +581,16 @@ def main():
             print(f"  {r}")
         return 0
     if args.push:
-        return 0 if do_push() else 1
+        ok = do_push()
+        if not ok:
+            print_log_tail()
+            return 1
+        return 0
     if not args.bundle:
         print("error: bundle path required (or --push/--rollback/--record-full-suite-pass)")
         return 1
+
+    _truncate_log()
 
     bundle_path = pathlib.Path(args.bundle)
     if not bundle_path.exists():
@@ -344,36 +606,61 @@ def main():
     try:
         written = write_files(files, ts)
     except Exception as e:
-        print(f"STOP writing files: {e}")
+        print(f"STOP writing: {e}")
         return 1
     print(f"wrote {len(written)} files; backup at .bundle_backup/{ts}")
+    log_line(f"=== bundle {bundle_path.name} at {ts} ===")
+    log_line(f"wrote: {written}")
 
     ast_res = ast_check(written)
-    imp_res = import_check()
 
-    direct_test_files = [f for f in written if f.startswith("backend/tests/test_")]
-    dependent = find_dependent_tests(written)
-    extra = [f for f in dependent if f not in direct_test_files]
-    if extra:
-        print(f"running {len(extra)} dependent test files: {extra}")
-    all_test_files = sorted(set(direct_test_files) | set(dependent))
-
-    collect_res = collect_check(all_test_files)
-    pytest_res = pytest_check(all_test_files, fast=args.fast)
-
-    ok = print_table(written, ast_res, imp_res, collect_res, pytest_res)
+    if args.frontend:
+        node_ok, node_msg = node_version_check()
+        if not node_ok:
+            print(f"\nSTOP: {node_msg}")
+            print_log_tail()
+            return 1
+        npm_res = frontend_npm_install(written)
+        tsc_res = frontend_tsc(written) if npm_res[0] else (False, "skipped: npm install failed")
+        vitest_res = (
+            frontend_vitest(written)
+            if (npm_res[0] and tsc_res[0])
+            else (False, "skipped: earlier gate failed", {})
+        )
+        build_res = (
+            frontend_build(args.build)
+            if (npm_res[0] and tsc_res[0] and vitest_res[0])
+            else (True, "skip: earlier gate failed")
+        )
+        ok = print_table_frontend(
+            written, ast_res, (node_ok, node_msg), npm_res, tsc_res, vitest_res, build_res
+        )
+    else:
+        imp_res = import_check()
+        direct = [f for f in written if f.startswith("backend/tests/test_")]
+        dep = find_dependent_tests(written)
+        all_tests = sorted(set(direct) | set(dep))
+        extra_dep = set(dep) - set(direct)
+        if extra_dep:
+            print(f"running {len(extra_dep)} dependent test files")
+        collect_res = collect_check(all_tests)
+        pytest_res = pytest_check(all_tests, fast=args.fast)
+        ok = print_table_backend(written, ast_res, imp_res, collect_res, pytest_res)
 
     if not ok:
         print(f"\nFAILED. Rollback: python tools/apply_bundle.py --rollback {ts}")
+        print_log_tail()
         return 1
+
     if args.commit:
-        if not do_commit(written, args.commit):
+        to_commit = list(dict.fromkeys(list(written) + list(args.also)))
+        if not do_commit(to_commit, args.commit):
+            print_log_tail()
             return 1
+
     print("\nOK.")
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
-# END OF FILE
