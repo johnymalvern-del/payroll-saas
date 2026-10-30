@@ -1,4 +1,4 @@
-import { wrappedFetch } from "./client";
+import { absoluteUrl, wrappedFetch } from "./client";
 
 export type SheetCell = {
   work_date: string;
@@ -77,6 +77,15 @@ function warnShapeMismatch(data: unknown): void {
   }
 }
 
+function normaliseSheetOut(data: unknown): SheetOut {
+  const obj = (data ?? {}) as Record<string, unknown>;
+  const items = Array.isArray(obj.items) ? (obj.items as SheetEmployee[]) : [];
+  const next =
+    typeof obj.next_cursor === "string" ? obj.next_cursor : null;
+  const total = typeof obj.total === "number" ? obj.total : null;
+  return { items, next_cursor: next, total };
+}
+
 export async function fetchSheet(params: {
   fromDate: string;
   toDate: string;
@@ -97,7 +106,7 @@ export async function fetchSheet(params: {
   qs.set("limit", String(params.limit ?? 50));
   if (params.cursor) qs.set("cursor", params.cursor);
   const res = await wrappedFetch(
-    new Request(`/api/v1/attendance/sheet?${qs.toString()}`, {
+    new Request(absoluteUrl(`/api/v1/attendance/sheet?${qs.toString()}`), {
       credentials: "include",
     }),
   );
@@ -106,16 +115,18 @@ export async function fetchSheet(params: {
   }
   const data = await res.json();
   warnShapeMismatch(data);
-  return data as SheetOut;
+  return normaliseSheetOut(data);
 }
 
 async function fetchRefs(path: string): Promise<Ref[]> {
   const res = await wrappedFetch(
-    new Request(`/api/v1${path}?limit=500`, { credentials: "include" }),
+    new Request(absoluteUrl(`/api/v1${path}?limit=500`), {
+      credentials: "include",
+    }),
   );
   if (!res.ok) return [];
-  const body = (await res.json()) as { items?: Ref[] };
-  return body.items ?? [];
+  const body = (await res.json().catch(() => ({}))) as { items?: unknown };
+  return Array.isArray(body.items) ? (body.items as Ref[]) : [];
 }
 
 export function fetchBranches(): Promise<Ref[]> {

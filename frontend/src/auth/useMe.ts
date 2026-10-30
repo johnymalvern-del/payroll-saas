@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { wrappedFetch } from "../api/client";
+import { absoluteUrl, wrappedFetch } from "../api/client";
 import { useAuth } from "./AuthContext";
 
 export type Me = {
@@ -15,7 +15,7 @@ export const meQueryKey = ["me"] as const;
 
 export async function fetchMe(): Promise<Me> {
   const res = await wrappedFetch(
-    new Request("/api/v1/auth/me", { credentials: "include" }),
+    new Request(absoluteUrl("/api/v1/auth/me"), { credentials: "include" }),
   );
   if (!res.ok) {
     throw new Error(`/auth/me failed: ${res.status}`);

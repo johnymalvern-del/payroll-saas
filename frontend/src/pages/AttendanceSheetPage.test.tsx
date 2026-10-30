@@ -11,9 +11,18 @@ function jr(body: unknown, status = 200): Response {
   });
 }
 
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    return input.url;
+  }
+  return String(input);
+}
+
 function setupMock(sheetItems: unknown[]): void {
   global.fetch = vi.fn(async (input: RequestInfo | URL) => {
-    const url = typeof input === "string" ? input : input.toString();
+    const url = requestUrl(input);
     if (url.includes("/api/v1/attendance/sheet")) {
       return jr({ items: sheetItems, next_cursor: null });
     }
@@ -95,7 +104,7 @@ describe("AttendanceSheetPage", () => {
 
   it("shows an error message when sheet fetch fails", async () => {
     global.fetch = vi.fn(async (input: RequestInfo | URL) => {
-      const url = typeof input === "string" ? input : input.toString();
+      const url = requestUrl(input);
       if (url.includes("/api/v1/attendance/sheet")) {
         return jr({ error: { code: "boom" } }, 500);
       }

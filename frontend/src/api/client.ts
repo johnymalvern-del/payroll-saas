@@ -9,6 +9,22 @@ export type TokenStore = {
 
 export type RefreshFn = () => Promise<string | null>;
 
+// Builds an absolute URL string. new Request("/path") throws in jsdom and
+// Node >=18 because Request requires absolute URLs. All callers must use this
+// helper before constructing a Request, otherwise fetch is never reached and
+// the query fails silently.
+export function absoluteUrl(path: string): string {
+  const origin =
+    typeof window !== "undefined" && window.location?.origin
+      ? window.location.origin
+      : "http://localhost";
+  try {
+    return new URL(path, origin).toString();
+  } catch {
+    return path;
+  }
+}
+
 export function createWrappedFetch(
   tokenStore: TokenStore,
   refresh: RefreshFn,
@@ -90,8 +106,10 @@ export const wrappedFetch = createWrappedFetch(
   () => onUnauthorizedDefault?.(),
 );
 
+const API_BASE = absoluteUrl("/api/v1");
+
 export const api = createClient<paths>({
-  baseUrl: "/api/v1",
+  baseUrl: API_BASE,
   credentials: "include",
   fetch: wrappedFetch,
 });
