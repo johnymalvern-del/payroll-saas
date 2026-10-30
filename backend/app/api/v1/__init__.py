@@ -15,6 +15,7 @@ from app.api.v1.payroll_employee_fields import router as payroll_employee_fields
 from app.api.v1.payroll_employees import router as payroll_employees_router
 from app.api.v1.payroll_formulas import router as payroll_formulas_router
 from app.api.v1.payroll_settings import router as payroll_settings_router
+from app.api.v1.payroll_system_types import router as payroll_system_types_router
 from app.api.v1.payroll_types import router as payroll_types_router
 from app.api.v1.public_holidays import router as public_holidays_router
 from app.api.v1.punches import router as punches_router
@@ -59,5 +60,6 @@ api_router.include_router(payroll_employees_router)
 api_router.include_router(payroll_formulas_router)
 api_router.include_router(payroll_change_requests_router)
 api_router.include_router(payroll_employee_fields_router)
+api_router.include_router(payroll_system_types_router)
 
 # END OF FILE

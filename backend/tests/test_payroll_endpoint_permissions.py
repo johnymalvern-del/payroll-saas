@@ -39,6 +39,8 @@ EXPECTED_ROUTES: list[tuple[str, str, Permission]] = [
     # 004a-iv-b — employee fields
     ("GET",   "/api/v1/payroll/employees/{employee_id}/fields", Permission.PAYROLL_PREVIEW),
     ("POST",  "/api/v1/payroll/employees/{employee_id}/fields", Permission.PAY_RATE_REQUEST),
+    # 004a-iv-c — system types seed
+    ("POST",  "/api/v1/payroll/earning-types/ensure-system", Permission.PAYROLL_FINALISE),
     # 004a-i — formula readiness
     ("GET",   "/api/v1/payroll-formulas/readiness", Permission.PAYROLL_PREVIEW),
     ("POST",  "/api/v1/payroll-formulas/{code}/acknowledge", Permission.PAYROLL_FINALISE),
