@@ -37,3 +37,7 @@ bootstrap.ps1
 
 # one-off patch scripts (never committed)
 scripts/*.py
+
+# Per-machine / throwaway
+.last_full_suite_ok
+*.out
