@@ -1,43 +1,61 @@
-# Python
+# Byte-compiled / optimized
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 *.egg-info/
+.installed.cfg
+*.egg
+
+# Virtualenv
 .venv/
 venv/
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-htmlcov/
-.coverage
-coverage.xml
-
-# Env
-.env
-.env.local
-
-# Backups (POPIA-sensitive)
-backups/*
-!backups/.gitkeep
-*.dump
-*.sql.bak
-
-# Node
-node_modules/
-frontend/dist/
-frontend/.vite/
-
-# OS
-.DS_Store
-*.swp
+ENV/
 
 # IDE
-.idea/
 .vscode/
-bootstrap.ps1
+.idea/
+*.swp
 
-# one-off patch scripts (never committed)
-scripts/*.py
+# Logs
+*.log
+
+# Local env
+.env
+.env.local
+.env.*.local
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Bundle backups
+.bundle_backup/
 
 # Per-machine / throwaway
 .last_full_suite_ok
 *.out
+
+# Scripts (ad-hoc patch helpers)
+scripts/*.py
+
+# Frontend (npm handles its own)
+frontend/node_modules/
+frontend/dist/
+
+# Bundles log
+bundles/*.log

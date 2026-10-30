@@ -1,24 +1,40 @@
 {
-  "name": "payroll-saas-frontend",
+  "name": "payroll-frontend",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc && vite build",
     "preview": "vite preview",
-    "lint": "echo 'eslint configured in 1D' && exit 0",
-    "test": "echo 'tests configured in 1D' && exit 0"
+    "test": "vitest",
+    "test:run": "vitest run",
+    "api:types": "openapi-typescript http://127.0.0.1:8000/api/openapi.json -o src/api/schema.d.ts"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "@mantine/core": "^7.13.0",
+    "@mantine/dates": "^7.13.0",
+    "@mantine/hooks": "^7.13.0",
+    "@mantine/notifications": "^7.13.0",
+    "@tanstack/react-query": "^5.56.0",
+    "dayjs": "^1.11.0",
+    "openapi-fetch": "^0.13.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "react-router-dom": "^6.26.0"
   },
   "devDependencies": {
-    "@types/react": "^18.3.3",
+    "@testing-library/jest-dom": "^6.5.0",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/user-event": "^14.5.0",
+    "@types/node": "^22.5.0",
+    "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^4.3.1",
-    "typescript": "^5.5.3",
-    "vite": "^5.3.4"
+    "@vitejs/plugin-react": "^4.3.0",
+    "jsdom": "^25.0.0",
+    "openapi-typescript": "^7.4.0",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
   }
 }
