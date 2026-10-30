@@ -15,12 +15,27 @@ class PayrollRefusal(Exception):
         super().__init__(message)
 
 
-# Canonical codes (subset; more land in 004a-iii for UIF/SDL/pipeline)
+# Statutory data
 STATUTORY_TABLE_MISSING = "statutory_table_missing"
 STATUTORY_TABLE_EXPIRED = "statutory_table_expired"
 STATUTORY_TABLE_INVALID = "statutory_table_invalid"
+
+# Employee field / setting
 AGE_REFERENCE_DATE_UNSET = "age_reference_date_unset"
 MISSING_DATE_OF_BIRTH = "missing_date_of_birth"
+MISSING_CONTRACTED_HOURS = "missing_contracted_hours"
+
+# Tenant settings
+SDL_APPLIES_UNSET = "sdl_applies_unset"
+
+# Specific statutory tables
+UIF_CEILING_MISSING = "uif_ceiling_missing"
+RETIREMENT_LIMIT_MISSING = "retirement_limit_missing"
+
+# Method gate
 TAX_METHOD_UNSUPPORTED = "tax_method_unsupported"
+
+# F7: legal-order deductions never deferred
+DEDUCTION_EXCEEDS_FLOOR_LEGAL_ORDER = "deduction_exceeds_floor_legal_order"
 
 # END OF FILE
