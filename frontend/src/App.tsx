@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./auth/AuthContext";
 import { ProtectedRoute } from "./auth/ProtectedRoute";
 import { AppShell } from "./shell/AppShell";
+import { AttendanceSheetPage } from "./pages/AttendanceSheetPage";
 import { ForcePasswordChangePage } from "./pages/ForcePasswordChangePage";
 import { HomePage } from "./pages/HomePage";
 import { LoginPage } from "./pages/LoginPage";
@@ -29,10 +30,7 @@ export default function App() {
           }
         >
           <Route index element={<HomePage />} />
-          <Route
-            path="attendance"
-            element={<PlaceholderPage title="Attendance sheet" phase="F-2" />}
-          />
+          <Route path="attendance" element={<AttendanceSheetPage />} />
           <Route
             path="attendance/exceptions"
             element={<PlaceholderPage title="Exceptions" phase="F-3" />}
