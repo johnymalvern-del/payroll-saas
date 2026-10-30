@@ -64,7 +64,6 @@ def bootstrap_schema(engine: Engine) -> None:
                 "WHERE table_schema='public' AND table_name='statutory_table'"
             ))}
 
-            # Legacy 0001 shape has `version INTEGER`; our shape needs VARCHAR(40).
             if _is_int_like(existing_cols.get("version", "")):
                 n_main = conn.scalar(sa.text("SELECT COUNT(*) FROM statutory_table")) or 0
                 n_row = 0
@@ -84,9 +83,7 @@ def bootstrap_schema(engine: Engine) -> None:
                 conn.execute(sa.text("DROP TABLE IF EXISTS statutory_table_row CASCADE"))
                 conn.execute(sa.text("DROP TABLE IF EXISTS statutory_table_load_log CASCADE"))
                 tables.discard("statutory_table")
-
             else:
-                # Table exists with our shape (or near enough) — add missing columns only
                 for col, typ in REQUIRED_COLUMNS.items():
                     if col not in existing_cols:
                         conn.execute(sa.text(
@@ -144,6 +141,22 @@ def bootstrap_schema(engine: Engine) -> None:
             "WHERE is_active"
         ))
 
+
+_bootstrapped_engine_ids: set[int] = set()
+
+
+def _ensure_bootstrapped(engine: Engine) -> None:
+    """Idempotent schema-bootstrap cache keyed on the engine instance."""
+    key = id(engine)
+    if key in _bootstrapped_engine_ids:
+        return
+    bootstrap_schema(engine)
+    _bootstrapped_engine_ids.add(key)
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
 
 @dataclass
 class ValidationResult:
@@ -420,6 +433,22 @@ def get_active_table(engine: Engine, country_code: str, table_type: str, on_date
 
 
 def _default_engine() -> Engine:
+    """Return the control-database engine.
+
+    Preference order (matches what tests and the app use):
+      1. The engine behind control_session() - same engine fixtures bootstrap.
+      2. get_control_engine() if that helper exists.
+      3. Fallback to _admin_url("payroll_control" / "control" / "payroll_ctrl").
+    """
+    try:
+        from app.db.control.session import control_session
+        with control_session() as s:
+            bind = s.get_bind()
+        if hasattr(bind, "connect"):
+            return bind
+        return bind.engine
+    except Exception:
+        pass
     try:
         from app.db.control.session import get_control_engine  # type: ignore[attr-defined]
         return get_control_engine()
