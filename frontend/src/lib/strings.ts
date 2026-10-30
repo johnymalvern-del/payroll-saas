@@ -21,10 +21,52 @@ export const strings = {
   },
   shell: {
     logout: "Sign out",
+    roleLabel: (role: string) => `Role: ${role}`,
   },
   home: {
-    welcome: "Signed in.",
-    nextPhase:
-      "Role-based navigation and dashboard cards arrive in the next phase.",
+    welcome: (name: string) => (name ? `Welcome, ${name}.` : "Welcome."),
+    roleLabel: (role: string) => (role ? `Signed in as ${role}.` : ""),
+    cards: {
+      attendance: {
+        title: "Attendance",
+        body: "Open the monthly sheet and the daily list.",
+        cta: "View attendance",
+      },
+      exceptions: {
+        title: "Exceptions",
+        body: "Review and resolve open attendance exceptions.",
+        cta: "Open queue",
+      },
+      employees: {
+        title: "Employees",
+        body: "Browse, edit, and import employees.",
+        cta: "View employees",
+      },
+      payPeriods: {
+        title: "Pay periods",
+        body: "Preview and finalise payroll.",
+        cta: "View periods",
+      },
+      changeRequests: {
+        title: "Change requests",
+        body: "Approve or reject pending changes.",
+        cta: "Open inbox",
+      },
+      auditLog: {
+        title: "Audit log",
+        body: "Read-only history of changes.",
+        cta: "Open log",
+      },
+      setup: {
+        title: "Setup",
+        body: "Company, branches, sites, departments.",
+        cta: "Open setup",
+      },
+      payslips: {
+        title: "My payslips",
+        body: "View and download your payslips.",
+        cta: "View payslips",
+      },
+    },
   },
 } as const;
