@@ -29,61 +29,135 @@ export type SheetOut = {
 
 export type Ref = { id: string; name: string };
 
-function warnShapeMismatch(data: unknown): void {
+export type Punch = {
+  id: string;
+  punch_time: string;
+  direction: string;
+  source: string;
+  confidence: number | null;
+};
+
+export type ExceptionRow = {
+  id: string;
+  type: string;
+  message: string;
+  status: string;
+};
+
+export type DayOut = {
+  employee_id: string;
+  employee_code: string;
+  employee_name: string;
+  work_date: string;
+  status: string | null;
+  first_in: string | null;
+  last_out: string | null;
+  worked_minutes: number | null;
+  normal_minutes: number | null;
+  overtime_minutes: number | null;
+  flags: string[];
+  open_exception_count: number;
+  locked: boolean;
+  reviewed: boolean;
+  punches: Punch[];
+  exceptions: ExceptionRow[];
+};
+
+export type DailyRow = {
+  employee_id: string;
+  employee_code: string;
+  employee_name: string;
+  work_date: string;
+  status: string | null;
+  first_in: string | null;
+  last_out: string | null;
+  worked_minutes: number | null;
+  normal_minutes: number | null;
+  overtime_minutes: number | null;
+  flags: string[];
+  open_exception_count: number;
+  locked: boolean;
+  reviewed: boolean;
+};
+
+export type DailyOut = {
+  items: DailyRow[];
+  next_cursor: string | null;
+  total?: number | null;
+};
+
+export type MarkReviewedRequest = {
+  fromDate: string;
+  toDate: string;
+  siteId?: string | null;
+  branchId?: string | null;
+  departmentId?: string | null;
+  includeTerminated?: boolean;
+};
+
+export type RefusedDay = {
+  employee_id: string;
+  employee_name?: string;
+  work_date: string;
+  reason: string;
+};
+
+export type MarkReviewedOut = {
+  reviewed_count: number;
+  refused_days: RefusedDay[];
+};
+
+function warn(where: string, data: unknown, want: string[]): void {
   if (!data || typeof data !== "object") {
-    console.warn("[attendance] sheet response is not an object", data);
+    console.warn(`[attendance] ${where}: not an object`, data);
     return;
   }
-  const obj = data as Record<string, unknown>;
-  if (!Array.isArray(obj.items)) {
-    console.warn("[attendance] sheet response missing items array", Object.keys(obj));
-    return;
-  }
-  const emp = obj.items[0];
-  if (!emp || typeof emp !== "object") return;
-  const wantEmp = ["employee_id", "employee_code", "employee_name", "days"];
-  const missEmp = wantEmp.filter((k) => !(k in (emp as Record<string, unknown>)));
-  if (missEmp.length > 0) {
-    console.warn(
-      "[attendance] sheet employee missing keys:",
-      missEmp,
-      "got:",
-      Object.keys(emp as Record<string, unknown>),
-    );
-  }
-  const days = (emp as Record<string, unknown>).days;
-  if (Array.isArray(days) && days.length > 0) {
-    const c = days[0];
-    if (c && typeof c === "object") {
-      const wantCell = [
-        "work_date",
-        "status",
-        "worked_minutes",
-        "flags",
-        "open_exception_count",
-        "locked",
-        "reviewed",
-      ];
-      const missCell = wantCell.filter((k) => !(k in (c as Record<string, unknown>)));
-      if (missCell.length > 0) {
-        console.warn(
-          "[attendance] sheet cell missing keys:",
-          missCell,
-          "got:",
-          Object.keys(c as Record<string, unknown>),
-        );
-      }
-    }
+  const miss = want.filter((k) => !(k in (data as Record<string, unknown>)));
+  if (miss.length > 0) {
+    console.warn(`[attendance] ${where} missing keys:`, miss, "got:",
+      Object.keys(data as Record<string, unknown>));
   }
 }
 
 function normaliseSheetOut(data: unknown): SheetOut {
   const obj = (data ?? {}) as Record<string, unknown>;
-  const items = Array.isArray(obj.items) ? (obj.items as SheetEmployee[]) : [];
-  const next =
-    typeof obj.next_cursor === "string" ? obj.next_cursor : null;
-  const total = typeof obj.total === "number" ? obj.total : null;
-  return { items, next_cursor: next, total };
+  return {
+    items: Array.isArray(obj.items) ? (obj.items as SheetEmployee[]) : [],
+    next_cursor: typeof obj.next_cursor === "string" ? obj.next_cursor : null,
+    total: typeof obj.total === "number" ? obj.total : null,
+  };
+}
+
+function normaliseDailyOut(data: unknown): DailyOut {
+  const obj = (data ?? {}) as Record<string, unknown>;
+  return {
+    items: Array.isArray(obj.items) ? (obj.items as DailyRow[]) : [],
+    next_cursor: typeof obj.next_cursor === "string" ? obj.next_cursor : null,
+    total: typeof obj.total === "number" ? obj.total : null,
+  };
+}
+
+function normaliseDayOut(data: unknown): DayOut {
+  const obj = (data ?? {}) as Record<string, unknown>;
+  return {
+    employee_id: String(obj.employee_id ?? ""),
+    employee_code: String(obj.employee_code ?? ""),
+    employee_name: String(obj.employee_name ?? ""),
+    work_date: String(obj.work_date ?? ""),
+    status: typeof obj.status === "string" ? obj.status : null,
+    first_in: typeof obj.first_in === "string" ? obj.first_in : null,
+    last_out: typeof obj.last_out === "string" ? obj.last_out : null,
+    worked_minutes: typeof obj.worked_minutes === "number" ? obj.worked_minutes : null,
+    normal_minutes: typeof obj.normal_minutes === "number" ? obj.normal_minutes : null,
+    overtime_minutes: typeof obj.overtime_minutes === "number" ? obj.overtime_minutes : null,
+    flags: Array.isArray(obj.flags) ? (obj.flags as string[]) : [],
+    open_exception_count:
+      typeof obj.open_exception_count === "number" ? obj.open_exception_count : 0,
+    locked: obj.locked === true,
+    reviewed: obj.reviewed === true,
+    punches: Array.isArray(obj.punches) ? (obj.punches as Punch[]) : [],
+    exceptions: Array.isArray(obj.exceptions) ? (obj.exceptions as ExceptionRow[]) : [],
+  };
 }
 
 export async function fetchSheet(params: {
@@ -114,8 +188,82 @@ export async function fetchSheet(params: {
     throw new Error(`sheet fetch failed: ${res.status}`);
   }
   const data = await res.json();
-  warnShapeMismatch(data);
+  warn("sheet response", data, ["items"]);
   return normaliseSheetOut(data);
+}
+
+export async function fetchDaily(params: {
+  date: string;
+  siteId?: string | null;
+  branchId?: string | null;
+  departmentId?: string | null;
+  includeTerminated?: boolean;
+  limit?: number;
+  cursor?: string | null;
+}): Promise<DailyOut> {
+  const qs = new URLSearchParams();
+  qs.set("date", params.date);
+  if (params.siteId) qs.set("site_id", params.siteId);
+  if (params.branchId) qs.set("branch_id", params.branchId);
+  if (params.departmentId) qs.set("department_id", params.departmentId);
+  if (params.includeTerminated) qs.set("include_terminated", "true");
+  qs.set("limit", String(params.limit ?? 50));
+  if (params.cursor) qs.set("cursor", params.cursor);
+  const res = await wrappedFetch(
+    new Request(absoluteUrl(`/api/v1/attendance/daily?${qs.toString()}`), {
+      credentials: "include",
+    }),
+  );
+  if (!res.ok) {
+    throw new Error(`daily fetch failed: ${res.status}`);
+  }
+  const data = await res.json();
+  warn("daily response", data, ["items"]);
+  return normaliseDailyOut(data);
+}
+
+export async function fetchDay(employeeId: string, workDate: string): Promise<DayOut> {
+  const res = await wrappedFetch(
+    new Request(
+      absoluteUrl(`/api/v1/attendance/day/${employeeId}/${workDate}`),
+      { credentials: "include" },
+    ),
+  );
+  if (!res.ok) {
+    throw new Error(`day fetch failed: ${res.status}`);
+  }
+  const data = await res.json();
+  warn("day response", data, ["employee_id", "work_date", "punches"]);
+  return normaliseDayOut(data);
+}
+
+export async function markReviewed(req: MarkReviewedRequest): Promise<MarkReviewedOut> {
+  const body: Record<string, unknown> = {
+    from_date: req.fromDate,
+    to_date: req.toDate,
+  };
+  if (req.siteId) body.site_id = req.siteId;
+  if (req.branchId) body.branch_id = req.branchId;
+  if (req.departmentId) body.department_id = req.departmentId;
+  if (req.includeTerminated) body.include_terminated = true;
+  const res = await wrappedFetch(
+    new Request(absoluteUrl("/api/v1/attendance/mark_reviewed"), {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  );
+  if (!res.ok) {
+    throw new Error(`mark reviewed failed: ${res.status}`);
+  }
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const refused = Array.isArray(data.refused_days)
+    ? (data.refused_days as RefusedDay[])
+    : [];
+  const count =
+    typeof data.reviewed_count === "number" ? data.reviewed_count : 0;
+  return { reviewed_count: count, refused_days: refused };
 }
 
 async function fetchRefs(path: string): Promise<Ref[]> {

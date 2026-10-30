@@ -8,6 +8,7 @@ type Props = {
   toDate: string;
   employees: SheetEmployee[];
   attendanceStatus: string[];
+  onCellClick?: (employeeId: string, workDate: string) => void;
 };
 
 function buildDays(fromDate: string, toDate: string): string[] {
@@ -49,7 +50,17 @@ function statusLabel(status: string | null): string {
   return status.replace("_", " ");
 }
 
-function CellView({ cell }: { cell: SheetCell | null }) {
+function CellView({
+  cell,
+  employeeId,
+  workDate,
+  onCellClick,
+}: {
+  cell: SheetCell | null;
+  employeeId: string;
+  workDate: string;
+  onCellClick?: (employeeId: string, workDate: string) => void;
+}) {
   if (!cell) {
     return (
       <Text size="xs" c="dimmed">
@@ -70,29 +81,53 @@ function CellView({ cell }: { cell: SheetCell | null }) {
   if (cell.locked) lines.push("locked");
   if (cell.reviewed) lines.push("reviewed");
 
+  const content = (
+    <Group gap={4} wrap="nowrap" justify="center">
+      {cell.status ? (
+        <Badge size="xs" color={statusColor(cell.status)} variant="light">
+          {statusLabel(cell.status)}
+        </Badge>
+      ) : (
+        <Text size="xs" c="dimmed">
+          {"\u2014"}
+        </Text>
+      )}
+      {cell.open_exception_count > 0 ? (
+        <Text size="xs" c="red" fw={700}>
+          !
+        </Text>
+      ) : null}
+    </Group>
+  );
+
   return (
     <Tooltip label={lines.join(" \u00b7 ")} withinPortal>
-      <Group gap={4} wrap="nowrap" justify="center">
-        {cell.status ? (
-          <Badge size="xs" color={statusColor(cell.status)} variant="light">
-            {statusLabel(cell.status)}
-          </Badge>
-        ) : (
-          <Text size="xs" c="dimmed">
-            {"\u2014"}
-          </Text>
-        )}
-        {cell.open_exception_count > 0 ? (
-          <Text size="xs" c="red" fw={700}>
-            !
-          </Text>
-        ) : null}
-      </Group>
+      <div
+        role={onCellClick ? "button" : undefined}
+        tabIndex={onCellClick ? 0 : undefined}
+        onClick={() => onCellClick?.(employeeId, workDate)}
+        onKeyDown={(e) => {
+          if (!onCellClick) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onCellClick(employeeId, workDate);
+          }
+        }}
+        style={{ cursor: onCellClick ? "pointer" : "default" }}
+      >
+        {content}
+      </div>
     </Tooltip>
   );
 }
 
-export function MonthlyGrid({ fromDate, toDate, employees, attendanceStatus }: Props) {
+export function MonthlyGrid({
+  fromDate,
+  toDate,
+  employees,
+  attendanceStatus,
+  onCellClick,
+}: Props) {
   const days = buildDays(fromDate, toDate);
   const filterSet = attendanceStatus.length > 0 ? new Set(attendanceStatus) : null;
 
@@ -117,13 +152,7 @@ export function MonthlyGrid({ fromDate, toDate, employees, attendanceStatus }: P
 
   return (
     <ScrollArea type="auto" offsetScrollbars>
-      <Table
-        striped
-        withTableBorder
-        withColumnBorders
-        stickyHeader
-        highlightOnHover
-      >
+      <Table striped withTableBorder withColumnBorders stickyHeader highlightOnHover>
         <Table.Thead>
           <Table.Tr>
             <Table.Th
@@ -164,7 +193,12 @@ export function MonthlyGrid({ fromDate, toDate, employees, attendanceStatus }: P
               </Table.Td>
               {cells.map((c, i) => (
                 <Table.Td key={days[i]} style={{ textAlign: "center" }}>
-                  <CellView cell={c} />
+                  <CellView
+                    cell={c}
+                    employeeId={emp.employee_id}
+                    workDate={days[i]}
+                    onCellClick={onCellClick}
+                  />
                 </Table.Td>
               ))}
             </Table.Tr>
