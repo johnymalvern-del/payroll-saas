@@ -4,48 +4,53 @@ Read this first when opening a new chat. Updated at the end of each phase.
 
 ## Phase
 
-F-0b — scaffold delivered (bundle f002 pending run).
+F-1a — delivered in f003-fix (login + forced password change + auth provider + protected routes). F-1b (auth/me, shell, landing cards) waits for B-1.
 
-## Bundle plan (16 total)
+## Bundles done
 
-F-0a done (tooling), F-0b (scaffold, this bundle) | F-1a, F-1b (auth/shell) | F-2a, F-2b (attendance) | F-3a, F-3b (exceptions/adjustments) | F-4a, F-4b (employees/import) | F-5a, F-5b (setup) | F-6 (pay setup) | F-8 (audit) | F-7a, F-7b (payroll; waits for B-4)
+F-0a (tooling), F-0b + f002-fix (scaffold, typed client, error mapper, theme, strings), F-1a + f003-fix (login/auth/password).
 
-Order: F-0, F-1, F-2, F-3, F-4, F-5, F-6, F-8, F-7. F-1b waits for B-1.
+## Bundle plan (16 total, unchanged)
+
+F-0a done, F-0b done, F-1a done, F-1b next (waits for B-1) | F-2a, F-2b | F-3a, F-3b | F-4a, F-4b | F-5a, F-5b | F-6 | F-8 | F-7a, F-7b (waits for B-4).
 
 ## Backend requests
 
 | # | Request | Blocks |
 |---|---|---|
-| B-1 | GET /auth/me returning id, username, role, employee_id, permissions[], must_change_password. Frontend MUST NOT hard-code permissions. | F-1b |
+| B-1 | GET /auth/me returning id, username, role, employee_id, permissions[], must_change_password. | F-1b |
 | B-2 | Demo seed via real engine, tracked at backend/app/seed/demo_seed.py with wrapper scripts/seed_demo.ps1, --reset/--keep, refuse in prod, fictional SA names, fake tax numbers, real exception types only, credentials in docs/SEED.md. | Demo data |
-| B-3a | GET /payroll/pay-periods/{id}/preview/{employee_id} per-employee detail. | F-7b (tab hidden until then) |
-| B-3b | Own-payslips endpoint for employee role via SELF_VIEW (may work today via apply_scope on /payroll/payslips; confirm). | F-7b (My payslips tab) |
-| B-4 | Attendance-to-earnings: per_hour from attendance_segment minutes x stored rates, overtime/premiums, six formulas from runner, refusal on setup_error / unreconciled_leave, reimbursements source. | F-7 fully |
+| B-3a | GET /payroll/pay-periods/{id}/preview/{employee_id}. | F-7b (tab hidden) |
+| B-3b | Own-payslips endpoint for employee role via SELF_VIEW. | F-7b |
+| B-4 | Attendance-to-earnings integration. | F-7 fully |
 
-## Verified gaps (against backend code, not openapi)
+## Verified gaps
 
-Same as B-1, B-3a, B-4 above.
+Same as B-1, B-3a, B-4 above. F-1a assumes login response is `{access_token: string, must_change_password?: boolean}` and change-password body is `{current_password, new_password}`. If either assumption is wrong, F-1a-fix-2 corrects it.
 
 ## To verify at relevant phase
 
-Login response shape; refresh CSRF header name/value; must_change_password in login response; GET /attendance/day/{employee_id}/{work_date}; GET /punches; nine audit filters; two-step import token; device api_key in 201 only; dry-run token TTL; row_version in each PATCH-able GET.
+Refresh CSRF header name/value; login response exact shape; change-password body shape; GET /attendance/day/{employee_id}/{work_date}; GET /punches; nine audit filters; two-step import token; device api_key in 201 only; dry-run token TTL; row_version in each PATCH-able GET; `X-Tenant-Slug` on /auth/login and /auth/refresh.
 
 ## Decisions
 
-- Role: use B-1 /auth/me, never hard-code permissions.
+- Role gating: use B-1 /auth/me, never hard-code permissions. F-1b adds role-aware nav.
 - Preview detail: hidden until B-3a.
 - Import wizard: two steps.
 - Sheet status filter: employee-status + attendance-status chip (client-side post-filter).
 - Node 20 assumed; apply_bundle.py --frontend halts if < 20.
-- Version pinning: caret ranges within known-good majors; package-lock.json is the real pin.
+- Version pinning: caret ranges; package-lock.json is the real pin.
 
-## Verified gaps (unresolved)
+## Known non-blocking quirks
 
-- B-1, B-3a, B-4 as above.
-- Refresh response shape and CSRF header unverified. client.ts uses a defensive access_token key check and does not send a CSRF header; if the backend requires one, that is the fix location.
+- apply_bundle.py's frontend table occasionally omits a written row from the display (strings.ts in f003). File is written to disk; commit is unaffected. Not chased. If it happens on a commit that matters, note it and add the file explicitly to a follow-up bundle.
 
 ## Next step
 
-Run: python tools\apply_bundle.py bundles\f002.txt --frontend --also frontend/package-lock.json --commit "F-0b: scaffold + typed client + error mapper + theme"
+Wait for B-1 (GET /auth/me) before starting F-1b. To test F-1a end-to-end now:
+  1. Start backend: `cd backend; python -m uvicorn app.main:app --reload --port 8000`
+  2. Start frontend: `cd frontend; npm run dev`
+  3. Open http://127.0.0.1:5173
+  4. Try login with demo tenant credentials.
 
-Report the table. If green, F-1a is next (login page; no role gating yet, waits for B-1 at F-1b).
+If the backend is not seeded (B-2 pending), F-1a is code-complete and unit-tested but cannot demonstrate the full login flow until a user exists.
