@@ -4,15 +4,15 @@ Read this first when opening a new chat. Updated at the end of each phase.
 
 ## Phase
 
-F-2b — day panel, daily list, mark clean days reviewed. F-2a is on disk and green (see commit history).
+F-2 complete (F-2a sheet + F-2b day panel/daily/mark-reviewed, all green: 8 tests in `AttendanceSheetPage.test.tsx`). Tool gap closed in f007: `--also` files are now inside the frontend tsc/vitest gate scope, so a source-only bundle still exercises the corresponding test file. Next: F-3a.
 
 ## Bundles done
 
-F-0a, F-0b, F-1a, F-1b (+ fixes), F-2a (+ fixes f005-fix through f005-fix4), F-2b (this bundle).
+F-0a, F-0b, F-1a, F-1b (+ fixes), F-2a (+ fixes f005-fix..f005-fix4), F-2b (+ fixes f006-fix..f006-fix6), f007 (this bundle, tool fix).
 
-## Bundle plan (12 frontend bundles remaining)
+## Bundle plan (11 frontend bundles remaining)
 
-F-2b ✓ | F-3a, F-3b | F-4a, F-4b | F-5a, F-5b | F-6 | F-8 | F-7a, F-7b (waits for B-4).
+F-3a, F-3b | F-4a, F-4b | F-5a, F-5b | F-6 | F-8 | F-7a, F-7b (waits for B-4).
 
 ## Backend requests
 
@@ -26,14 +26,16 @@ F-2b ✓ | F-3a, F-3b | F-4a, F-4b | F-5a, F-5b | F-6 | F-8 | F-7a, F-7b (waits 
 
 ## Important contracts
 
-- `/auth/login` returns `{access_token, refresh_token, token_type, expires_in}` only.
+- `/auth/login` returns `{access_token, refresh_token, token_type, expires_in}` only. UI uses `/auth/me` for role + permissions + must_change_password.
 - `/auth/me` returns `{id, username, role, employee_id, permissions[], must_change_password}`.
-- Usernames: `normalise_username` strips separators when a digit is present.
-- Refresh: CSRF header still missing on client (flagged since F-1a).
-- **`new Request(relativeUrl)` throws in jsdom/Node**. All manual requests go through `absoluteUrl()` in `client.ts`.
-- Attendance sheet/daily/day/mark_reviewed field shapes assumed and normalised defensively (see `attendance.ts` and `warn` in it). Verified against real backend not yet.
-- `GET /attendance/day/{employee_id}/{work_date}` assumed per 2B spec. May differ; if it 404s, F-2b-day-panel-fix replaces `fetchDay` with `fetchPunches` from `/punches`.
-- `POST /attendance/mark_reviewed` assumed to return `{reviewed_count, refused_days: [...]}`. May differ; if it 422s or shape doesn't match, one fix bundle adjusts.
+- Usernames: `normalise_username` strips separators when a digit is present. `pa-1` → `pa1`.
+- Refresh: CSRF header still missing on client. Flagged since F-1a.
+- **`new Request(relativeUrl)` throws in jsdom/Node.** All manual requests go through `absoluteUrl()` in `client.ts`.
+- Attendance sheet/daily/day/mark_reviewed field shapes normalised defensively in `attendance.ts` (`normaliseSheetOut`, `normaliseDailyOut`, `normaliseDayOut`, `warn`).
+- **Clickable grid cell has `data-testid={`cell-${employeeId}-${workDate}`}`.** Tests must use that testid. Never DOM-traverse from a Badge — Mantine Tooltip wrapping makes that unreliable.
+- Sheet tests must derive fixture dates from `dayjs()` (`TODAY`) so the cell falls in the default visible month.
+- Mark-reviewed flow is page button → modal opens → modal submit. Two clicks required.
+- Mantine Tooltip must wrap the clickable div (not be its child) — see f006-fix5 for why.
 
 ## Verified gaps
 
@@ -41,17 +43,19 @@ Only B-2, B-3a, B-3b, B-4 remain.
 
 ## Decisions
 
-- Monthly and daily views share the same filter bar. Daily view adds a `date` input.
-- Day panel opens as a right Drawer (Mantine). Editing punches not in F-2b — that's F-3.
-- Mark reviewed modal is a Mantine Modal; result shown inline with a refused-days table.
-- Adjustment markers never appear on the grid, daily list, or day panel (C2). DayPanel has an explicit comment; test asserts `/adjust/i` not present in the day panel.
-- Attendance-status chip is a client-side post-filter. Server-side requires backend support (flagged).
-- Cursor is forward-only; "first page" and "next page" only.
+- Grid cell click targets `data-testid` wrapper — future Badge/Tooltip composition changes won't break tests.
+- Fixture dates always derived from `dayjs()`.
+- Adjustment markers never appear on grid, daily list, or day panel (C2).
+- Attendance status filter is a client-side post-filter.
+- No row virtualisation yet.
 
-## Known tool limitation
+## Tool behaviour (f007)
 
-`apply_bundle.py --frontend` runs Vitest only on files inside the bundle. `--also` files are committed but tests are not re-run on them.
+- `--also <path>` now extends the frontend tsc/vitest **gate scope** in addition to being included in `--commit`.
+- Filtered to `frontend/` paths; non-frontend `--also` args (e.g. `docs/FRONTEND_STATE.md`) do not affect gates.
+- `npm install` still runs **only** on bundle-written `frontend/package.json` (passing package.json via `--also` is not treated as a change signal — avoids slow installs).
+- Consequence: F-3a can now write only source files and pass the corresponding test file via `--also`; tsc and vitest will still exercise it.
 
 ## Next step
 
-F-3a: exceptions queue with type chips and suggested fixes; single adjustment form (outcome, times, reason_code, note-required-for-other); handle `cannot_adjust_own` (403), `day_locked` (409), and error codes with clear messages. Also clean up F-2b's `dailyDate` input (moved into FilterBar for consistency).
+F-3a: exceptions queue with type chips and suggested fixes; single adjustment form (outcome, worked/leave/sick/absent/day_off; times; reason_code; note required when reason_code is "other"); inline handling of `cannot_adjust_own` (403) and `day_locked` (409). Add `frontend/src/api/exceptions.ts` and `frontend/src/api/adjustments.ts`, plus pages and forms. Tests must use `data-testid` on the exception row and adjustment buttons; fixture dates from `dayjs()`.

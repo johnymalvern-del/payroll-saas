@@ -6,7 +6,7 @@ Modes:
   --frontend          node/npm/npx resolved via shutil.which, launched through
                       cmd.exe /c on Windows (.cmd/.bat); version gate; npm
                       install on package.json change; npx tsc --noEmit on TS
-                      change; npx vitest run on touched test files; npm run
+                      change; npx vitest run on changed test files; npm run
                       build only with --build.
 
 Both modes:
@@ -16,10 +16,13 @@ Both modes:
   --also <path> to include extra files in the commit; --rollback <timestamp>;
   gitignored-safe staging; --push; --record-full-suite-pass.
 
-Bundle format:
-    === FILE: <path> ===
-    <content>
-    === END FILE: <path> ===
+Frontend gate scope (this revision): tsc and vitest look at the UNION of the
+files written by the bundle AND the files passed via --also (filtered to
+frontend/). Reason: when a bundle changes only a source file, we still want
+the corresponding test file to run even if the test file was committed by an
+earlier bundle. Package install still runs only when the bundle itself writes
+frontend/package.json (--also on package.json is intentionally not treated as
+a change signal, to avoid slow npm installs for no reason).
 """
 from __future__ import annotations
 
@@ -46,10 +49,6 @@ END_RE = re.compile(r"^=== END FILE: (.+?) ===\s*$")
 _MAX_DEPENDENT_TESTS = 20
 _LOG_TAIL_LINES = 15
 
-
-# ---------------------------------------------------------------------------
-# Log
-# ---------------------------------------------------------------------------
 
 def _truncate_log() -> None:
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -81,19 +80,7 @@ def print_log_tail(n: int = _LOG_TAIL_LINES) -> None:
         print(line)
 
 
-# ---------------------------------------------------------------------------
-# External program resolution (Windows-safe for .cmd / .bat)
-# ---------------------------------------------------------------------------
-
 def resolve_launcher(name: str) -> list[str]:
-    """Return argv prefix that launches `name` on this OS.
-
-    On Windows, npm/npx/node-gyp shims are .cmd files. subprocess cannot run
-    them via CreateProcess directly, so route them through cmd.exe /c. The
-    path is emitted as a list element and Python's list2cmdline quotes it when
-    it contains spaces; cmd.exe /c preserves those quotes when the string
-    names an executable (see cmd /? for the quote rules).
-    """
     path = shutil.which(name)
     if path is None:
         raise FileNotFoundError(f"{name} not found on PATH")
@@ -102,24 +89,29 @@ def resolve_launcher(name: str) -> list[str]:
     return [path]
 
 
-# ---------------------------------------------------------------------------
-# Command runner (never raises; always returns CompletedProcess; logs)
-# ---------------------------------------------------------------------------
-
 def run_cmd(args: list, cwd: pathlib.Path, timeout: int = 1800) -> subprocess.CompletedProcess:
     try:
         r = subprocess.run(
-            args, cwd=str(cwd), capture_output=True, text=True, timeout=timeout
+            args,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            errors="replace",
         )
+        stdout = r.stdout if r.stdout is not None else ""
+        stderr = r.stderr if r.stderr is not None else ""
         log_line(f"$ {' '.join(str(a) for a in args)} (cwd={cwd})")
-        if r.stdout:
+        if stdout:
             log_line("stdout:")
-            log_line(r.stdout)
-        if r.stderr:
+            log_line(stdout)
+        if stderr:
             log_line("stderr:")
-            log_line(r.stderr)
+            log_line(stderr)
         log_line(f"exit={r.returncode}")
-        return r
+        return subprocess.CompletedProcess(
+            args, returncode=r.returncode, stdout=stdout, stderr=stderr
+        )
     except FileNotFoundError as e:
         msg = f"executable not found: {e}"
         log_line(f"$ {' '.join(str(a) for a in args)} -> {msg}")
@@ -132,11 +124,11 @@ def run_cmd(args: list, cwd: pathlib.Path, timeout: int = 1800) -> subprocess.Co
         msg = f"timeout after {e.timeout}s"
         log_line(f"$ {' '.join(str(a) for a in args)} -> {msg}")
         return subprocess.CompletedProcess(args, returncode=124, stdout="", stderr=msg)
+    except Exception as e:
+        msg = f"unexpected launch error: {type(e).__name__}: {e}"
+        log_line(f"$ {' '.join(str(a) for a in args)} -> {msg}")
+        return subprocess.CompletedProcess(args, returncode=125, stdout="", stderr=msg)
 
-
-# ---------------------------------------------------------------------------
-# Bundle parse / write / rollback
-# ---------------------------------------------------------------------------
 
 def parse_bundle(path: pathlib.Path) -> list[tuple[str, str]]:
     text = path.read_text(encoding="utf-8-sig")
@@ -217,10 +209,6 @@ def rollback(ts: str) -> list[str]:
     return restored
 
 
-# ---------------------------------------------------------------------------
-# Backend gates
-# ---------------------------------------------------------------------------
-
 def ast_check(files: list[str]) -> dict[str, tuple[bool, str]]:
     out: dict[str, tuple[bool, str]] = {}
     for rel in files:
@@ -294,10 +282,6 @@ def find_dependent_tests(written: list[str]) -> list[str]:
     return hits
 
 
-# ---------------------------------------------------------------------------
-# Frontend gates
-# ---------------------------------------------------------------------------
-
 def node_version_check() -> tuple[bool, str]:
     try:
         node = resolve_launcher("node")
@@ -335,12 +319,12 @@ def frontend_npm_install(written: list[str]) -> tuple[bool, str]:
     return True, "npm install ok"
 
 
-def frontend_tsc(written: list[str]) -> tuple[bool, str]:
+def frontend_tsc(scope: list[str]) -> tuple[bool, str]:
     if not FRONTEND_DIR.exists():
         return True, "skip: no frontend dir"
     ts_changed = any(
         (f.endswith(".ts") or f.endswith(".tsx")) and f.startswith("frontend/")
-        for f in written
+        for f in scope
     )
     if not ts_changed:
         return True, "skip: no TS change"
@@ -356,11 +340,11 @@ def frontend_tsc(written: list[str]) -> tuple[bool, str]:
     return True, "tsc ok"
 
 
-def frontend_vitest(written: list[str]) -> tuple[bool, str, dict[str, tuple[bool, str]]]:
+def frontend_vitest(scope: list[str]) -> tuple[bool, str, dict[str, tuple[bool, str]]]:
     if not FRONTEND_DIR.exists():
         return True, "skip: no frontend dir", {}
     test_files = [
-        f for f in written
+        f for f in scope
         if f.startswith("frontend/") and (".test." in f or ".spec." in f)
     ]
     if not test_files:
@@ -375,7 +359,8 @@ def frontend_vitest(written: list[str]) -> tuple[bool, str, dict[str, tuple[bool
     for f in test_files:
         rel = f[len("frontend/"):]
         r = run_cmd(npx + ["vitest", "run", rel], FRONTEND_DIR, timeout=300)
-        results[f] = (r.returncode == 0, (r.stdout + r.stderr).strip())
+        combined = (r.stdout or "") + (r.stderr or "")
+        results[f] = (r.returncode == 0, combined.strip())
     overall = all(ok for ok, _ in results.values())
     return overall, f"vitest on {len(test_files)} file(s)", results
 
@@ -396,10 +381,6 @@ def frontend_build(enabled: bool) -> tuple[bool, str]:
         return False, "npm run build FAILED"
     return True, "build ok"
 
-
-# ---------------------------------------------------------------------------
-# Table printing
-# ---------------------------------------------------------------------------
 
 def first_fail(text: str) -> str:
     for line in text.splitlines():
@@ -474,10 +455,6 @@ def print_table_frontend(written, ast_res, node_res, npm_res, tsc_res, vitest_re
     return ok
 
 
-# ---------------------------------------------------------------------------
-# Git
-# ---------------------------------------------------------------------------
-
 def do_commit(files: list[str], message: str) -> bool:
     if not files:
         print("commit: no files")
@@ -543,10 +520,6 @@ def record_full_suite_pass() -> None:
     print(f"recorded full-suite pass at {FULL_SUITE_MARKER}")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def main() -> int:
     p = argparse.ArgumentParser(description="Apply a bundle of complete file writes.")
     p.add_argument("bundle", nargs="?")
@@ -558,8 +531,8 @@ def main() -> int:
         action="append",
         default=[],
         metavar="PATH",
-        help="Additional path to include in --commit (repeatable). "
-             "Useful for including tools/apply_bundle.py itself.",
+        help="Additional path to include in --commit (repeatable). Also extends "
+             "the frontend tsc/vitest gate scope (frontend/ paths only).",
     )
     p.add_argument("--commit", metavar="MSG")
     p.add_argument("--push", action="store_true")
@@ -615,15 +588,28 @@ def main() -> int:
     ast_res = ast_check(written)
 
     if args.frontend:
+        # tsc/vitest gate scope = written + --also, filtered to frontend/.
+        frontend_gates = [
+            f for f in list(dict.fromkeys(list(written) + list(args.also)))
+            if f.startswith("frontend/")
+        ]
+
         node_ok, node_msg = node_version_check()
         if not node_ok:
             print(f"\nSTOP: {node_msg}")
             print_log_tail()
             return 1
+
+        # npm install only on bundle-written package.json
         npm_res = frontend_npm_install(written)
-        tsc_res = frontend_tsc(written) if npm_res[0] else (False, "skipped: npm install failed")
+
+        tsc_res = (
+            frontend_tsc(frontend_gates)
+            if npm_res[0]
+            else (False, "skipped: npm install failed")
+        )
         vitest_res = (
-            frontend_vitest(written)
+            frontend_vitest(frontend_gates)
             if (npm_res[0] and tsc_res[0])
             else (False, "skipped: earlier gate failed", {})
         )
