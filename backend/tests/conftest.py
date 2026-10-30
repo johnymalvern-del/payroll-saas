@@ -284,4 +284,48 @@ def _bypass_rate_limiter_unless_real(request, _save_rate_limiter_factory):
         _rl_factory._build = original
         _rl_factory.get_rate_limiter.cache_clear()
 
+
+# --- 4A-bis: _4A_BIS_CONFTEST: fast/slow markers + template bootstrap + migration swap ---
+import os as _os_4a_cf
+import pytest as _pytest_4a_cf
+
+_4a_orig_configure = globals().get("pytest_configure")
+def pytest_configure(config):
+    config.addinivalue_line("markers", "slow: provisions a tenant; -m 'not slow' skips in mid-chapter runs")
+    config.addinivalue_line("markers", "fast: pure logic; included in mid-chapter runs")
+    if _4a_orig_configure:
+        _4a_orig_configure(config)
+
+_4a_orig_modifyitems = globals().get("pytest_collection_modifyitems")
+def pytest_collection_modifyitems(config, items):
+    if _4a_orig_modifyitems:
+        _4a_orig_modifyitems(config, items)
+    for _4a_it in items:
+        _4a_names = getattr(_4a_it, "fixturenames", []) or []
+        if "disposable_tenant" in _4a_names:
+            _4a_it.add_marker(_pytest_4a_cf.mark.slow)
+        else:
+            _4a_it.add_marker(_pytest_4a_cf.mark.fast)
+
+_4a_orig_start = globals().get("pytest_sessionstart")
+def pytest_sessionstart(session):
+    if _4a_orig_start:
+        _4a_orig_start(session)
+    if _os_4a_cf.environ.get("PAYROLL_TEST_TEMPLATE_DB") == "1":
+        from app.services import provisioning as _4a_p
+        _4a_p._TEST_TEMPLATE_ENABLED = True
+        _4a_p._run_tenant_migrations = _4a_p._4a_run_migrations_from_template
+
+@pytest.fixture(scope="session", autouse=True)
+def _4a_bootstrap_template():
+    if _os_4a_cf.environ.get("PAYROLL_TEST_TEMPLATE_DB") == "1":
+        from app.services import provisioning as _4a_p
+        _4a_p._TEST_TEMPLATE_ENABLED = True
+        _4a_p._run_tenant_migrations = _4a_p._4a_run_migrations_from_template
+        _4a_p._4a_bootstrap_template_db()
+    yield
+# --- end ---
+
 # END OF FILE
+
+# _4A_BIS_010B conftest

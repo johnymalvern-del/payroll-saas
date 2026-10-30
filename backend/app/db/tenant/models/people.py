@@ -88,6 +88,8 @@ class Employee(Base, TimestampMixin):
     medical_aid_dependants: Mapped[int] = mapped_column(nullable=False, default=0)
     retirement_fund_flags: Mapped[str | None] = mapped_column(String(120), nullable=True)
     uif_exempt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    contracted_weekly_hours: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
+    medical_scheme_members: Mapped[int | None] = mapped_column(Integer, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     row_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
@@ -208,3 +210,4 @@ class BiometricEnrolment(Base, TimestampMixin):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 # END OF FILE
+# _4A_BIS_011 people

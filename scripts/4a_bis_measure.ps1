@@ -8,15 +8,31 @@ function Parse-Passed([object[]]$lines) {
     return 0
 }
 
-Write-Host "=== step 1: apply v1 (idempotent) ==="
+Write-Host "=== step 0: apply patch_010 (people.py + conftest fixture) ==="
+Push-Location $root
+python scripts\patch_010.py
+$rc = $LASTEXITCODE
+Pop-Location
+if ($rc -ne 0) { throw "STOP: patch_010 failed" }
+
+Write-Host ""
+Write-Host "=== step 0b: verify drift fix ==="
+Push-Location $backend
+Remove-Item Env:PAYROLL_TEST_TEMPLATE_DB -ErrorAction SilentlyContinue
+Remove-Item Env:PAYROLL_TEST_FAST_HASH -ErrorAction SilentlyContinue
+$driftOut = python -m pytest tests/test_schema_drift.py -q --no-header 2>&1
+$driftExit = $LASTEXITCODE
+Pop-Location
+Write-Host "drift exit: $driftExit"
+$driftOut | Select-Object -Last 6 | ForEach-Object { Write-Host $_ }
+
+Write-Host ""
+Write-Host "=== step 1: apply v1 + v3 (idempotent) ==="
 Push-Location $root
 python scripts\4a_bis_patch.py
 $rc = $LASTEXITCODE
 Pop-Location
 if ($rc -ne 0) { throw "STOP: v1 patch failed" }
-
-Write-Host ""
-Write-Host "=== step 1b: apply v3 (fix v2 arg order) ==="
 Push-Location $root
 python scripts\4a_bis_patch_v3.py
 $rc = $LASTEXITCODE
@@ -43,19 +59,23 @@ Push-Location $backend
 $env:PAYROLL_TEST_TEMPLATE_DB = '1'
 $env:PAYROLL_TEST_FAST_HASH = '1'
 $swa1 = [System.Diagnostics.Stopwatch]::StartNew()
-$after1Out = python -m pytest tests/test_adjustments.py tests/test_sheet.py -q --no-header 2>&1
+$after1Out = python -m pytest tests/test_adjustments.py tests/test_sheet.py tests/test_fastpath_diagnostic.py -q --no-header 2>&1
 $after1Exit = $LASTEXITCODE
 $swa1.Stop()
 Pop-Location
 $after1Sec = [int]$swa1.Elapsed.TotalSeconds
 $after1Count = Parse-Passed $after1Out
 Write-Host "AFTER #1: ${after1Sec}s; passed: $after1Count; exit: $after1Exit"
+if ($after1Exit -ne 0) {
+    Write-Host "=== AFTER #1 FAILURES (last 40 lines) ==="
+    $after1Out | Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
+}
 
 Write-Host ""
 Write-Host "=== step 4: AFTER #2 (steady) ==="
 Push-Location $backend
 $swa2 = [System.Diagnostics.Stopwatch]::StartNew()
-$after2Out = python -m pytest tests/test_adjustments.py tests/test_sheet.py -q --no-header 2>&1
+$after2Out = python -m pytest tests/test_adjustments.py tests/test_sheet.py tests/test_fastpath_diagnostic.py -q --no-header 2>&1
 $after2Exit = $LASTEXITCODE
 $swa2.Stop()
 Pop-Location
@@ -72,7 +92,7 @@ $guardOut = python -m pytest tests/test_security_argon2_guard.py -q --no-header 
 $guardExit = $LASTEXITCODE
 Pop-Location
 Write-Host "guard exit: $guardExit"
-$guardOut | Select-Object -Last 8 | ForEach-Object { Write-Host $_ }
+$guardOut | Select-Object -Last 3 | ForEach-Object { Write-Host $_ }
 
 Write-Host ""
 Write-Host "=== step 6: SUMMARY ==="
@@ -88,34 +108,17 @@ if ($beforeCount -gt 0 -and $after2Count -gt 0) {
     Write-Host ("AFTER #2: ${after2Sec}s ($after2Count tests); per-test ${perTestAfter}s")
     Write-Host ("Per-test savings: ${perTestSaved}s")
     Write-Host ("Estimated full-suite: ~${estFull}s (~$([int]($estFull/60)) min)")
-} else {
-    Write-Host "Cannot compute summary (some runs failed)."
 }
 
 Write-Host ""
-Write-Host "=== step 7: drift diagnostic ==="
-Push-Location $backend
-$driftOut = python -m pytest tests/test_schema_drift.py -x -vv --tb=long --no-header 2>&1
-$driftExit = $LASTEXITCODE
-Pop-Location
-$driftOut | Out-File -FilePath (Join-Path $root 'drift_diag.out') -Encoding utf8
-Write-Host "drift exit: $driftExit; saved drift_diag.out"
-
-$driftTestPath = Join-Path $backend 'tests\test_schema_drift.py'
-if (Test-Path $driftTestPath) {
-    Get-Content $driftTestPath -Raw | Out-File -FilePath (Join-Path $root 'drift_source.out') -Encoding utf8
-    Write-Host "saved drift_source.out ($((Get-Item (Join-Path $root 'drift_source.out')).Length) bytes)"
-}
-
-Write-Host ""
-Write-Host "=== step 8: commit tracked files ==="
+Write-Host "=== step 7: git commit tracked files ==="
 Push-Location $root
-git add backend/app/core/security.py backend/tests/test_security_argon2_guard.py scripts/4a_bis_measure.ps1
+git add backend/app/db/tenant/models/people.py backend/tests/conftest.py backend/tests/test_fastpath_diagnostic.py scripts/4a_bis_measure.ps1
 $rc = $LASTEXITCODE
 if ($rc -ne 0) { Write-Host "git add exit: $rc (some files may be gitignored, continuing)" }
 $staged = git diff --cached --name-only
 if ($staged) {
-    git commit -m "4A-bis v3: fix v2 arg-order bug, robust measure script"
+    git commit -m "4A-bis: fix drift (add 2 columns) + fixture-based fast-path enable"
     Write-Host "commit exit: $LASTEXITCODE"
 }
 git log --oneline -3
@@ -123,6 +126,9 @@ Pop-Location
 
 Write-Host ""
 Write-Host "============= PASTE THIS BLOCK BACK ============="
+Write-Host "DRIFT: exit=$driftExit"
+$driftOut | Select-Object -Last 3 | ForEach-Object { Write-Host "  $_" }
+Write-Host ""
 Write-Host "SUMMARY:"
 Write-Host "  BEFORE: ${beforeSec}s ($beforeCount passed, exit $beforeExit)"
 Write-Host "  AFTER #1: ${after1Sec}s ($after1Count passed, exit $after1Exit)"
@@ -132,12 +138,9 @@ if ($estFull -gt 0) {
     Write-Host ("  Estimated full: ${estFull}s (~$([int]($estFull/60)) min)")
 }
 Write-Host ""
-Write-Host "DRIFT FAILURE (first 30 lines):"
-$driftOut | Select-Object -First 30 | ForEach-Object { Write-Host $_ }
-Write-Host ""
-Write-Host "DRIFT SOURCE (tests/test_schema_drift.py, first 150 lines):"
-if (Test-Path (Join-Path $root 'drift_source.out')) {
-    Get-Content (Join-Path $root 'drift_source.out') | Select-Object -First 150 | ForEach-Object { Write-Host $_ }
+Write-Host "AFTER #1 FAILURE TAIL (only if exit nonzero):"
+if ($after1Exit -ne 0) {
+    $after1Out | Select-Object -Last 20 | ForEach-Object { Write-Host "  $_" }
 }
 Write-Host "============= END PASTE ============="
 Write-Host ""
