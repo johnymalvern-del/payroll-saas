@@ -5,6 +5,7 @@ import {
   Group,
   Select,
   Stack,
+  Text,
   Textarea,
   TextInput,
 } from "@mantine/core";
@@ -20,6 +21,8 @@ import { strings } from "../../lib/strings";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
+
+const REASON_CODE_MAX = 40;
 
 export type AdjustmentFormValues = {
   outcome: AdjustmentOutcome;
@@ -41,6 +44,11 @@ function toTimeInput(value: string | null | undefined): string {
   if (!value) return "";
   const d = dayjs(value).tz(DEFAULT_SITE_TZ);
   return d.isValid() ? d.format("HH:mm") : "";
+}
+
+function timesCrossMidnight(timeIn: string, timeOut: string): boolean {
+  if (!timeIn || !timeOut) return false;
+  return timeOut < timeIn;
 }
 
 export function AdjustmentForm({
@@ -65,6 +73,7 @@ export function AdjustmentForm({
 
   const requiresTimes = outcome === "worked";
   const reasonIsOther = reasonCode.trim().toLowerCase() === "other";
+  const isNextDay = requiresTimes && timesCrossMidnight(timeIn, timeOut);
 
   const submit = () => {
     setError(null);
@@ -72,34 +81,44 @@ export function AdjustmentForm({
       setError(strings.adjustments.reasonRequired);
       return;
     }
+    if (reasonCode.trim().length > REASON_CODE_MAX) {
+      setError(strings.adjustments.reasonCodeTooLong);
+      return;
+    }
     if (requiresTimes && (!timeIn || !timeOut)) {
       setError(strings.adjustments.timesRequired);
       return;
-    }
-    if (requiresTimes && timeIn && timeOut) {
-      const tin = dayjs.tz(`${workDate}T${timeIn}:00`, DEFAULT_SITE_TZ);
-      const tout = dayjs.tz(`${workDate}T${timeOut}:00`, DEFAULT_SITE_TZ);
-      if (!tin.isValid() || !tout.isValid() || !tout.isAfter(tin)) {
-        setError(strings.adjustments.timeOrder);
-        return;
-      }
     }
     if (reasonIsOther && note.trim().length < 10) {
       setError(strings.adjustments.noteRequiredForOther);
       return;
     }
+
+    let timeInIso: string | null = null;
+    let timeOutIso: string | null = null;
+    if (requiresTimes && timeIn && timeOut) {
+      const tin = dayjs.tz(`${workDate}T${timeIn}:00`, DEFAULT_SITE_TZ);
+      const toutBase = dayjs.tz(`${workDate}T${timeOut}:00`, DEFAULT_SITE_TZ);
+      if (!tin.isValid() || !toutBase.isValid()) {
+        setError(strings.adjustments.timesRequired);
+        return;
+      }
+      // Night shift: a time-out earlier than time-in means the next
+      // calendar day. Both are computed in DEFAULT_SITE_TZ.
+      const tout = isNextDay ? toutBase.add(1, "day") : toutBase;
+      if (!tout.isAfter(tin)) {
+        // Equal times are invalid; end must strictly follow start.
+        setError(strings.adjustments.timeOrder);
+        return;
+      }
+      timeInIso = tin.toISOString();
+      timeOutIso = tout.toISOString();
+    }
+
     onSubmit({
       outcome,
-      time_in:
-        requiresTimes && timeIn
-          ? dayjs.tz(`${workDate}T${timeIn}:00`, DEFAULT_SITE_TZ).toISOString()
-          : null,
-      time_out:
-        requiresTimes && timeOut
-          ? dayjs
-              .tz(`${workDate}T${timeOut}:00`, DEFAULT_SITE_TZ)
-              .toISOString()
-          : null,
+      time_in: timeInIso,
+      time_out: timeOutIso,
       reason_code: reasonCode.trim(),
       note: note.trim() ? note.trim() : null,
     });
@@ -120,22 +139,29 @@ export function AdjustmentForm({
         data-testid="adj-outcome"
       />
       {requiresTimes ? (
-        <Group grow>
-          <TextInput
-            label={strings.adjustments.timeIn}
-            type="time"
-            value={timeIn}
-            onChange={(e) => setTimeIn(e.currentTarget.value)}
-            data-testid="adj-time-in"
-          />
-          <TextInput
-            label={strings.adjustments.timeOut}
-            type="time"
-            value={timeOut}
-            onChange={(e) => setTimeOut(e.currentTarget.value)}
-            data-testid="adj-time-out"
-          />
-        </Group>
+        <Stack gap={4}>
+          <Group grow align="flex-end">
+            <TextInput
+              label={strings.adjustments.timeIn}
+              type="time"
+              value={timeIn}
+              onChange={(e) => setTimeIn(e.currentTarget.value)}
+              data-testid="adj-time-in"
+            />
+            <TextInput
+              label={strings.adjustments.timeOut}
+              type="time"
+              value={timeOut}
+              onChange={(e) => setTimeOut(e.currentTarget.value)}
+              data-testid="adj-time-out"
+            />
+          </Group>
+          {isNextDay ? (
+            <Text size="xs" c="blue" data-testid="adj-next-day">
+              {strings.adjustments.nextDayIndicator}
+            </Text>
+          ) : null}
+        </Stack>
       ) : null}
       <TextInput
         label={strings.adjustments.reasonCode}

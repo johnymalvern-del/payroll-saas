@@ -130,19 +130,23 @@ describe("ExceptionsPage", () => {
   it("renders the title, exception row, and employee name", async () => {
     renderPage();
     expect(screen.getByText("Exceptions")).toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.getByTestId("exception-exc1")).toBeInTheDocument();
-    });
-    expect(screen.getByText(/missing out/i)).toBeInTheDocument();
-    expect(screen.getByText(/Ada Lovelace/)).toBeInTheDocument();
-    expect(screen.getByText(/EMP001/)).toBeInTheDocument();
+    const row = await screen.findByTestId("exception-exc1");
+    expect(row).toBeInTheDocument();
+    // Scoped to the row: the type label also appears in the filter dropdown
+    // and the reason-code hint, so an unscoped getByText matches multiple.
+    expect(within(row).getByText(/missing out/i)).toBeInTheDocument();
+    expect(within(row).getByText(/Ada Lovelace/)).toBeInTheDocument();
+    expect(within(row).getByText(/EMP001/)).toBeInTheDocument();
   });
 
   it("shows empty text when no exceptions", async () => {
     setupMock({ exceptions: [], employees: [EMP] });
     renderPage();
     await waitFor(() => {
-      expect(screen.getByText(/no open exceptions/i)).toBeInTheDocument();
+      // Status-neutral wording.
+      expect(
+        screen.getByText(/no exceptions match the current filters/i),
+      ).toBeInTheDocument();
     });
   });
 
@@ -294,9 +298,10 @@ describe("ExceptionsPage", () => {
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByTestId("dismiss-submit"));
     await waitFor(() => {
-      expect(
-        within(dialog).getByText(/note of at least 3 characters/i),
-      ).toBeInTheDocument();
+      // The textarea hint contains the same wording; the error must be
+      // read from the alert role only.
+      const alert = within(dialog).getByRole("alert");
+      expect(alert).toHaveTextContent(/note of at least 3 characters/i);
     });
   });
 
@@ -313,9 +318,38 @@ describe("ExceptionsPage", () => {
     });
     fireEvent.click(within(dialog).getByTestId("adj-submit"));
     await waitFor(() => {
-      expect(
-        within(dialog).getByText(/at least 10 characters/i),
-      ).toBeInTheDocument();
+      // The textarea hint contains "at least 10 characters"; use the
+      // alert role to distinguish the validation error.
+      const alert = within(dialog).getByRole("alert");
+      expect(alert).toHaveTextContent(/at least 10 characters/i);
     });
+  });
+
+  it("Load more follows next_cursor and appends items", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.includes("/attendance/exceptions")) {
+        if (url.includes("cursor=abc")) {
+          return jr({
+            items: [
+              { ...EXC, id: "exc2" },
+              { ...EXC, id: "exc3" },
+            ],
+            next_cursor: null,
+          });
+        }
+        return jr({ items: [EXC], next_cursor: "abc" });
+      }
+      if (url.includes("/api/v1/employees")) {
+        return jr({ items: [EMP], next_cursor: null });
+      }
+      return jr({}, 200);
+    }) as unknown as typeof fetch;
+    renderPage();
+    await screen.findByTestId("exception-exc1");
+    expect(screen.queryByTestId("exception-exc2")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("exceptions-load-more"));
+    await screen.findByTestId("exception-exc2");
+    expect(screen.getByTestId("exception-exc3")).toBeInTheDocument();
   });
 });

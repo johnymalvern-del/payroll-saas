@@ -10,7 +10,10 @@ const PERMISSION_NAV: Array<{ permission: string; item: NavItem }> = [
   { permission: "employee_crud", item: { label: "Employees", to: "/employees" } },
   { permission: "org_manage", item: { label: "Setup", to: "/setup" } },
   { permission: "payroll_preview", item: { label: "Pay periods", to: "/payroll/pay-periods" } },
-  { permission: "pay_rate_view", item: { label: "Change requests", to: "/payroll/change-requests" } },
+  // Change requests is an approval workflow, not a read-only view; gate it on
+  // a payroll-run permission (payroll_preview) rather than pay_rate_view so
+  // read-only auditors (audit_view + pay_rate_view) do not see it.
+  { permission: "payroll_preview", item: { label: "Change requests", to: "/payroll/change-requests" } },
   { permission: "audit_view", item: { label: "Audit log", to: "/audit-log" } },
 ];
 

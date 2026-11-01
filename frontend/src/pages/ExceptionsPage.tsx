@@ -1,5 +1,10 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   Alert,
   Button,
@@ -16,6 +21,7 @@ import { fetchEmployees } from "../api/employees";
 import {
   fetchExceptions,
   resolveException,
+  type ExceptionList,
   type ExceptionRow,
   type ResolveRequest,
 } from "../api/exceptions";
@@ -28,6 +34,8 @@ import {
   exceptionTypeLabel,
   strings,
 } from "../lib/strings";
+
+const PAGE_SIZE = 100;
 
 const STATUS_OPTIONS = [
   { label: strings.exceptions.statusOpen, value: "open" },
@@ -58,9 +66,16 @@ export function ExceptionsPage() {
     staleTime: 5 * 60 * 1000,
   });
 
-  const exceptions = useQuery({
+  const exceptions = useInfiniteQuery({
     queryKey: ["exceptions", statusFilter],
-    queryFn: () => fetchExceptions({ status: statusFilter }),
+    queryFn: ({ pageParam }) =>
+      fetchExceptions({
+        status: statusFilter,
+        cursor: pageParam,
+        limit: PAGE_SIZE,
+      }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
   });
 
   const resolve = useMutation({
@@ -70,6 +85,9 @@ export function ExceptionsPage() {
       setModal(null);
       setServerError(null);
       qc.invalidateQueries({ queryKey: ["exceptions"] });
+      // TODO(B-7): also invalidate the attendance sheet and day-panel
+      // query keys once the real keys from AttendanceSheetPage are wired
+      // in (see docs/FRONTEND_STATE.md).
     },
     onError: (err) => {
       const code = err instanceof Error ? err.message : "unknown_error";
@@ -85,6 +103,11 @@ export function ExceptionsPage() {
     });
   }
 
+  const openModal = (next: NonNullable<ModalState>) => {
+    setServerError(null);
+    setModal(next);
+  };
+
   const applySuggestion = (row: ExceptionRow) => {
     setServerError(null);
     const summary =
@@ -96,7 +119,8 @@ export function ExceptionsPage() {
     });
   };
 
-  const rawItems = exceptions.data?.items ?? [];
+  const rawItems: ExceptionRow[] =
+    exceptions.data?.pages.flatMap((p: ExceptionList) => p.items) ?? [];
   const items =
     typeFilter.length === 0
       ? rawItems
@@ -120,8 +144,13 @@ export function ExceptionsPage() {
           </Group>
         </Alert>
       ) : null}
-      {serverError && modal === null ? (
-        <Alert color="red" data-testid="direct-error">
+      {serverError ? (
+        <Alert
+          color="red"
+          withCloseButton
+          onClose={() => setServerError(null)}
+          data-testid="direct-error"
+        >
           {serverError}
         </Alert>
       ) : null}
@@ -163,24 +192,37 @@ export function ExceptionsPage() {
                   employeeName={info?.name ?? row.employee_id.slice(0, 8)}
                   employeeCode={info?.code ?? ""}
                   onApplySuggestion={() => applySuggestion(row)}
-                  onCustom={() => setModal({ exception: row, action: "custom" })}
-                  onDismiss={() =>
-                    setModal({ exception: row, action: "dismiss" })
+                  onCustom={() =>
+                    openModal({ exception: row, action: "custom" })
                   }
-                  busy={resolve.isPending}
+                  onDismiss={() =>
+                    openModal({ exception: row, action: "dismiss" })
+                  }
+                  busy={resolve.isPending && resolve.variables?.id === row.id}
                 />
               );
             })}
           </Stack>
         )}
       </Paper>
+      {exceptions.hasNextPage ? (
+        <Group justify="center">
+          <Button
+            variant="default"
+            onClick={() => exceptions.fetchNextPage()}
+            loading={exceptions.isFetchingNextPage}
+            data-testid="exceptions-load-more"
+          >
+            {strings.exceptions.loadMore}
+          </Button>
+        </Group>
+      ) : null}
       <ResolveModal
         opened={modal !== null}
         exception={modal?.exception ?? null}
         initialAction={modal?.action ?? "custom"}
         onClose={() => {
           setModal(null);
-          setServerError(null);
         }}
         onResolve={(req) => {
           if (!modal) return;
