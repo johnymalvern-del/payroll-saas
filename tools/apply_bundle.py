@@ -10,7 +10,7 @@ Usage:
     python tools\\apply_bundle.py bundles\\fNNN.txt --frontend --commit "msg"
 
 Flags:
-    --frontend       Run tsc --noEmit then vitest run. Writes bundles/last_run.log.
+    --frontend       Run tsc --noEmit then vitest run (cwd=frontend/). Writes bundles/last_run.log.
     --commit MSG     git add -A && git commit -m MSG (only if frontend checks pass).
     --dry-run        Parse the bundle and print files that would be written; do not write.
     --no-test        Skip vitest (still runs tsc if --frontend).
@@ -25,7 +25,8 @@ from pathlib import Path
 FILE_RE = re.compile(r'^=== FILE: (.+?) ===$')
 END_RE = re.compile(r'^=== END FILE: (.+?) ===$')
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
-FILE_LOC_RE = re.compile(r'❯\s+(\S+\.test\.tsx?):(\d+):\d+')
+FILE_LOC_RE = re.compile(r'([\w./\\-]+\.test\.tsx?):(\d+):\d+')
+FRONTEND_DIR = 'frontend'
 
 
 def parse_bundle(path: Path) -> dict:
@@ -76,9 +77,11 @@ def make_env() -> dict:
     return env
 
 
-def run(cmd: str, env: dict = None):
+def run(cmd: str, env: dict = None, cwd: str = None):
     e = env or make_env()
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True, env=e)
+    return subprocess.run(
+        cmd, shell=True, capture_output=True, text=True, env=e, cwd=cwd
+    )
 
 
 def summarize_vitest(log_text: str, max_lines: int = 60) -> str:
@@ -107,9 +110,10 @@ def summarize_vitest(log_text: str, max_lines: int = 60) -> str:
 
 def run_frontend_checks(run_tests: bool = True) -> int:
     env = make_env()
+    cwd = FRONTEND_DIR if Path(FRONTEND_DIR).is_dir() else '.'
 
-    print('running tsc...')
-    tsc = run('npx tsc --noEmit', env=env)
+    print(f'running tsc (cwd={cwd})...')
+    tsc = run('npx tsc --noEmit', env=env, cwd=cwd)
     if tsc.returncode != 0:
         print('tsc failed:')
         print(ANSI_RE.sub('', (tsc.stdout + tsc.stderr))[:3000])
@@ -119,12 +123,12 @@ def run_frontend_checks(run_tests: bool = True) -> int:
     if not run_tests:
         return 0
 
-    print('running vitest...')
+    print(f'running vitest (cwd={cwd})...')
     log_dir = Path('bundles')
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / 'last_run.log'
 
-    res = run('npx vitest run --reporter=basic', env=env)
+    res = run('npx vitest run --reporter=dot', env=env, cwd=cwd)
     text = (res.stdout or '') + '\n' + (res.stderr or '')
     log_path.write_text(ANSI_RE.sub('', text), encoding='utf-8')
 
