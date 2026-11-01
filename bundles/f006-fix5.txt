@@ -1,0 +1,466 @@
+=== FILE: frontend/src/components/AttendanceSheet/MonthlyGrid.tsx ===
+import { Badge, Group, ScrollArea, Table, Text, Tooltip } from "@mantine/core";
+import dayjs from "dayjs";
+import type { SheetCell, SheetEmployee } from "../../api/attendance";
+import { strings } from "../../lib/strings";
+
+type Props = {
+  fromDate: string;
+  toDate: string;
+  employees: SheetEmployee[];
+  attendanceStatus: string[];
+  onCellClick?: (employeeId: string, workDate: string) => void;
+};
+
+function buildDays(fromDate: string, toDate: string): string[] {
+  if (!fromDate || !toDate) return [];
+  const start = dayjs(fromDate);
+  const end = dayjs(toDate);
+  const days: string[] = [];
+  let cur = start;
+  while (cur.isBefore(end) || cur.isSame(end, "day")) {
+    days.push(cur.format("YYYY-MM-DD"));
+    cur = cur.add(1, "day");
+  }
+  return days;
+}
+
+function cellFor(employee: SheetEmployee, date: string): SheetCell | null {
+  return employee.days.find((c) => c.work_date === date) ?? null;
+}
+
+function statusColor(status: string | null): string {
+  switch (status) {
+    case "worked":
+      return "green";
+    case "leave":
+      return "blue";
+    case "sick":
+      return "orange";
+    case "absent":
+      return "red";
+    case "day_off":
+      return "gray";
+    default:
+      return "gray";
+  }
+}
+
+function statusLabel(status: string | null): string {
+  if (!status) return "\u2014";
+  return status.replace("_", " ");
+}
+
+function CellView({
+  cell,
+  employeeId,
+  workDate,
+  onCellClick,
+}: {
+  cell: SheetCell | null;
+  employeeId: string;
+  workDate: string;
+  onCellClick?: (employeeId: string, workDate: string) => void;
+}) {
+  if (!cell) {
+    return (
+      <Text size="xs" c="dimmed">
+        {"\u2014"}
+      </Text>
+    );
+  }
+  const lines: string[] = [statusLabel(cell.status)];
+  if (cell.worked_minutes !== null && cell.worked_minutes !== undefined) {
+    lines.push(`${cell.worked_minutes} worked`);
+  }
+  if (cell.open_exception_count > 0) {
+    lines.push(`${cell.open_exception_count} open exception(s)`);
+  }
+  if (cell.flags && cell.flags.length > 0) {
+    lines.push(`flags: ${cell.flags.join(", ")}`);
+  }
+  if (cell.locked) lines.push("locked");
+  if (cell.reviewed) lines.push("reviewed");
+
+  return (
+    <Tooltip label={lines.join(" \u00b7 ")} withinPortal>
+      <div
+        role={onCellClick ? "button" : undefined}
+        tabIndex={onCellClick ? 0 : undefined}
+        data-testid={`cell-${employeeId}-${workDate}`}
+        onClick={() => onCellClick?.(employeeId, workDate)}
+        onKeyDown={(e) => {
+          if (!onCellClick) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onCellClick(employeeId, workDate);
+          }
+        }}
+        style={{ cursor: onCellClick ? "pointer" : "default" }}
+      >
+        <Group gap={4} wrap="nowrap" justify="center">
+          {cell.status ? (
+            <Badge size="xs" color={statusColor(cell.status)} variant="light">
+              {statusLabel(cell.status)}
+            </Badge>
+          ) : (
+            <Text size="xs" c="dimmed">
+              {"\u2014"}
+            </Text>
+          )}
+          {cell.open_exception_count > 0 ? (
+            <Text size="xs" c="red" fw={700}>
+              !
+            </Text>
+          ) : null}
+        </Group>
+      </div>
+    </Tooltip>
+  );
+}
+
+export function MonthlyGrid({
+  fromDate,
+  toDate,
+  employees,
+  attendanceStatus,
+  onCellClick,
+}: Props) {
+  const days = buildDays(fromDate, toDate);
+  const filterSet = attendanceStatus.length > 0 ? new Set(attendanceStatus) : null;
+
+  const rows = employees
+    .map((emp) => {
+      const cells = days.map((d) => cellFor(emp, d));
+      if (filterSet) {
+        const anyMatch = cells.some(
+          (c) => c && c.status && filterSet.has(c.status),
+        );
+        if (!anyMatch) return null;
+      }
+      return { emp, cells };
+    })
+    .filter(
+      (r): r is { emp: SheetEmployee; cells: (SheetCell | null)[] } => r !== null,
+    );
+
+  if (rows.length === 0) {
+    return <Text c="dimmed">{strings.attendance.empty}</Text>;
+  }
+
+  return (
+    <ScrollArea type="auto" offsetScrollbars>
+      <Table striped withTableBorder withColumnBorders stickyHeader highlightOnHover>
+        <Table.Thead>
+          <Table.Tr>
+            <Table.Th
+              style={{
+                minWidth: 200,
+                position: "sticky",
+                left: 0,
+                background: "white",
+                zIndex: 2,
+              }}
+            >
+              {strings.attendance.employee}
+            </Table.Th>
+            {days.map((d) => (
+              <Table.Th key={d} style={{ minWidth: 70, textAlign: "center" }}>
+                {dayjs(d).format("DD")}
+              </Table.Th>
+            ))}
+          </Table.Tr>
+        </Table.Thead>
+        <Table.Tbody>
+          {rows.map(({ emp, cells }) => (
+            <Table.Tr key={emp.employee_id}>
+              <Table.Td
+                style={{
+                  position: "sticky",
+                  left: 0,
+                  background: "white",
+                  zIndex: 1,
+                }}
+              >
+                <Text size="sm" fw={500}>
+                  {emp.employee_name}
+                </Text>
+                <Text size="xs" c="dimmed">
+                  {emp.employee_code}
+                </Text>
+              </Table.Td>
+              {cells.map((c, i) => (
+                <Table.Td key={days[i]} style={{ textAlign: "center" }}>
+                  <CellView
+                    cell={c}
+                    employeeId={emp.employee_id}
+                    workDate={days[i]}
+                    onCellClick={onCellClick}
+                  />
+                </Table.Td>
+              ))}
+            </Table.Tr>
+          ))}
+        </Table.Tbody>
+      </Table>
+    </ScrollArea>
+  );
+}
+=== END FILE: frontend/src/components/AttendanceSheet/MonthlyGrid.tsx ===
+=== FILE: frontend/src/pages/AttendanceSheetPage.test.tsx ===
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MantineProvider } from "@mantine/core";
+import dayjs from "dayjs";
+import { AttendanceSheetPage } from "./AttendanceSheetPage";
+
+function jr(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  if (typeof Request !== "undefined" && input instanceof Request) return input.url;
+  return String(input);
+}
+
+function setupMock(opts: {
+  sheetItems?: unknown[];
+  dailyItems?: unknown[];
+  dayPayload?: unknown;
+  markRefused?: unknown[];
+}): void {
+  global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const url = requestUrl(input);
+    if (url.includes("/api/v1/attendance/sheet")) {
+      return jr({ items: opts.sheetItems ?? [], next_cursor: null });
+    }
+    if (url.includes("/api/v1/attendance/daily")) {
+      return jr({ items: opts.dailyItems ?? [], next_cursor: null });
+    }
+    if (url.includes("/api/v1/attendance/day/")) {
+      return jr(opts.dayPayload ?? {});
+    }
+    if (url.includes("/api/v1/attendance/mark_reviewed")) {
+      return jr({ reviewed_count: 3, refused_days: opts.markRefused ?? [] });
+    }
+    if (
+      url.includes("/api/v1/branches") ||
+      url.includes("/api/v1/sites") ||
+      url.includes("/api/v1/departments")
+    ) {
+      return jr({ items: [], next_cursor: null });
+    }
+    return jr({}, 200);
+  }) as unknown as typeof fetch;
+}
+
+function renderPage() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <MantineProvider>
+      <QueryClientProvider client={client}>
+        <AttendanceSheetPage />
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+}
+
+const TODAY = dayjs().format("YYYY-MM-DD");
+
+const CELL = {
+  work_date: TODAY,
+  status: "worked",
+  worked_minutes: 480,
+  normal_minutes: 480,
+  overtime_minutes: 0,
+  flags: [],
+  open_exception_count: 0,
+  locked: false,
+  reviewed: false,
+};
+const EMPLOYEE = {
+  employee_id: "e1",
+  employee_code: "EMP001",
+  employee_name: "Ada Lovelace",
+  site_id: null,
+  department_id: null,
+  days: [CELL],
+};
+const DAY = {
+  employee_id: "e1",
+  employee_code: "EMP001",
+  employee_name: "Ada Lovelace",
+  work_date: TODAY,
+  status: "worked",
+  first_in: "2025-06-01T08:00:00Z",
+  last_out: "2025-06-01T16:30:00Z",
+  worked_minutes: 480,
+  normal_minutes: 480,
+  overtime_minutes: 0,
+  flags: [],
+  open_exception_count: 0,
+  locked: false,
+  reviewed: false,
+  punches: [
+    {
+      id: "p1",
+      punch_time: "2025-06-01T08:00:00Z",
+      direction: "in",
+      source: "device",
+      confidence: 0.9,
+    },
+    {
+      id: "p2",
+      punch_time: "2025-06-01T16:30:00Z",
+      direction: "out",
+      source: "device",
+      confidence: 0.9,
+    },
+  ],
+  exceptions: [],
+};
+const DAILY_ROW = {
+  employee_id: "e1",
+  employee_code: "EMP001",
+  employee_name: "Ada Lovelace",
+  work_date: TODAY,
+  status: "worked",
+  first_in: "2025-06-01T08:00:00Z",
+  last_out: "2025-06-01T16:30:00Z",
+  worked_minutes: 480,
+  normal_minutes: 480,
+  overtime_minutes: 0,
+  flags: [],
+  open_exception_count: 0,
+  locked: false,
+  reviewed: false,
+};
+
+afterEach(cleanup);
+
+function clickWorkedCell(employeeId = "e1", workDate = TODAY): void {
+  const cell = screen.getByTestId(`cell-${employeeId}-${workDate}`);
+  fireEvent.click(cell);
+}
+
+describe("AttendanceSheetPage monthly view", () => {
+  beforeEach(() => setupMock({ sheetItems: [EMPLOYEE] }));
+
+  it("renders title and employee row", async () => {
+    renderPage();
+    expect(screen.getByText("Attendance")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
+      expect(screen.getByText("EMP001")).toBeInTheDocument();
+    });
+  });
+
+  it("shows empty text when sheet returns no employees", async () => {
+    setupMock({ sheetItems: [] });
+    renderPage();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/no employees match these filters/i),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("renders a status badge for a worked cell", async () => {
+    renderPage();
+    const cell = await screen.findByTestId(`cell-e1-${TODAY}`);
+    expect(within(cell).getByText("worked")).toBeInTheDocument();
+  });
+
+  it("shows an error message when sheet fetch fails", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.includes("/api/v1/attendance/sheet")) {
+        return jr({ error: { code: "boom" } }, 500);
+      }
+      return jr({ items: [], next_cursor: null });
+    }) as unknown as typeof fetch;
+    renderPage();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/could not load the attendance sheet/i),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("opens the day panel on cell click and shows the day summary", async () => {
+    setupMock({ sheetItems: [EMPLOYEE], dayPayload: DAY });
+    renderPage();
+    await screen.findByTestId(`cell-e1-${TODAY}`);
+    clickWorkedCell();
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => {
+      expect(within(dialog).getByText("First in")).toBeInTheDocument();
+      expect(within(dialog).getByText("Last out")).toBeInTheDocument();
+    });
+    expect(dialog.textContent).toMatch(/punches/i);
+  });
+
+  it("day panel never shows an adjustment marker (C2)", async () => {
+    setupMock({ sheetItems: [EMPLOYEE], dayPayload: DAY });
+    renderPage();
+    await screen.findByTestId(`cell-e1-${TODAY}`);
+    clickWorkedCell();
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => {
+      expect(within(dialog).getByText("First in")).toBeInTheDocument();
+    });
+    expect(/adjust/i.test(dialog.textContent ?? "")).toBe(false);
+  });
+});
+
+describe("AttendanceSheetPage daily view", () => {
+  beforeEach(() => setupMock({ dailyItems: [DAILY_ROW] }));
+
+  it("switches to daily view and renders one row per employee", async () => {
+    renderPage();
+    await screen.findByTestId(`cell-e1-${TODAY}`);
+    fireEvent.click(screen.getByText("Daily"));
+    await waitFor(() => {
+      expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
+    });
+  });
+});
+
+describe("AttendanceSheetPage mark reviewed", () => {
+  it("shows refused days table when some days are refused", async () => {
+    setupMock({
+      sheetItems: [EMPLOYEE],
+      markRefused: [
+        {
+          employee_id: "e1",
+          employee_name: "Ada Lovelace",
+          work_date: "2025-06-05",
+          reason: "open_exceptions",
+        },
+      ],
+    });
+    renderPage();
+    await screen.findByTestId(`cell-e1-${TODAY}`);
+    fireEvent.click(
+      screen.getByRole("button", { name: /mark clean days reviewed/i }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    const submitBtn = within(dialog).getByRole("button", {
+      name: /mark clean days reviewed/i,
+    });
+    fireEvent.click(submitBtn);
+    await waitFor(() => {
+      expect(screen.getByText("open_exceptions")).toBeInTheDocument();
+    });
+  });
+});
+=== END FILE: frontend/src/pages/AttendanceSheetPage.test.tsx ===
+# END OF FILE

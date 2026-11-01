@@ -1,0 +1,895 @@
+=== FILE: frontend/src/lib/queryClient.ts ===
+import { QueryClient } from "@tanstack/react-query";
+
+export const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      refetchOnWindowFocus: false,
+      retry: 1,
+    },
+  },
+});
+=== END FILE: frontend/src/lib/queryClient.ts ===
+=== FILE: frontend/src/main.tsx ===
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import { MantineProvider } from "@mantine/core";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { BrowserRouter } from "react-router-dom";
+import "@mantine/core/styles.css";
+import App from "./App";
+import { theme } from "./theme";
+import { queryClient } from "./lib/queryClient";
+
+const rootEl = document.getElementById("root");
+if (!rootEl) throw new Error("root element not found");
+
+createRoot(rootEl).render(
+  <StrictMode>
+    <MantineProvider theme={theme} defaultColorScheme="auto">
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <App />
+        </BrowserRouter>
+      </QueryClientProvider>
+    </MantineProvider>
+  </StrictMode>,
+);
+=== END FILE: frontend/src/main.tsx ===
+=== FILE: frontend/src/auth/useMe.ts ===
+import { useQuery } from "@tanstack/react-query";
+import { wrappedFetch } from "../api/client";
+import { useAuth } from "./AuthContext";
+
+export type Me = {
+  id: string;
+  username: string;
+  role: string;
+  employee_id: string | null;
+  permissions: string[];
+  must_change_password: boolean;
+};
+
+export const meQueryKey = ["me"] as const;
+
+export async function fetchMe(): Promise<Me> {
+  const res = await wrappedFetch(
+    new Request("/api/v1/auth/me", { credentials: "include" }),
+  );
+  if (!res.ok) {
+    throw new Error(`/auth/me failed: ${res.status}`);
+  }
+  return (await res.json()) as Me;
+}
+
+export function useMe() {
+  const { status } = useAuth();
+  return useQuery<Me, Error>({
+    queryKey: meQueryKey,
+    queryFn: fetchMe,
+    enabled: status === "authenticated",
+    staleTime: Infinity,
+    retry: 1,
+  });
+}
+=== END FILE: frontend/src/auth/useMe.ts ===
+=== FILE: frontend/src/auth/AuthContext.tsx ===
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
+import { setAccessToken, setOnUnauthorized } from "../api/client";
+import { queryClient } from "../lib/queryClient";
+import { meQueryKey } from "./useMe";
+import {
+  AuthRequestError,
+  changePasswordRequest,
+  loginRequest,
+  logoutRequest,
+} from "./api";
+
+export type AuthState = {
+  status: "authenticated" | "unauthenticated";
+  loginError: string | null;
+  busy: boolean;
+};
+
+export type AuthContextValue = AuthState & {
+  login: (identifier: string, password: string) => Promise<boolean>;
+  logout: () => Promise<void>;
+  changePassword: (current: string, next: string) => Promise<boolean>;
+};
+
+const AuthContext = createContext<AuthContextValue | null>(null);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [state, setState] = useState<AuthState>({
+    status: "unauthenticated",
+    loginError: null,
+    busy: false,
+  });
+
+  useEffect(() => {
+    setOnUnauthorized(() => {
+      setAccessToken(null);
+      queryClient.clear();
+      setState({
+        status: "unauthenticated",
+        loginError: "Session expired. Please sign in again.",
+        busy: false,
+      });
+    });
+    return () => setOnUnauthorized(null);
+  }, []);
+
+  const login = useCallback(
+    async (identifier: string, password: string): Promise<boolean> => {
+      setState((s) => ({ ...s, busy: true, loginError: null }));
+      try {
+        const result = await loginRequest(identifier, password);
+        setAccessToken(result.accessToken);
+        queryClient.removeQueries({ queryKey: meQueryKey });
+        setState({
+          status: "authenticated",
+          loginError: null,
+          busy: false,
+        });
+        return true;
+      } catch (err) {
+        const message =
+          err instanceof AuthRequestError
+            ? err.apiError.message
+            : "Sign-in failed";
+        setState({
+          status: "unauthenticated",
+          loginError: message,
+          busy: false,
+        });
+        return false;
+      }
+    },
+    [],
+  );
+
+  const logout = useCallback(async (): Promise<void> => {
+    await logoutRequest();
+    setAccessToken(null);
+    queryClient.clear();
+    setState({
+      status: "unauthenticated",
+      loginError: null,
+      busy: false,
+    });
+  }, []);
+
+  const changePassword = useCallback(
+    async (current: string, next: string): Promise<boolean> => {
+      setState((s) => ({ ...s, busy: true, loginError: null }));
+      try {
+        await changePasswordRequest({
+          currentPassword: current,
+          newPassword: next,
+        });
+        await queryClient.invalidateQueries({ queryKey: meQueryKey });
+        setState((s) => ({ ...s, busy: false }));
+        return true;
+      } catch (err) {
+        const message =
+          err instanceof AuthRequestError
+            ? err.apiError.message
+            : "Change password failed";
+        setState((s) => ({ ...s, busy: false, loginError: message }));
+        return false;
+      }
+    },
+    [],
+  );
+
+  return (
+    <AuthContext.Provider value={{ ...state, login, logout, changePassword }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used inside <AuthProvider>");
+  return ctx;
+}
+=== END FILE: frontend/src/auth/AuthContext.tsx ===
+=== FILE: frontend/src/auth/ProtectedRoute.tsx ===
+import type { ReactNode } from "react";
+import { Navigate, useLocation } from "react-router-dom";
+import { Center, Loader } from "@mantine/core";
+import { useAuth } from "./AuthContext";
+import { useMe } from "./useMe";
+
+export function ProtectedRoute({ children }: { children: ReactNode }) {
+  const { status } = useAuth();
+  const me = useMe();
+  const location = useLocation();
+
+  if (status === "unauthenticated") {
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  }
+  if (me.isLoading) {
+    return (
+      <Center h="50vh">
+        <Loader />
+      </Center>
+    );
+  }
+  if (me.isError || !me.data) {
+    return <Navigate to="/login" replace />;
+  }
+  if (
+    me.data.must_change_password &&
+    location.pathname !== "/change-password"
+  ) {
+    return <Navigate to="/change-password" replace />;
+  }
+  return <>{children}</>;
+}
+=== END FILE: frontend/src/auth/ProtectedRoute.tsx ===
+=== FILE: frontend/src/shell/nav.ts ===
+export type NavItem = {
+  label: string;
+  to: string;
+};
+
+const PERMISSION_NAV: Array<{ permission: string; item: NavItem }> = [
+  { permission: "attendance_view", item: { label: "Attendance", to: "/attendance" } },
+  { permission: "exception_resolve", item: { label: "Exceptions", to: "/attendance/exceptions" } },
+  { permission: "attendance_adjust", item: { label: "Adjustments", to: "/attendance/adjustments" } },
+  { permission: "employee_crud", item: { label: "Employees", to: "/employees" } },
+  { permission: "org_manage", item: { label: "Setup", to: "/setup" } },
+  { permission: "payroll_preview", item: { label: "Pay periods", to: "/payroll/pay-periods" } },
+  { permission: "pay_rate_view", item: { label: "Change requests", to: "/payroll/change-requests" } },
+  { permission: "audit_view", item: { label: "Audit log", to: "/audit-log" } },
+];
+
+export function buildNav(permissions: string[]): NavItem[] {
+  const set = new Set(permissions);
+  return PERMISSION_NAV.filter((entry) => set.has(entry.permission)).map(
+    (entry) => entry.item,
+  );
+}
+=== END FILE: frontend/src/shell/nav.ts ===
+=== FILE: frontend/src/shell/nav.test.ts ===
+import { describe, expect, it } from "vitest";
+import { buildNav } from "./nav";
+
+describe("buildNav", () => {
+  it("employee sees only Attendance", () => {
+    const items = buildNav(["self_view", "self_submit", "attendance_view", "org_view"]);
+    expect(items.map((i) => i.to)).toEqual(["/attendance"]);
+  });
+
+  it("manager sees Attendance and Exceptions", () => {
+    const items = buildNav(["attendance_view", "exception_resolve", "attendance_adjust"]);
+    expect(items.map((i) => i.to)).toEqual([
+      "/attendance",
+      "/attendance/exceptions",
+      "/attendance/adjustments",
+    ]);
+  });
+
+  it("hr sees admin-ish nav plus change requests", () => {
+    const items = buildNav([
+      "attendance_view",
+      "exception_resolve",
+      "attendance_adjust",
+      "employee_crud",
+      "org_manage",
+      "payroll_preview",
+      "pay_rate_view",
+    ]);
+    expect(items.map((i) => i.to)).toEqual([
+      "/attendance",
+      "/attendance/exceptions",
+      "/attendance/adjustments",
+      "/employees",
+      "/setup",
+      "/payroll/pay-periods",
+      "/payroll/change-requests",
+    ]);
+  });
+
+  it("payroll_admin gets audit log", () => {
+    const items = buildNav([
+      "payroll_preview",
+      "audit_view",
+      "employee_crud",
+      "org_manage",
+    ]);
+    const paths = items.map((i) => i.to);
+    expect(paths).toContain("/audit-log");
+    expect(paths).toContain("/employees");
+    expect(paths).toContain("/setup");
+  });
+
+  it("auditor sees only audit log", () => {
+    const items = buildNav(["audit_view", "org_view", "payslip_view", "pay_rate_view"]);
+    expect(items.map((i) => i.to)).toEqual(["/audit-log"]);
+  });
+});
+=== END FILE: frontend/src/shell/nav.test.ts ===
+=== FILE: frontend/src/shell/AppShell.tsx ===
+import { Link as RouterLink, Outlet, useLocation } from "react-router-dom";
+import {
+  Anchor,
+  AppShell as MantineAppShell,
+  Button,
+  Group,
+  Menu,
+  Text,
+} from "@mantine/core";
+import { useAuth } from "../auth/AuthContext";
+import { useMe } from "../auth/useMe";
+import { buildNav } from "./nav";
+import { strings } from "../lib/strings";
+
+export function AppShell() {
+  const { logout } = useAuth();
+  const me = useMe();
+  const location = useLocation();
+  const nav = buildNav(me.data?.permissions ?? []);
+
+  return (
+    <MantineAppShell header={{ height: 56 }} padding="md">
+      <MantineAppShell.Header>
+        <Group h="100%" px="md" justify="space-between" wrap="nowrap">
+          <Group gap="md" wrap="nowrap">
+            <Anchor component={RouterLink} to="/" underline="never">
+              <Text fw={700}>{strings.appName}</Text>
+            </Anchor>
+            <Group gap="sm" wrap="wrap">
+              {nav.map((item) => {
+                const active = location.pathname.startsWith(item.to);
+                return (
+                  <Anchor
+                    key={item.to}
+                    component={RouterLink}
+                    to={item.to}
+                    underline="never"
+                    fw={active ? 600 : 400}
+                  >
+                    {item.label}
+                  </Anchor>
+                );
+              })}
+            </Group>
+          </Group>
+          <Group gap="sm" wrap="nowrap">
+            <Menu position="bottom-end" withinPortal>
+              <Menu.Target>
+                <Button variant="light" size="xs">
+                  {me.data?.username ?? "…"}
+                </Button>
+              </Menu.Target>
+              <Menu.Dropdown>
+                <Menu.Label>{strings.shell.roleLabel(me.data?.role ?? "")}</Menu.Label>
+                <Menu.Item onClick={() => void logout()}>
+                  {strings.shell.logout}
+                </Menu.Item>
+              </Menu.Dropdown>
+            </Menu>
+          </Group>
+        </Group>
+      </MantineAppShell.Header>
+      <MantineAppShell.Main>
+        <Outlet />
+      </MantineAppShell.Main>
+    </MantineAppShell>
+  );
+}
+=== END FILE: frontend/src/shell/AppShell.tsx ===
+=== FILE: frontend/src/pages/HomePage.tsx ===
+import { Link as RouterLink } from "react-router-dom";
+import { Anchor, Card, Group, SimpleGrid, Stack, Text, Title } from "@mantine/core";
+import { useMe } from "../auth/useMe";
+import { strings } from "../lib/strings";
+
+type HomeCard = { title: string; body: string; cta: string; to: string };
+
+function cardsFor(permissions: string[]): HomeCard[] {
+  const set = new Set(permissions);
+  const out: HomeCard[] = [];
+  if (set.has("attendance_view")) {
+    out.push({
+      title: strings.home.cards.attendance.title,
+      body: strings.home.cards.attendance.body,
+      cta: strings.home.cards.attendance.cta,
+      to: "/attendance",
+    });
+  }
+  if (set.has("exception_resolve")) {
+    out.push({
+      title: strings.home.cards.exceptions.title,
+      body: strings.home.cards.exceptions.body,
+      cta: strings.home.cards.exceptions.cta,
+      to: "/attendance/exceptions",
+    });
+  }
+  if (set.has("employee_crud")) {
+    out.push({
+      title: strings.home.cards.employees.title,
+      body: strings.home.cards.employees.body,
+      cta: strings.home.cards.employees.cta,
+      to: "/employees",
+    });
+  }
+  if (set.has("payroll_preview")) {
+    out.push({
+      title: strings.home.cards.payPeriods.title,
+      body: strings.home.cards.payPeriods.body,
+      cta: strings.home.cards.payPeriods.cta,
+      to: "/payroll/pay-periods",
+    });
+  }
+  if (set.has("pay_rate_view")) {
+    out.push({
+      title: strings.home.cards.changeRequests.title,
+      body: strings.home.cards.changeRequests.body,
+      cta: strings.home.cards.changeRequests.cta,
+      to: "/payroll/change-requests",
+    });
+  }
+  if (set.has("audit_view")) {
+    out.push({
+      title: strings.home.cards.auditLog.title,
+      body: strings.home.cards.auditLog.body,
+      cta: strings.home.cards.auditLog.cta,
+      to: "/audit-log",
+    });
+  }
+  if (set.has("org_manage")) {
+    out.push({
+      title: strings.home.cards.setup.title,
+      body: strings.home.cards.setup.body,
+      cta: strings.home.cards.setup.cta,
+      to: "/setup",
+    });
+  }
+  if (out.length === 0) {
+    out.push({
+      title: strings.home.cards.payslips.title,
+      body: strings.home.cards.payslips.body,
+      cta: strings.home.cards.payslips.cta,
+      to: "/payslips",
+    });
+  }
+  return out;
+}
+
+export function HomePage() {
+  const me = useMe();
+  const cards = cardsFor(me.data?.permissions ?? []);
+
+  return (
+    <Stack gap="lg">
+      <Stack gap={4}>
+        <Title order={2}>{strings.home.welcome(me.data?.username ?? "")}</Title>
+        <Text c="dimmed" size="sm">
+          {strings.home.roleLabel(me.data?.role ?? "")}
+        </Text>
+      </Stack>
+      <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md">
+        {cards.map((card) => (
+          <Card key={card.to} withBorder padding="md">
+            <Stack gap="sm">
+              <Title order={4}>{card.title}</Title>
+              <Text size="sm">{card.body}</Text>
+              <Group justify="flex-end">
+                <Anchor component={RouterLink} to={card.to} size="sm">
+                  {card.cta}
+                </Anchor>
+              </Group>
+            </Stack>
+          </Card>
+        ))}
+      </SimpleGrid>
+    </Stack>
+  );
+}
+=== END FILE: frontend/src/pages/HomePage.tsx ===
+=== FILE: frontend/src/pages/PlaceholderPage.tsx ===
+import { Card, Stack, Text, Title } from "@mantine/core";
+
+export function PlaceholderPage({
+  title,
+  phase,
+}: {
+  title: string;
+  phase: string;
+}) {
+  return (
+    <Card withBorder padding="lg">
+      <Stack gap="sm">
+        <Title order={3}>{title}</Title>
+        <Text c="dimmed">{phase}</Text>
+      </Stack>
+    </Card>
+  );
+}
+=== END FILE: frontend/src/pages/PlaceholderPage.tsx ===
+=== FILE: frontend/src/pages/LoginPage.tsx ===
+import { useState } from "react";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
+import {
+  Alert,
+  Button,
+  Container,
+  PasswordInput,
+  Stack,
+  TextInput,
+  Title,
+} from "@mantine/core";
+import { useAuth } from "../auth/AuthContext";
+import { strings } from "../lib/strings";
+import { getTenantSlug, setTenantSlug } from "../api/tenant";
+
+export function LoginPage() {
+  const { status, loginError, busy, login } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation() as { state?: { from?: string } };
+  const [identifier, setIdentifier] = useState("");
+  const [password, setPassword] = useState("");
+  const [tenant, setTenant] = useState(getTenantSlug() ?? "");
+  const isDev = import.meta.env.DEV;
+
+  if (status === "authenticated") {
+    return <Navigate to={location.state?.from ?? "/"} replace />;
+  }
+
+  const onSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isDev) setTenantSlug(tenant.trim() || null);
+    const ok = await login(identifier.trim(), password);
+    if (ok) navigate(location.state?.from ?? "/", { replace: true });
+  };
+
+  return (
+    <Container size="xs" py="xl">
+      <form onSubmit={onSubmit}>
+        <Stack>
+          <Title order={2}>{strings.login.title}</Title>
+          {loginError ? <Alert color="red">{loginError}</Alert> : null}
+          {isDev ? (
+            <TextInput
+              label={strings.login.tenantLabel}
+              value={tenant}
+              onChange={(e) => setTenant(e.currentTarget.value)}
+              autoComplete="off"
+            />
+          ) : null}
+          <TextInput
+            label={strings.login.identifierLabel}
+            value={identifier}
+            onChange={(e) => setIdentifier(e.currentTarget.value)}
+            required
+            autoComplete="username"
+          />
+          <PasswordInput
+            label={strings.login.passwordLabel}
+            value={password}
+            onChange={(e) => setPassword(e.currentTarget.value)}
+            required
+            autoComplete="current-password"
+          />
+          <Button type="submit" loading={busy}>
+            {strings.login.submit}
+          </Button>
+        </Stack>
+      </form>
+    </Container>
+  );
+}
+=== END FILE: frontend/src/pages/LoginPage.tsx ===
+=== FILE: frontend/src/pages/ForcePasswordChangePage.tsx ===
+import { useState } from "react";
+import { Navigate, useNavigate } from "react-router-dom";
+import {
+  Alert,
+  Button,
+  Center,
+  Container,
+  Loader,
+  PasswordInput,
+  Stack,
+  Title,
+} from "@mantine/core";
+import { useAuth } from "../auth/AuthContext";
+import { useMe } from "../auth/useMe";
+import { strings } from "../lib/strings";
+
+export function ForcePasswordChangePage() {
+  const { loginError, busy, changePassword } = useAuth();
+  const me = useMe();
+  const navigate = useNavigate();
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  if (me.isLoading) {
+    return (
+      <Center h="50vh">
+        <Loader />
+      </Center>
+    );
+  }
+  if (me.isError || !me.data) {
+    return <Navigate to="/login" replace />;
+  }
+  if (!me.data.must_change_password) {
+    return <Navigate to="/" replace />;
+  }
+
+  const onSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLocalError(null);
+    if (next.length < 8) {
+      setLocalError(strings.changePassword.tooShort);
+      return;
+    }
+    if (next !== confirm) {
+      setLocalError(strings.changePassword.mismatch);
+      return;
+    }
+    const ok = await changePassword(current, next);
+    if (ok) navigate("/", { replace: true });
+  };
+
+  return (
+    <Container size="xs" py="xl">
+      <form onSubmit={onSubmit}>
+        <Stack>
+          <Title order={2}>{strings.changePassword.title}</Title>
+          <Alert color="blue">{strings.changePassword.intro}</Alert>
+          {loginError ? <Alert color="red">{loginError}</Alert> : null}
+          {localError ? <Alert color="red">{localError}</Alert> : null}
+          <PasswordInput
+            label={strings.changePassword.currentLabel}
+            value={current}
+            onChange={(e) => setCurrent(e.currentTarget.value)}
+            required
+            autoComplete="current-password"
+          />
+          <PasswordInput
+            label={strings.changePassword.newLabel}
+            value={next}
+            onChange={(e) => setNext(e.currentTarget.value)}
+            required
+            autoComplete="new-password"
+          />
+          <PasswordInput
+            label={strings.changePassword.confirmLabel}
+            value={confirm}
+            onChange={(e) => setConfirm(e.currentTarget.value)}
+            required
+            autoComplete="new-password"
+          />
+          <Button type="submit" loading={busy}>
+            {strings.changePassword.submit}
+          </Button>
+        </Stack>
+      </form>
+    </Container>
+  );
+}
+=== END FILE: frontend/src/pages/ForcePasswordChangePage.tsx ===
+=== FILE: frontend/src/lib/strings.ts ===
+export const strings = {
+  appName: "Payroll",
+  genericError: "Something went wrong. Please try again.",
+  login: {
+    title: "Sign in",
+    identifierLabel: "Username or email",
+    passwordLabel: "Password",
+    tenantLabel: "Tenant slug (development only)",
+    submit: "Sign in",
+    error: "Sign-in failed. Check your details.",
+  },
+  changePassword: {
+    title: "Change your password",
+    intro: "You must set a new password before you can continue.",
+    currentLabel: "Current password",
+    newLabel: "New password",
+    confirmLabel: "Confirm new password",
+    submit: "Change password",
+    tooShort: "Password must be at least 8 characters.",
+    mismatch: "Passwords do not match.",
+  },
+  shell: {
+    logout: "Sign out",
+    roleLabel: (role: string) => `Role: ${role}`,
+  },
+  home: {
+    welcome: (name: string) => (name ? `Welcome, ${name}.` : "Welcome."),
+    roleLabel: (role: string) => (role ? `Signed in as ${role}.` : ""),
+    cards: {
+      attendance: {
+        title: "Attendance",
+        body: "Open the monthly sheet and the daily list.",
+        cta: "View attendance",
+      },
+      exceptions: {
+        title: "Exceptions",
+        body: "Review and resolve open attendance exceptions.",
+        cta: "Open queue",
+      },
+      employees: {
+        title: "Employees",
+        body: "Browse, edit, and import employees.",
+        cta: "View employees",
+      },
+      payPeriods: {
+        title: "Pay periods",
+        body: "Preview and finalise payroll.",
+        cta: "View periods",
+      },
+      changeRequests: {
+        title: "Change requests",
+        body: "Approve or reject pending changes.",
+        cta: "Open inbox",
+      },
+      auditLog: {
+        title: "Audit log",
+        body: "Read-only history of changes.",
+        cta: "Open log",
+      },
+      setup: {
+        title: "Setup",
+        body: "Company, branches, sites, departments.",
+        cta: "Open setup",
+      },
+      payslips: {
+        title: "My payslips",
+        body: "View and download your payslips.",
+        cta: "View payslips",
+      },
+    },
+  },
+} as const;
+=== END FILE: frontend/src/lib/strings.ts ===
+=== FILE: frontend/src/App.tsx ===
+import { Navigate, Route, Routes } from "react-router-dom";
+import { AuthProvider } from "./auth/AuthContext";
+import { ProtectedRoute } from "./auth/ProtectedRoute";
+import { AppShell } from "./shell/AppShell";
+import { ForcePasswordChangePage } from "./pages/ForcePasswordChangePage";
+import { HomePage } from "./pages/HomePage";
+import { LoginPage } from "./pages/LoginPage";
+import { PlaceholderPage } from "./pages/PlaceholderPage";
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="/change-password"
+          element={
+            <ProtectedRoute>
+              <ForcePasswordChangePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <AppShell />
+            </ProtectedRoute>
+          }
+        >
+          <Route index element={<HomePage />} />
+          <Route
+            path="attendance"
+            element={<PlaceholderPage title="Attendance sheet" phase="F-2" />}
+          />
+          <Route
+            path="attendance/exceptions"
+            element={<PlaceholderPage title="Exceptions" phase="F-3" />}
+          />
+          <Route
+            path="attendance/adjustments"
+            element={<PlaceholderPage title="Adjustments" phase="F-3" />}
+          />
+          <Route
+            path="employees"
+            element={<PlaceholderPage title="Employees" phase="F-4" />}
+          />
+          <Route
+            path="payroll/pay-periods"
+            element={<PlaceholderPage title="Pay periods" phase="F-7" />}
+          />
+          <Route
+            path="payroll/change-requests"
+            element={<PlaceholderPage title="Change requests" phase="F-6" />}
+          />
+          <Route
+            path="audit-log"
+            element={<PlaceholderPage title="Audit log" phase="F-8" />}
+          />
+          <Route
+            path="setup"
+            element={<PlaceholderPage title="Setup" phase="F-5" />}
+          />
+          <Route
+            path="payslips"
+            element={<PlaceholderPage title="My payslips" phase="F-7" />}
+          />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </AuthProvider>
+  );
+}
+=== END FILE: frontend/src/App.tsx ===
+=== FILE: docs/FRONTEND_STATE.md ===
+# Frontend State
+
+Read this first when opening a new chat. Updated at the end of each phase.
+
+## Phase
+
+F-1b — shell, auth/me integration, role-aware nav, landing cards. Login flow now correctly reaches /change-password when the backend flags must_change_password on /auth/me (login response does not carry the flag).
+
+## Bundles done
+
+F-0a (tooling), F-0b + f002-fix (scaffold, typed client, error mapper, theme, strings), F-1a + f003-fix (login/auth/password), B-1 + B-1-fix-2 (backend GET /auth/me), F-1b (this bundle).
+
+## Bundle plan (14 frontend bundles remaining)
+
+F-0a ✓, F-0b ✓, F-1a ✓, F-1b ✓ | F-2a, F-2b | F-3a, F-3b | F-4a, F-4b | F-5a, F-5b | F-6 | F-8 | F-7a, F-7b (waits for B-4).
+
+## Backend requests
+
+| # | Request | Blocks | Status |
+|---|---|---|---|
+| B-1 | GET /auth/me returning id, username, role, employee_id, permissions[], must_change_password. | F-1b | DELIVERED |
+| B-2 | Demo seed via real engine, tracked at backend/app/seed/demo_seed.py, --reset/--keep, refuse in prod, fictional SA names, real exception types only, docs/SEED.md. | Demo data for F-2..F-4 | PENDING |
+| B-3a | GET /payroll/pay-periods/{id}/preview/{employee_id}. | F-7b (tab hidden) | PENDING |
+| B-3b | Own-payslips endpoint for employee role via SELF_VIEW. | F-7b | PENDING |
+| B-4 | Attendance-to-earnings. | F-7 fully | PENDING |
+
+## Important contracts
+
+- Login response: `{access_token, refresh_token, token_type, expires_in}`. **No `must_change_password`**. UI relies on `/auth/me` for role, permissions, must_change_password.
+- `/auth/me` response: `{id, username, role, employee_id, permissions[], must_change_password}`. Permissions from the live ROLE_PERMISSIONS matrix.
+- Usernames: `normalise_username` strips separators when a digit is present (mobile heuristic). Use usernames without digit+separator mixes (`admin`, `paone`, `hrself`). `pa-1` becomes `pa1`.
+- Refresh: uses `csrf_token` cookie and a `csrf_protection` dependency. **Client currently does NOT send the CSRF header.** Refresh may 403 until the client reads the cookie and echoes it. To verify at F-2 setup or earlier if login-expiry is tested.
+- `X-Tenant-Slug` sent on login, refresh, logout, me (client.ts handles).
+
+## Verified gaps
+
+Only B-2, B-3a, B-3b, B-4 remain. Refresh CSRF header is a known under-implementation (client.ts, FRONTEND_STATE above).
+
+## To verify at relevant phase
+
+CSRF header name and source; GET /attendance/day/{employee_id}/{work_date}; GET /punches; nine audit filters; two-step import token; device api_key in 201 only; dry-run token TTL; row_version in each PATCH-able GET.
+
+## Decisions
+
+- Role gating: driven by `me.permissions` (B-1) only. Never hard-code.
+- Placeholder pages exist for every nav link so the shell navigates without 404. Each placeholder names its target phase.
+- Landing cards derived from permissions; no live counts yet. Counts land in F-2/F-3 once those pages fetch and cache the lists.
+- Role-aware nav filtered by permission (see `shell/nav.ts`), not by role name.
+- Preview detail: hidden until B-3a.
+- Import wizard: two steps.
+- Sheet status filter: employee-status + attendance-status chip (client-side post-filter).
+- Version pinning: caret ranges; package-lock.json is the real pin.
+
+## Next step
+
+F-2a (attendance sheet filters + monthly grid). Requires B-2 (demo seed) for realistic data to render against. If B-2 has not landed, F-2a is still deliverable (screens render empty and error states), but the demo cannot be exercised. Ship F-2a now, plan B-2 for after.
+=== END FILE: docs/FRONTEND_STATE.md ===
+# END OF FILE

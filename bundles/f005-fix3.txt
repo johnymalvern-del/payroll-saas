@@ -1,0 +1,268 @@
+=== FILE: frontend/src/api/attendance.ts ===
+import { wrappedFetch } from "./client";
+
+export type SheetCell = {
+  work_date: string;
+  status: string | null;
+  worked_minutes: number | null;
+  normal_minutes: number | null;
+  overtime_minutes: number | null;
+  flags: string[];
+  open_exception_count: number;
+  locked: boolean;
+  reviewed: boolean;
+};
+
+export type SheetEmployee = {
+  employee_id: string;
+  employee_code: string;
+  employee_name: string;
+  site_id: string | null;
+  department_id: string | null;
+  days: SheetCell[];
+};
+
+export type SheetOut = {
+  items: SheetEmployee[];
+  next_cursor: string | null;
+  total?: number | null;
+};
+
+export type Ref = { id: string; name: string };
+
+function warnShapeMismatch(data: unknown): void {
+  if (!data || typeof data !== "object") {
+    console.warn("[attendance] sheet response is not an object", data);
+    return;
+  }
+  const obj = data as Record<string, unknown>;
+  if (!Array.isArray(obj.items)) {
+    console.warn("[attendance] sheet response missing items array", Object.keys(obj));
+    return;
+  }
+  const emp = obj.items[0];
+  if (!emp || typeof emp !== "object") return;
+  const wantEmp = ["employee_id", "employee_code", "employee_name", "days"];
+  const missEmp = wantEmp.filter((k) => !(k in (emp as Record<string, unknown>)));
+  if (missEmp.length > 0) {
+    console.warn(
+      "[attendance] sheet employee missing keys:",
+      missEmp,
+      "got:",
+      Object.keys(emp as Record<string, unknown>),
+    );
+  }
+  const days = (emp as Record<string, unknown>).days;
+  if (Array.isArray(days) && days.length > 0) {
+    const c = days[0];
+    if (c && typeof c === "object") {
+      const wantCell = [
+        "work_date",
+        "status",
+        "worked_minutes",
+        "flags",
+        "open_exception_count",
+        "locked",
+        "reviewed",
+      ];
+      const missCell = wantCell.filter((k) => !(k in (c as Record<string, unknown>)));
+      if (missCell.length > 0) {
+        console.warn(
+          "[attendance] sheet cell missing keys:",
+          missCell,
+          "got:",
+          Object.keys(c as Record<string, unknown>),
+        );
+      }
+    }
+  }
+}
+
+function normaliseSheetOut(data: unknown): SheetOut {
+  const obj = (data ?? {}) as Record<string, unknown>;
+  const items = Array.isArray(obj.items) ? (obj.items as SheetEmployee[]) : [];
+  const next =
+    typeof obj.next_cursor === "string" ? obj.next_cursor : null;
+  const total = typeof obj.total === "number" ? obj.total : null;
+  return { items, next_cursor: next, total };
+}
+
+export async function fetchSheet(params: {
+  fromDate: string;
+  toDate: string;
+  siteId?: string | null;
+  branchId?: string | null;
+  departmentId?: string | null;
+  includeTerminated?: boolean;
+  limit?: number;
+  cursor?: string | null;
+}): Promise<SheetOut> {
+  const qs = new URLSearchParams();
+  qs.set("from_date", params.fromDate);
+  qs.set("to_date", params.toDate);
+  if (params.siteId) qs.set("site_id", params.siteId);
+  if (params.branchId) qs.set("branch_id", params.branchId);
+  if (params.departmentId) qs.set("department_id", params.departmentId);
+  if (params.includeTerminated) qs.set("include_terminated", "true");
+  qs.set("limit", String(params.limit ?? 50));
+  if (params.cursor) qs.set("cursor", params.cursor);
+  const res = await wrappedFetch(
+    new Request(`/api/v1/attendance/sheet?${qs.toString()}`, {
+      credentials: "include",
+    }),
+  );
+  if (!res.ok) {
+    throw new Error(`sheet fetch failed: ${res.status}`);
+  }
+  const data = await res.json();
+  warnShapeMismatch(data);
+  return normaliseSheetOut(data);
+}
+
+async function fetchRefs(path: string): Promise<Ref[]> {
+  const res = await wrappedFetch(
+    new Request(`/api/v1${path}?limit=500`, { credentials: "include" }),
+  );
+  if (!res.ok) return [];
+  const body = (await res.json().catch(() => ({}))) as { items?: unknown };
+  return Array.isArray(body.items) ? (body.items as Ref[]) : [];
+}
+
+export function fetchBranches(): Promise<Ref[]> {
+  return fetchRefs("/branches");
+}
+
+export function fetchSites(): Promise<Ref[]> {
+  return fetchRefs("/sites");
+}
+
+export function fetchDepartments(): Promise<Ref[]> {
+  return fetchRefs("/departments");
+}
+=== END FILE: frontend/src/api/attendance.ts ===
+=== FILE: frontend/src/pages/AttendanceSheetPage.test.tsx ===
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MantineProvider } from "@mantine/core";
+import { AttendanceSheetPage } from "./AttendanceSheetPage";
+
+function jr(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+// wrappedFetch calls fetch(new Request(url, {headers})). The mock must read
+// input.url (Request) or input (string), never input.toString() (which yields
+// "[object Request]").
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    return input.url;
+  }
+  return String(input);
+}
+
+function setupMock(sheetItems: unknown[]): void {
+  global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const url = requestUrl(input);
+    if (url.includes("/api/v1/attendance/sheet")) {
+      return jr({ items: sheetItems, next_cursor: null });
+    }
+    if (
+      url.includes("/api/v1/branches") ||
+      url.includes("/api/v1/sites") ||
+      url.includes("/api/v1/departments")
+    ) {
+      return jr({ items: [], next_cursor: null });
+    }
+    return jr({}, 200);
+  }) as unknown as typeof fetch;
+}
+
+function renderPage() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <MantineProvider>
+      <QueryClientProvider client={client}>
+        <AttendanceSheetPage />
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+}
+
+const SAMPLE_CELL = {
+  work_date: "2025-06-01",
+  status: "worked",
+  worked_minutes: 480,
+  normal_minutes: 480,
+  overtime_minutes: 0,
+  flags: [],
+  open_exception_count: 0,
+  locked: false,
+  reviewed: false,
+};
+
+const SAMPLE_EMPLOYEE = {
+  employee_id: "e1",
+  employee_code: "EMP001",
+  employee_name: "Ada Lovelace",
+  site_id: null,
+  department_id: null,
+  days: [SAMPLE_CELL],
+};
+
+describe("AttendanceSheetPage", () => {
+  beforeEach(() => {
+    setupMock([SAMPLE_EMPLOYEE]);
+  });
+
+  it("renders the title and employee row from the sheet", async () => {
+    renderPage();
+    expect(screen.getByText("Attendance")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
+      expect(screen.getByText("EMP001")).toBeInTheDocument();
+    });
+  });
+
+  it("shows empty text when sheet returns no employees", async () => {
+    setupMock([]);
+    renderPage();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/no employees match these filters/i),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("renders a status badge for a worked cell", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("worked")).toBeInTheDocument();
+    });
+  });
+
+  it("shows an error message when sheet fetch fails", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.includes("/api/v1/attendance/sheet")) {
+        return jr({ error: { code: "boom" } }, 500);
+      }
+      return jr({ items: [], next_cursor: null });
+    }) as unknown as typeof fetch;
+    renderPage();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/could not load the attendance sheet/i),
+      ).toBeInTheDocument();
+    });
+  });
+});
+=== END FILE: frontend/src/pages/AttendanceSheetPage.test.tsx ===
+# END OF FILE

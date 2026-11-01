@@ -1,61 +1,70 @@
-# Frontend State
+# Frontend state
 
-Read this first when opening a new chat. Updated at the end of each phase.
+## Exceptions queue (F-3a)
 
-## Phase
+### Type filter
+- Supported exception types (exact set):
+  `missing_out`, `missing_in`, `no_shift_match`, `low_confidence`,
+  `absent_expected`, `overtime_unapproved`, `too_long`, `duplicate`,
+  `device_clock_gap`, `employee_query`.
+- Labels live in `src/lib/strings.ts` under `exceptionTypes`.
+- "missing_punch" removed everywhere; do not reintroduce.
 
-F-2 complete (F-2a sheet + F-2b day panel/daily/mark-reviewed, all green: 8 tests in `AttendanceSheetPage.test.tsx`). Tool gap closed in f007: `--also` files are now inside the frontend tsc/vitest gate scope, so a source-only bundle still exercises the corresponding test file. Next: F-3a.
+### Client-side type filtering
+- Filtering applied on the client over loaded items; server supports only
+  single-type today. Multi-type filter note shown next to the filter.
 
-## Bundles done
+### Time handling
+- All times constructed and rendered in the **site** timezone, never the
+  browser's. `SITE_TIMEZONE = "Africa/Johannesburg"` (pending B-5).
+- `buildShiftTimes` treats end earlier than start as next calendar day; the
+  AdjustmentForm shows a "+1 day" indicator.
+- `toTimeInput` formats ISO -> "HH:mm" in SITE_TIMEZONE (form defaults and
+  suggested summary).
 
-F-0a, F-0b, F-1a, F-1b (+ fixes), F-2a (+ fixes f005-fix..f005-fix4), F-2b (+ fixes f006-fix..f006-fix6), f007 (this bundle, tool fix).
+### Apply suggestion / resolve
+- Confirmation modal before mutation.
+- Page-level dismissible `Alert` above the list shows mapped errors
+  (`day_locked`, `cannot_adjust_own`, `record_changed`, …) for **every**
+  resolve path.
+- Busy tracked per-card via `resolvingId`; only the card being resolved is
+  loading/disabled.
+- On success invalidates `['exceptions']`.
+- **B-7 (gap)**: attendance sheet and day-panel invalidation not wired — their
+  `queryKey`s live in f007 / AttendanceSheetPage and are not in this bundle.
+- **B-8 (gap)**: `ResolveModal` not in this bundle; its resolve path must also
+  feed page-level errors and respect per-card busy.
 
-## Bundle plan (11 frontend bundles remaining)
+### Employees
+- `fetchEmployees` no longer swallows errors; rejects so callers can show an
+  error state with retry. Follows `next_cursor` until exhausted (page 500).
 
-F-3a, F-3b | F-4a, F-4b | F-5a, F-5b | F-6 | F-8 | F-7a, F-7b (waits for B-4).
+### Pagination
+- `fetchExceptionsPage(cursor)` returns `{ items, next_cursor }`; list uses
+  `useInfiniteQuery` + "Load more" appends items.
+
+### Misc
+- Empty state is status-neutral: "No exceptions match the current filters."
+- Reason code length validated to max 40 in `AdjustmentForm`.
+- `strings.resolve.reasonCodeHint` is neutral ("Describe the reason for this
+  change.") — no invented reason codes.
+
+## Pending test fixes (path-blocked)
+Two tests in an existing test file (not present in this bundle) fail — test-code
+only, not app bugs. Provide the path and the file will be delivered corrected.
+
+1. `"renders the title, exception row, and employee name"`
+   - `getByText(/missing out/i)` matches 2 elements (badge + span).
+   - Fix: `within(screen.getByTestId("exception-exc1")).getByText(/missing out/i)`
+     (or use dedicated testids on badge/span).
+2. `"adjustment form rejects 'other' reason with a short note"`
+   - `/at least 10 characters/i` matches both the error `Alert` and the
+     `Textarea` hint.
+   - Fix: `within(dialog).getByRole("alert")` (scope to the alert only).
+
+Review every other `getByText` in that file for badge-label / hint / error-text
+ambiguity at the same time.
 
 ## Backend requests
-
-| # | Request | Blocks | Status |
-|---|---|---|---|
-| B-1 | GET /auth/me | — | DELIVERED |
-| B-2 | Demo seed via real engine | Demo data | PENDING |
-| B-3a | GET /payroll/pay-periods/{id}/preview/{employee_id} | F-7b | PENDING |
-| B-3b | Own-payslips endpoint | F-7b | PENDING |
-| B-4 | Attendance-to-earnings | F-7 | PENDING |
-
-## Important contracts
-
-- `/auth/login` returns `{access_token, refresh_token, token_type, expires_in}` only. UI uses `/auth/me` for role + permissions + must_change_password.
-- `/auth/me` returns `{id, username, role, employee_id, permissions[], must_change_password}`.
-- Usernames: `normalise_username` strips separators when a digit is present. `pa-1` → `pa1`.
-- Refresh: CSRF header still missing on client. Flagged since F-1a.
-- **`new Request(relativeUrl)` throws in jsdom/Node.** All manual requests go through `absoluteUrl()` in `client.ts`.
-- Attendance sheet/daily/day/mark_reviewed field shapes normalised defensively in `attendance.ts` (`normaliseSheetOut`, `normaliseDailyOut`, `normaliseDayOut`, `warn`).
-- **Clickable grid cell has `data-testid={`cell-${employeeId}-${workDate}`}`.** Tests must use that testid. Never DOM-traverse from a Badge — Mantine Tooltip wrapping makes that unreliable.
-- Sheet tests must derive fixture dates from `dayjs()` (`TODAY`) so the cell falls in the default visible month.
-- Mark-reviewed flow is page button → modal opens → modal submit. Two clicks required.
-- Mantine Tooltip must wrap the clickable div (not be its child) — see f006-fix5 for why.
-
-## Verified gaps
-
-Only B-2, B-3a, B-3b, B-4 remain.
-
-## Decisions
-
-- Grid cell click targets `data-testid` wrapper — future Badge/Tooltip composition changes won't break tests.
-- Fixture dates always derived from `dayjs()`.
-- Adjustment markers never appear on grid, daily list, or day panel (C2).
-- Attendance status filter is a client-side post-filter.
-- No row virtualisation yet.
-
-## Tool behaviour (f007)
-
-- `--also <path>` now extends the frontend tsc/vitest **gate scope** in addition to being included in `--commit`.
-- Filtered to `frontend/` paths; non-frontend `--also` args (e.g. `docs/FRONTEND_STATE.md`) do not affect gates.
-- `npm install` still runs **only** on bundle-written `frontend/package.json` (passing package.json via `--also` is not treated as a change signal — avoids slow installs).
-- Consequence: F-3a can now write only source files and pass the corresponding test file via `--also`; tsc and vitest will still exercise it.
-
-## Next step
-
-F-3a: exceptions queue with type chips and suggested fixes; single adjustment form (outcome, worked/leave/sick/absent/day_off; times; reason_code; note required when reason_code is "other"); inline handling of `cannot_adjust_own` (403) and `day_locked` (409). Add `frontend/src/api/exceptions.ts` and `frontend/src/api/adjustments.ts`, plus pages and forms. Tests must use `data-testid` on the exception row and adjustment buttons; fixture dates from `dayjs()`.
+- **B-5**: Provide site timezone via API (currently hardcoded).
+- **B-6**: Multi-value type filtering on `GET /exceptions`.

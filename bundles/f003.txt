@@ -1,0 +1,808 @@
+=== FILE: frontend/src/api/tenant.ts ===
+let tenantSlug: string | null = null;
+
+const fromEnv = import.meta.env.VITE_TENANT_SLUG;
+if (typeof fromEnv === "string" && fromEnv.length > 0) {
+  tenantSlug = fromEnv;
+}
+
+export function getTenantSlug(): string | null {
+  return tenantSlug;
+}
+
+export function setTenantSlug(slug: string | null): void {
+  tenantSlug = slug && slug.length > 0 ? slug : null;
+}
+=== END FILE: frontend/src/api/tenant.ts ===
+=== FILE: frontend/src/api/client.ts ===
+import createClient from "openapi-fetch";
+import type { paths } from "./schema";
+import { getTenantSlug } from "./tenant";
+
+export type TokenStore = {
+  getToken: () => string | null;
+  setToken: (token: string | null) => void;
+};
+
+export type RefreshFn = () => Promise<string | null>;
+
+export function createWrappedFetch(
+  tokenStore: TokenStore,
+  refresh: RefreshFn,
+  onUnauthorized: () => void,
+): (req: Request) => Promise<Response> {
+  return async (req) => {
+    const original = req.clone();
+    const first = new Request(req);
+    const slug = getTenantSlug();
+    if (slug) first.headers.set("X-Tenant-Slug", slug);
+    const token = tokenStore.getToken();
+    if (token) first.headers.set("Authorization", `Bearer ${token}`);
+    let res = await fetch(first);
+    if (res.status !== 401) return res;
+
+    const newToken = await refresh();
+    if (!newToken) {
+      onUnauthorized();
+      return res;
+    }
+    tokenStore.setToken(newToken);
+
+    const retry = new Request(original);
+    if (slug) retry.headers.set("X-Tenant-Slug", slug);
+    retry.headers.set("Authorization", `Bearer ${newToken}`);
+    res = await fetch(retry);
+    if (res.status === 401) onUnauthorized();
+    return res;
+  };
+}
+
+let accessToken: string | null = null;
+
+export function getAccessToken(): string | null {
+  return accessToken;
+}
+
+export function setAccessToken(token: string | null): void {
+  accessToken = token;
+}
+
+let refreshPromise: Promise<string | null> | null = null;
+
+export function refreshAccessToken(): Promise<string | null> {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = (async () => {
+    try {
+      const slug = getTenantSlug();
+      const res = await fetch("/api/v1/auth/refresh", {
+        method: "POST",
+        credentials: "include",
+        headers: slug ? { "X-Tenant-Slug": slug } : {},
+      });
+      if (!res.ok) return null;
+      const body = (await res.json().catch(() => null)) as
+        | { access_token?: unknown }
+        | null;
+      return typeof body?.access_token === "string" ? body.access_token : null;
+    } catch {
+      return null;
+    }
+  })();
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
+let onUnauthorizedDefault: (() => void) | null = null;
+
+export function setOnUnauthorized(fn: (() => void) | null): void {
+  onUnauthorizedDefault = fn;
+}
+
+export const wrappedFetch = createWrappedFetch(
+  { getToken: getAccessToken, setToken: setAccessToken },
+  refreshAccessToken,
+  () => onUnauthorizedDefault?.(),
+);
+
+export const api = createClient<paths>({
+  baseUrl: "/api/v1",
+  credentials: "include",
+  fetch: wrappedFetch,
+});
+=== END FILE: frontend/src/api/client.ts ===
+=== FILE: frontend/src/auth/api.ts ===
+import { parseApiError, type ApiError } from "../api/errors";
+import { getTenantSlug } from "../api/tenant";
+
+const BASE = "/api/v1";
+
+function tenantHeaders(): Record<string, string> {
+  const slug = getTenantSlug();
+  return slug ? { "X-Tenant-Slug": slug } : {};
+}
+
+export type LoginResult = {
+  accessToken: string;
+  mustChangePassword: boolean;
+};
+
+export class AuthRequestError extends Error {
+  readonly apiError: ApiError;
+  constructor(err: ApiError) {
+    super(err.message);
+    this.apiError = err;
+  }
+}
+
+export async function loginRequest(
+  identifier: string,
+  password: string,
+): Promise<LoginResult> {
+  const res = await fetch(`${BASE}/auth/login`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...tenantHeaders() },
+    body: JSON.stringify({ identifier, password }),
+  });
+  if (!res.ok) {
+    throw new AuthRequestError(await parseApiError(res));
+  }
+  const body = (await res.json().catch(() => null)) as
+    | { access_token?: unknown; must_change_password?: unknown }
+    | null;
+  const token = body?.access_token;
+  if (typeof token !== "string") {
+    throw new AuthRequestError({
+      code: "bad_response",
+      message: "Login response missing access_token",
+      status: 200,
+    });
+  }
+  return {
+    accessToken: token,
+    mustChangePassword: body?.must_change_password === true,
+  };
+}
+
+export async function logoutRequest(): Promise<void> {
+  try {
+    await fetch(`${BASE}/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+      headers: tenantHeaders(),
+    });
+  } catch {
+    // network error on logout is not fatal; local state clears regardless
+  }
+}
+
+export async function changePasswordRequest(params: {
+  currentPassword: string;
+  newPassword: string;
+}): Promise<void> {
+  const res = await fetch(`${BASE}/auth/change-password`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...tenantHeaders() },
+    body: JSON.stringify({
+      current_password: params.currentPassword,
+      new_password: params.newPassword,
+    }),
+  });
+  if (!res.ok) {
+    throw new AuthRequestError(await parseApiError(res));
+  }
+}
+=== END FILE: frontend/src/auth/api.ts ===
+=== FILE: frontend/src/auth/AuthContext.tsx ===
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
+import { setAccessToken, setOnUnauthorized } from "../api/client";
+import {
+  AuthRequestError,
+  changePasswordRequest,
+  loginRequest,
+  logoutRequest,
+} from "./api";
+
+export type AuthState = {
+  status: "authenticated" | "unauthenticated";
+  mustChangePassword: boolean;
+  loginError: string | null;
+  busy: boolean;
+};
+
+export type AuthContextValue = AuthState & {
+  login: (identifier: string, password: string) => Promise<boolean>;
+  logout: () => Promise<void>;
+  changePassword: (current: string, next: string) => Promise<boolean>;
+};
+
+const AuthContext = createContext<AuthContextValue | null>(null);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [state, setState] = useState<AuthState>({
+    status: "unauthenticated",
+    mustChangePassword: false,
+    loginError: null,
+    busy: false,
+  });
+
+  useEffect(() => {
+    setOnUnauthorized(() => {
+      setAccessToken(null);
+      setState({
+        status: "unauthenticated",
+        mustChangePassword: false,
+        loginError: "Session expired. Please sign in again.",
+        busy: false,
+      });
+    });
+    return () => setOnUnauthorized(null);
+  }, []);
+
+  const login = useCallback(
+    async (identifier: string, password: string): Promise<boolean> => {
+      setState((s) => ({ ...s, busy: true, loginError: null }));
+      try {
+        const result = await loginRequest(identifier, password);
+        setAccessToken(result.accessToken);
+        setState({
+          status: "authenticated",
+          mustChangePassword: result.mustChangePassword,
+          loginError: null,
+          busy: false,
+        });
+        return true;
+      } catch (err) {
+        const message =
+          err instanceof AuthRequestError
+            ? err.apiError.message
+            : "Sign-in failed";
+        setState({
+          status: "unauthenticated",
+          mustChangePassword: false,
+          loginError: message,
+          busy: false,
+        });
+        return false;
+      }
+    },
+    [],
+  );
+
+  const logout = useCallback(async (): Promise<void> => {
+    await logoutRequest();
+    setAccessToken(null);
+    setState({
+      status: "unauthenticated",
+      mustChangePassword: false,
+      loginError: null,
+      busy: false,
+    });
+  }, []);
+
+  const changePassword = useCallback(
+    async (current: string, next: string): Promise<boolean> => {
+      setState((s) => ({ ...s, busy: true, loginError: null }));
+      try {
+        await changePasswordRequest({ currentPassword: current, newPassword: next });
+        setState((s) => ({ ...s, mustChangePassword: false, busy: false }));
+        return true;
+      } catch (err) {
+        const message =
+          err instanceof AuthRequestError
+            ? err.apiError.message
+            : "Change password failed";
+        setState((s) => ({ ...s, busy: false, loginError: message }));
+        return false;
+      }
+    },
+    [],
+  );
+
+  return (
+    <AuthContext.Provider value={{ ...state, login, logout, changePassword }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used inside <AuthProvider>");
+  return ctx;
+}
+=== END FILE: frontend/src/auth/AuthContext.tsx ===
+=== FILE: frontend/src/auth/ProtectedRoute.tsx ===
+import type { ReactNode } from "react";
+import { Navigate, useLocation } from "react-router-dom";
+import { useAuth } from "./AuthContext";
+
+export function ProtectedRoute({ children }: { children: ReactNode }) {
+  const { status, mustChangePassword } = useAuth();
+  const location = useLocation();
+
+  if (status === "unauthenticated") {
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  }
+  if (
+    status === "authenticated" &&
+    mustChangePassword &&
+    location.pathname !== "/change-password"
+  ) {
+    return <Navigate to="/change-password" replace />;
+  }
+  return <>{children}</>;
+}
+=== END FILE: frontend/src/auth/ProtectedRoute.tsx ===
+=== FILE: frontend/src/auth/auth.test.tsx ===
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { AuthProvider, useAuth } from "./AuthContext";
+import { ProtectedRoute } from "./ProtectedRoute";
+import { setTenantSlug } from "../api/tenant";
+
+function Probe() {
+  const { status, mustChangePassword, login, logout } = useAuth();
+  return (
+    <div>
+      <span data-testid="status">{status}</span>
+      <span data-testid="must">{String(mustChangePassword)}</span>
+      <button onClick={() => void login("user", "pass")}>do-login</button>
+      <button onClick={() => void logout()}>do-logout</button>
+    </div>
+  );
+}
+
+function ProtectedChild() {
+  return <div data-testid="protected-child">protected</div>;
+}
+
+function loginResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+describe("AuthProvider", () => {
+  beforeEach(() => {
+    setTenantSlug("demo");
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("starts unauthenticated", () => {
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    );
+    expect(screen.getByTestId("status").textContent).toBe("unauthenticated");
+  });
+
+  it("stores the token in memory only, never localStorage or sessionStorage", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/auth/login")) {
+        return loginResponse({ access_token: "tok", must_change_password: false });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    );
+    fireEvent.click(screen.getByText("do-login"));
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("authenticated"),
+    );
+    expect(localStorage.length).toBe(0);
+    expect(sessionStorage.length).toBe(0);
+  });
+
+  it("surfaces must_change_password as a state flag", async () => {
+    global.fetch = vi.fn(async () =>
+      loginResponse({ access_token: "tok", must_change_password: true }),
+    ) as unknown as typeof fetch;
+
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    );
+    fireEvent.click(screen.getByText("do-login"));
+    await waitFor(() =>
+      expect(screen.getByTestId("must").textContent).toBe("true"),
+    );
+  });
+
+  it("surfaces login failure as loginError and stays unauthenticated", async () => {
+    global.fetch = vi.fn(async () =>
+      loginResponse(
+        { error: { code: "forbidden", message: "Bad credentials" } },
+        403,
+      ),
+    ) as unknown as typeof fetch;
+
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    );
+    fireEvent.click(screen.getByText("do-login"));
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("unauthenticated"),
+    );
+  });
+
+  it("clears the token on logout", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/auth/login")) {
+        return loginResponse({ access_token: "tok" });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    );
+    fireEvent.click(screen.getByText("do-login"));
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("authenticated"),
+    );
+    fireEvent.click(screen.getByText("do-logout"));
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("unauthenticated"),
+    );
+  });
+});
+
+describe("ProtectedRoute", () => {
+  it("redirects unauthenticated users to /login", () => {
+    render(
+      <AuthProvider>
+        <MemoryRouter initialEntries={["/"]}>
+          <Routes>
+            <Route
+              path="/login"
+              element={<div data-testid="login-page">login</div>}
+            />
+            <Route
+              path="/"
+              element={
+                <ProtectedRoute>
+                  <ProtectedChild />
+                </ProtectedRoute>
+              }
+            />
+          </Routes>
+        </MemoryRouter>
+      </AuthProvider>,
+    );
+    expect(screen.getByTestId("login-page")).toBeInTheDocument();
+    expect(screen.queryByTestId("protected-child")).not.toBeInTheDocument();
+  });
+});
+=== END FILE: frontend/src/auth/auth.test.tsx ===
+=== FILE: frontend/src/pages/LoginPage.tsx ===
+import { useState } from "react";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
+import {
+  Alert,
+  Button,
+  Container,
+  PasswordInput,
+  Stack,
+  TextInput,
+  Title,
+} from "@mantine/core";
+import { useAuth } from "../auth/AuthContext";
+import { strings } from "../lib/strings";
+import { getTenantSlug, setTenantSlug } from "../api/tenant";
+
+export function LoginPage() {
+  const { status, mustChangePassword, loginError, busy, login } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation() as { state?: { from?: string } };
+  const [identifier, setIdentifier] = useState("");
+  const [password, setPassword] = useState("");
+  const [tenant, setTenant] = useState(getTenantSlug() ?? "");
+  const isDev = import.meta.env.DEV;
+
+  if (status === "authenticated") {
+    if (mustChangePassword) {
+      return <Navigate to="/change-password" replace />;
+    }
+    return <Navigate to={location.state?.from ?? "/"} replace />;
+  }
+
+  const onSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isDev) setTenantSlug(tenant.trim() || null);
+    const ok = await login(identifier.trim(), password);
+    if (ok) navigate("/", { replace: true });
+  };
+
+  return (
+    <Container size="xs" py="xl">
+      <form onSubmit={onSubmit}>
+        <Stack>
+          <Title order={2}>{strings.login.title}</Title>
+          {loginError ? <Alert color="red">{loginError}</Alert> : null}
+          {isDev ? (
+            <TextInput
+              label={strings.login.tenantLabel}
+              value={tenant}
+              onChange={(e) => setTenant(e.currentTarget.value)}
+              autoComplete="off"
+            />
+          ) : null}
+          <TextInput
+            label={strings.login.identifierLabel}
+            value={identifier}
+            onChange={(e) => setIdentifier(e.currentTarget.value)}
+            required
+            autoComplete="username"
+          />
+          <PasswordInput
+            label={strings.login.passwordLabel}
+            value={password}
+            onChange={(e) => setPassword(e.currentTarget.value)}
+            required
+            autoComplete="current-password"
+          />
+          <Button type="submit" loading={busy}>
+            {strings.login.submit}
+          </Button>
+        </Stack>
+      </form>
+    </Container>
+  );
+}
+=== END FILE: frontend/src/pages/LoginPage.tsx ===
+=== FILE: frontend/src/pages/ForcePasswordChangePage.tsx ===
+import { useState } from "react";
+import { Navigate, useNavigate } from "react-router-dom";
+import {
+  Alert,
+  Button,
+  Container,
+  PasswordInput,
+  Stack,
+  Title,
+} from "@mantine/core";
+import { useAuth } from "../auth/AuthContext";
+import { strings } from "../lib/strings";
+
+export function ForcePasswordChangePage() {
+  const { status, mustChangePassword, loginError, busy, changePassword } =
+    useAuth();
+  const navigate = useNavigate();
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  if (status === "unauthenticated") {
+    return <Navigate to="/login" replace />;
+  }
+  if (status === "authenticated" && !mustChangePassword) {
+    return <Navigate to="/" replace />;
+  }
+
+  const onSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLocalError(null);
+    if (next.length < 8) {
+      setLocalError(strings.changePassword.tooShort);
+      return;
+    }
+    if (next !== confirm) {
+      setLocalError(strings.changePassword.mismatch);
+      return;
+    }
+    const ok = await changePassword(current, next);
+    if (ok) navigate("/", { replace: true });
+  };
+
+  return (
+    <Container size="xs" py="xl">
+      <form onSubmit={onSubmit}>
+        <Stack>
+          <Title order={2}>{strings.changePassword.title}</Title>
+          <Alert color="blue">{strings.changePassword.intro}</Alert>
+          {loginError ? <Alert color="red">{loginError}</Alert> : null}
+          {localError ? <Alert color="red">{localError}</Alert> : null}
+          <PasswordInput
+            label={strings.changePassword.currentLabel}
+            value={current}
+            onChange={(e) => setCurrent(e.currentTarget.value)}
+            required
+            autoComplete="current-password"
+          />
+          <PasswordInput
+            label={strings.changePassword.newLabel}
+            value={next}
+            onChange={(e) => setNext(e.currentTarget.value)}
+            required
+            autoComplete="new-password"
+          />
+          <PasswordInput
+            label={strings.changePassword.confirmLabel}
+            value={confirm}
+            onChange={(e) => setConfirm(e.currentTarget.value)}
+            required
+            autoComplete="new-password"
+          />
+          <Button type="submit" loading={busy}>
+            {strings.changePassword.submit}
+          </Button>
+        </Stack>
+      </form>
+    </Container>
+  );
+}
+=== END FILE: frontend/src/pages/ForcePasswordChangePage.tsx ===
+=== FILE: frontend/src/App.tsx ===
+import { Navigate, Route, Routes } from "react-router-dom";
+import { Button, Container, Group, Stack, Text, Title } from "@mantine/core";
+import { AuthProvider, useAuth } from "./auth/AuthContext";
+import { ProtectedRoute } from "./auth/ProtectedRoute";
+import { ForcePasswordChangePage } from "./pages/ForcePasswordChangePage";
+import { LoginPage } from "./pages/LoginPage";
+import { strings } from "./lib/strings";
+
+function HomePage() {
+  const { logout } = useAuth();
+  return (
+    <Container size="md" py="xl">
+      <Group justify="space-between" mb="lg">
+        <Title order={1}>{strings.appName}</Title>
+        <Button variant="default" onClick={() => void logout()}>
+          {strings.shell.logout}
+        </Button>
+      </Group>
+      <Stack>
+        <Text>{strings.home.welcome}</Text>
+        <Text size="sm" c="dimmed">
+          {strings.home.nextPhase}
+        </Text>
+      </Stack>
+    </Container>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="/change-password"
+          element={
+            <ProtectedRoute>
+              <ForcePasswordChangePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <HomePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </AuthProvider>
+  );
+}
+=== END FILE: frontend/src/App.tsx ===
+=== FILE: frontend/src/lib/strings.ts ===
+export const strings = {
+  appName: "Payroll",
+  genericError: "Something went wrong. Please try again.",
+  login: {
+    title: "Sign in",
+    identifierLabel: "Username or email",
+    passwordLabel: "Password",
+    tenantLabel: "Tenant slug (development only)",
+    submit: "Sign in",
+    error: "Sign-in failed. Check your details.",
+  },
+  changePassword: {
+    title: "Change your password",
+    intro: "You must set a new password before you can continue.",
+    currentLabel: "Current password",
+    newLabel: "New password",
+    confirmLabel: "Confirm new password",
+    submit: "Change password",
+    tooShort: "Password must be at least 8 characters.",
+    mismatch: "Passwords do not match.",
+  },
+  shell: {
+    logout: "Sign out",
+  },
+  home: {
+    welcome: "Signed in.",
+    nextPhase:
+      "Role-based navigation and dashboard cards arrive in the next phase.",
+  },
+} as const;
+=== END FILE: frontend/src/lib/strings.ts ===
+=== FILE: docs/FRONTEND_STATE.md ===
+# Frontend State
+
+Read this first when opening a new chat. Updated at the end of each phase.
+
+## Phase
+
+F-1a — login + forced password change + auth provider + protected routes. F-1b (auth/me, shell, landing cards) waits for B-1.
+
+## Bundles done
+
+F-0a (tooling), F-0b + f002-fix (scaffold, typed client, error mapper, theme, strings), F-1a (this bundle).
+
+## Bundle plan (16 total, unchanged)
+
+F-0a done, F-0b done, F-1a done, F-1b next (waits for B-1) | F-2a, F-2b | F-3a, F-3b | F-4a, F-4b | F-5a, F-5b | F-6 | F-8 | F-7a, F-7b (waits for B-4).
+
+## Backend requests
+
+| # | Request | Blocks |
+|---|---|---|
+| B-1 | GET /auth/me returning id, username, role, employee_id, permissions[], must_change_password. | F-1b |
+| B-2 | Demo seed via real engine, tracked at backend/app/seed/demo_seed.py with wrapper scripts/seed_demo.ps1, --reset/--keep, refuse in prod, fictional SA names, fake tax numbers, real exception types only, credentials in docs/SEED.md. | Demo data |
+| B-3a | GET /payroll/pay-periods/{id}/preview/{employee_id}. | F-7b (tab hidden) |
+| B-3b | Own-payslips endpoint for employee role via SELF_VIEW. | F-7b |
+| B-4 | Attendance-to-earnings integration. | F-7 fully |
+
+## Verified gaps
+
+Same as B-1, B-3a, B-4 above. F-1a assumes login response is `{access_token: string, must_change_password?: boolean}` and change-password body is `{current_password, new_password}`. If either assumption is wrong, F-1a-fix corrects it.
+
+## To verify at relevant phase
+
+Refresh CSRF header name/value; login response exact shape (F-1a test will show on first successful login); change-password body shape; GET /attendance/day/{employee_id}/{work_date}; GET /punches; nine audit filters; two-step import token; device api_key in 201 only; dry-run token TTL; row_version in each PATCH-able GET; `X-Tenant-Slug` on `/auth/login` (F-1a sends it from `getTenantSlug()`).
+
+## Decisions
+
+- Role gating: use B-1 /auth/me, never hard-code permissions. F-1b adds role-aware nav.
+- Preview detail: hidden until B-3a.
+- Import wizard: two steps.
+- Sheet status filter: employee-status + attendance-status chip (client-side post-filter).
+- Node 20 assumed; apply_bundle.py --frontend halts if < 20.
+- Version pinning: caret ranges; package-lock.json is the real pin.
+
+## Next step
+
+Wait for B-1 (`GET /auth/me`) to land before starting F-1b. In the meantime, run:
+  python tools\apply_bundle.py bundles\f003.txt --frontend --commit "F-1a: login + forced password change + auth provider + protected routes"
+Then start the backend: `cd backend; python -m uvicorn app.main:app --reload --port 8000`
+Then frontend: `cd frontend; npm run dev`
+Open http://127.0.0.1:5173. Try login with the demo tenant credentials. Report whether login succeeds, whether must_change_password redirects correctly, and any error codes seen.
+
+If the backend isn't seeded yet, the seed (B-2) is required before the login flow can be tested end-to-end.
+=== END FILE: docs/FRONTEND_STATE.md ===
+# END OF FILE

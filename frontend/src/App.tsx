@@ -3,6 +3,7 @@ import { AuthProvider } from "./auth/AuthContext";
 import { ProtectedRoute } from "./auth/ProtectedRoute";
 import { AppShell } from "./shell/AppShell";
 import { AttendanceSheetPage } from "./pages/AttendanceSheetPage";
+import { ExceptionsPage } from "./pages/ExceptionsPage";
 import { ForcePasswordChangePage } from "./pages/ForcePasswordChangePage";
 import { HomePage } from "./pages/HomePage";
 import { LoginPage } from "./pages/LoginPage";
@@ -31,13 +32,10 @@ export default function App() {
         >
           <Route index element={<HomePage />} />
           <Route path="attendance" element={<AttendanceSheetPage />} />
-          <Route
-            path="attendance/exceptions"
-            element={<PlaceholderPage title="Exceptions" phase="F-3" />}
-          />
+          <Route path="attendance/exceptions" element={<ExceptionsPage />} />
           <Route
             path="attendance/adjustments"
-            element={<PlaceholderPage title="Adjustments" phase="F-3" />}
+            element={<PlaceholderPage title="Adjustments" phase="F-3b" />}
           />
           <Route
             path="employees"

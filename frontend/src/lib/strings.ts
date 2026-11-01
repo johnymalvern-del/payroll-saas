@@ -1,3 +1,33 @@
+export const EXCEPTION_TYPE_ORDER = [
+  "missing_out",
+  "missing_in",
+  "no_shift_match",
+  "low_confidence",
+  "absent_expected",
+  "overtime_unapproved",
+  "too_long",
+  "duplicate",
+  "device_clock_gap",
+  "employee_query",
+] as const;
+
+const EXCEPTION_TYPE_LABELS: Record<string, string> = {
+  missing_out: "Missing out",
+  missing_in: "Missing in",
+  no_shift_match: "No shift match",
+  low_confidence: "Low confidence",
+  absent_expected: "Absent (expected)",
+  overtime_unapproved: "Overtime unapproved",
+  too_long: "Too long",
+  duplicate: "Duplicate",
+  device_clock_gap: "Device clock gap",
+  employee_query: "Employee query",
+};
+
+export function exceptionTypeLabel(code: string): string {
+  return EXCEPTION_TYPE_LABELS[code] ?? code.replace(/_/g, " ");
+}
+
 export const strings = {
   appName: "Payroll",
   genericError: "Something went wrong. Please try again.",
@@ -105,5 +135,45 @@ export const strings = {
       again: "Run again",
       title: "Mark clean days reviewed",
     },
+  },
+  exceptions: {
+    title: "Exceptions",
+    statusOpen: "Open",
+    statusResolved: "Resolved",
+    statusDismissed: "Dismissed",
+    typeFilter: "Type",
+    allTypes: "All types",
+    empty: "No open exceptions match these filters.",
+    error: "Could not load exceptions.",
+    suggestedLabel: "Suggested:",
+    suggestWorked: "worked",
+    applyButton: "Apply",
+    customButton: "Custom",
+    dismissButton: "Dismiss",
+    resolveTitle: "Resolve exception",
+    customAction: "Custom adjustment",
+    dismissAction: "Dismiss",
+    dismissNote: "Reason for dismissing",
+    dismissSubmit: "Dismiss exception",
+    dismissNoteRequired: "Note of at least 3 characters is required.",
+    applyConfirm: (summary: string) => `Apply suggested fix: ${summary}?`,
+    directError: "Could not apply the suggestion.",
+    employeesError: "Could not load employees.",
+    employeesRetry: "Retry",
+    multiTypeNote: "Type filter applies to the loaded page only.",
+  },
+  adjustments: {
+    outcome: "Outcome",
+    timeIn: "Time in",
+    timeOut: "Time out",
+    reasonCode: "Reason code",
+    reasonCodeHint: "e.g. missing_out, wrong_shift",
+    note: "Note",
+    noteOtherHint: "Required when reason code is 'other' (at least 10 characters).",
+    submit: "Save adjustment",
+    reasonRequired: "Reason code is required.",
+    timesRequired: "Times are required when outcome is worked.",
+    timeOrder: "Time out must be after time in.",
+    noteRequiredForOther: "Reason 'other' requires a note of at least 10 characters.",
   },
 } as const;

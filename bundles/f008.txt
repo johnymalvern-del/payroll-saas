@@ -1,0 +1,1170 @@
+=== FILE: frontend/src/api/employees.ts ===
+import { absoluteUrl, wrappedFetch } from "./client";
+
+export type EmployeeRef = {
+  id: string;
+  employee_code: string;
+  first_name: string;
+  last_name: string;
+};
+
+export async function fetchEmployees(limit = 500): Promise<EmployeeRef[]> {
+  const res = await wrappedFetch(
+    new Request(absoluteUrl(`/api/v1/employees?limit=${limit}`), {
+      credentials: "include",
+    }),
+  );
+  if (!res.ok) return [];
+  const body = (await res.json().catch(() => ({}))) as { items?: unknown };
+  return Array.isArray(body.items) ? (body.items as EmployeeRef[]) : [];
+}
+=== END FILE: frontend/src/api/employees.ts ===
+=== FILE: frontend/src/api/exceptions.ts ===
+import { absoluteUrl, wrappedFetch } from "./client";
+
+export type ExceptionStatus = "open" | "resolved" | "dismissed" | string;
+
+export type ExceptionRow = {
+  id: string;
+  employee_id: string;
+  work_date: string;
+  type: string;
+  source_ref: Record<string, unknown>;
+  suggested_fix: Record<string, unknown>;
+  status: ExceptionStatus;
+  assigned_to: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  resolution: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ExceptionList = {
+  items: ExceptionRow[];
+  next_cursor: string | null;
+  total?: number | null;
+};
+
+export type ResolveAction = "apply_suggestion" | "custom" | "dismiss";
+
+export type CustomAdjustment = {
+  outcome: string;
+  time_in: string | null;
+  time_out: string | null;
+  reason_code: string;
+  note: string | null;
+};
+
+export type ResolveRequest = {
+  action: ResolveAction;
+  custom_adjustment: CustomAdjustment | null;
+  note: string | null;
+};
+
+export type ResolveResponse = {
+  exception: ExceptionRow;
+  adjustment_id: string | null;
+  day_status: string | null;
+};
+
+export async function fetchExceptions(params: {
+  status?: string;
+  type?: string;
+  fromDate?: string;
+  toDate?: string;
+  limit?: number;
+  cursor?: string | null;
+}): Promise<ExceptionList> {
+  const qs = new URLSearchParams();
+  if (params.status) qs.set("status", params.status);
+  if (params.type) qs.set("type", params.type);
+  if (params.fromDate) qs.set("from_date", params.fromDate);
+  if (params.toDate) qs.set("to_date", params.toDate);
+  qs.set("limit", String(params.limit ?? 100));
+  if (params.cursor) qs.set("cursor", params.cursor);
+  const res = await wrappedFetch(
+    new Request(absoluteUrl(`/api/v1/attendance/exceptions?${qs.toString()}`), {
+      credentials: "include",
+    }),
+  );
+  if (!res.ok) throw new Error(`http_${res.status}`);
+  const data = (await res.json()) as Record<string, unknown>;
+  return {
+    items: Array.isArray(data.items) ? (data.items as ExceptionRow[]) : [],
+    next_cursor:
+      typeof data.next_cursor === "string" ? data.next_cursor : null,
+    total: typeof data.total === "number" ? data.total : null,
+  };
+}
+
+export async function resolveException(
+  exceptionId: string,
+  body: ResolveRequest,
+): Promise<ResolveResponse> {
+  const res = await wrappedFetch(
+    new Request(
+      absoluteUrl(`/api/v1/attendance/exceptions/${exceptionId}/resolve`),
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  );
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => ({}))) as {
+      error?: { code?: string };
+    };
+    throw new Error(detail.error?.code ?? `http_${res.status}`);
+  }
+  return (await res.json()) as ResolveResponse;
+}
+=== END FILE: frontend/src/api/exceptions.ts ===
+=== FILE: frontend/src/api/adjustments.ts ===
+import { absoluteUrl, wrappedFetch } from "./client";
+
+export const ADJUSTMENT_OUTCOMES = [
+  "worked",
+  "leave",
+  "sick",
+  "absent",
+  "day_off",
+] as const;
+export type AdjustmentOutcome = (typeof ADJUSTMENT_OUTCOMES)[number];
+
+export type AdjustmentCreateRequest = {
+  employee_id: string;
+  work_date: string;
+  outcome: AdjustmentOutcome | "revert";
+  time_in: string | null;
+  time_out: string | null;
+  reason_code: string;
+  note: string | null;
+};
+
+export type Adjustment = {
+  id: string;
+  employee_id: string;
+  work_date: string;
+  outcome: string;
+  time_in: string | null;
+  time_out: string | null;
+  minutes: number | null;
+  reason_code: string;
+  note: string | null;
+  created_at: string;
+};
+
+export type AdjustmentResult = {
+  adjustment: Adjustment;
+  day_status: string | null;
+  day_worked_minutes: number | null;
+  day_normal_minutes: number | null;
+  day_overtime_minutes: number | null;
+};
+
+export async function createAdjustment(
+  body: AdjustmentCreateRequest,
+): Promise<AdjustmentResult> {
+  const res = await wrappedFetch(
+    new Request(absoluteUrl("/api/v1/attendance/adjustments"), {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  );
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => ({}))) as {
+      error?: { code?: string };
+    };
+    throw new Error(detail.error?.code ?? `http_${res.status}`);
+  }
+  return (await res.json()) as AdjustmentResult;
+}
+=== END FILE: frontend/src/api/adjustments.ts ===
+=== FILE: frontend/src/components/Adjustments/AdjustmentForm.tsx ===
+import { useState } from "react";
+import {
+  Alert,
+  Button,
+  Group,
+  Select,
+  Stack,
+  Textarea,
+  TextInput,
+} from "@mantine/core";
+import dayjs from "dayjs";
+import {
+  ADJUSTMENT_OUTCOMES,
+  type AdjustmentOutcome,
+} from "../../api/adjustments";
+import { strings } from "../../lib/strings";
+
+export type AdjustmentFormValues = {
+  outcome: AdjustmentOutcome;
+  time_in: string | null;
+  time_out: string | null;
+  reason_code: string;
+  note: string | null;
+};
+
+type Props = {
+  workDate: string;
+  initial?: Partial<AdjustmentFormValues>;
+  onSubmit: (values: AdjustmentFormValues) => void;
+  submitLabel?: string;
+  busy?: boolean;
+};
+
+function toTimeInput(value: string | null | undefined): string {
+  if (!value) return "";
+  const d = dayjs(value);
+  return d.isValid() ? d.format("HH:mm") : "";
+}
+
+export function AdjustmentForm({ workDate, initial, onSubmit, submitLabel, busy }: Props) {
+  const [outcome, setOutcome] = useState<AdjustmentOutcome>(
+    initial?.outcome ?? "worked",
+  );
+  const [timeIn, setTimeIn] = useState<string>(toTimeInput(initial?.time_in));
+  const [timeOut, setTimeOut] = useState<string>(toTimeInput(initial?.time_out));
+  const [reasonCode, setReasonCode] = useState<string>(initial?.reason_code ?? "");
+  const [note, setNote] = useState<string>(initial?.note ?? "");
+  const [error, setError] = useState<string | null>(null);
+
+  const requiresTimes = outcome === "worked";
+  const reasonIsOther = reasonCode.trim().toLowerCase() === "other";
+
+  const submit = () => {
+    setError(null);
+    if (!reasonCode.trim()) {
+      setError(strings.adjustments.reasonRequired);
+      return;
+    }
+    if (requiresTimes && (!timeIn || !timeOut)) {
+      setError(strings.adjustments.timesRequired);
+      return;
+    }
+    if (requiresTimes && timeIn && timeOut) {
+      const tin = dayjs(`${workDate}T${timeIn}:00`);
+      const tout = dayjs(`${workDate}T${timeOut}:00`);
+      if (!tin.isValid() || !tout.isValid() || !tout.isAfter(tin)) {
+        setError(strings.adjustments.timeOrder);
+        return;
+      }
+    }
+    if (reasonIsOther && note.trim().length < 10) {
+      setError(strings.adjustments.noteRequiredForOther);
+      return;
+    }
+    onSubmit({
+      outcome,
+      time_in: requiresTimes && timeIn
+        ? dayjs(`${workDate}T${timeIn}:00`).toISOString()
+        : null,
+      time_out: requiresTimes && timeOut
+        ? dayjs(`${workDate}T${timeOut}:00`).toISOString()
+        : null,
+      reason_code: reasonCode.trim(),
+      note: note.trim() ? note.trim() : null,
+    });
+  };
+
+  return (
+    <Stack gap="sm">
+      {error ? <Alert color="red">{error}</Alert> : null}
+      <Select
+        label={strings.adjustments.outcome}
+        data={ADJUSTMENT_OUTCOMES.map((o) => ({ value: o, label: o.replace(/_/g, " ") }))}
+        value={outcome}
+        onChange={(v) => v && setOutcome(v as AdjustmentOutcome)}
+        allowDeselect={false}
+        data-testid="adj-outcome"
+      />
+      {requiresTimes ? (
+        <Group grow>
+          <TextInput
+            label={strings.adjustments.timeIn}
+            type="time"
+            value={timeIn}
+            onChange={(e) => setTimeIn(e.currentTarget.value)}
+            data-testid="adj-time-in"
+          />
+          <TextInput
+            label={strings.adjustments.timeOut}
+            type="time"
+            value={timeOut}
+            onChange={(e) => setTimeOut(e.currentTarget.value)}
+            data-testid="adj-time-out"
+          />
+        </Group>
+      ) : null}
+      <TextInput
+        label={strings.adjustments.reasonCode}
+        value={reasonCode}
+        onChange={(e) => setReasonCode(e.currentTarget.value)}
+        description={strings.adjustments.reasonCodeHint}
+        required
+        data-testid="adj-reason"
+      />
+      <Textarea
+        label={strings.adjustments.note}
+        value={note}
+        onChange={(e) => setNote(e.currentTarget.value)}
+        description={reasonIsOther ? strings.adjustments.noteOtherHint : undefined}
+        minRows={2}
+        data-testid="adj-note"
+      />
+      <Group justify="flex-end">
+        <Button onClick={submit} loading={busy} data-testid="adj-submit">
+          {submitLabel ?? strings.adjustments.submit}
+        </Button>
+      </Group>
+    </Stack>
+  );
+}
+=== END FILE: frontend/src/components/Adjustments/AdjustmentForm.tsx ===
+=== FILE: frontend/src/components/Exceptions/ExceptionCard.tsx ===
+import { Badge, Button, Card, Group, Stack, Text } from "@mantine/core";
+import dayjs from "dayjs";
+import type { ExceptionRow } from "../../api/exceptions";
+import { strings } from "../../lib/strings";
+
+type Props = {
+  exception: ExceptionRow;
+  employeeName: string;
+  employeeCode: string;
+  onApplySuggestion: () => void;
+  onCustom: () => void;
+  onDismiss: () => void;
+  busy?: boolean;
+};
+
+function typeColor(type: string): string {
+  if (type.includes("missing")) return "orange";
+  if (type.includes("overtime") || type.includes("long")) return "red";
+  if (type.includes("confidence") || type.includes("duplicate")) return "yellow";
+  return "blue";
+}
+
+function suggestionSummary(sf: Record<string, unknown>): string | null {
+  const outcome = typeof sf.outcome === "string" ? sf.outcome : null;
+  if (!outcome) return null;
+  const tin = typeof sf.time_in === "string" ? dayjs(sf.time_in).format("HH:mm") : null;
+  const tout = typeof sf.time_out === "string" ? dayjs(sf.time_out).format("HH:mm") : null;
+  if (outcome === "worked" && tin && tout) {
+    return `${strings.exceptions.suggestWorked} ${tin}\u2013${tout}`;
+  }
+  return outcome.replace(/_/g, " ");
+}
+
+export function ExceptionCard({
+  exception,
+  employeeName,
+  employeeCode,
+  onApplySuggestion,
+  onCustom,
+  onDismiss,
+  busy,
+}: Props) {
+  const summary = suggestionSummary(exception.suggested_fix);
+  return (
+    <Card withBorder padding="md" data-testid={`exception-${exception.id}`}>
+      <Group justify="space-between" align="flex-start" wrap="nowrap">
+        <Stack gap={4}>
+          <Group gap="sm">
+            <Badge color={typeColor(exception.type)} variant="light">
+              {exception.type}
+            </Badge>
+            <Text size="sm" c="dimmed">
+              {dayjs(exception.work_date).format("DD MMM YYYY")}
+            </Text>
+          </Group>
+          <Text size="sm" fw={500}>
+            {employeeName}
+            {employeeCode ? ` (${employeeCode})` : ""}
+          </Text>
+          {summary ? (
+            <Text size="xs" c="dimmed">
+              {strings.exceptions.suggestedLabel} {summary}
+            </Text>
+          ) : null}
+        </Stack>
+        <Group gap="xs" wrap="nowrap">
+          {summary ? (
+            <Button
+              size="xs"
+              onClick={onApplySuggestion}
+              loading={busy}
+              data-testid={`apply-${exception.id}`}
+            >
+              {strings.exceptions.applyButton}
+            </Button>
+          ) : null}
+          <Button
+            size="xs"
+            variant="default"
+            onClick={onCustom}
+            data-testid={`custom-${exception.id}`}
+          >
+            {strings.exceptions.customButton}
+          </Button>
+          <Button
+            size="xs"
+            variant="default"
+            onClick={onDismiss}
+            data-testid={`dismiss-${exception.id}`}
+          >
+            {strings.exceptions.dismissButton}
+          </Button>
+        </Group>
+      </Group>
+    </Card>
+  );
+}
+=== END FILE: frontend/src/components/Exceptions/ExceptionCard.tsx ===
+=== FILE: frontend/src/components/Exceptions/ResolveModal.tsx ===
+import { useEffect, useState } from "react";
+import {
+  Alert,
+  Button,
+  Group,
+  Modal,
+  SegmentedControl,
+  Stack,
+  Textarea,
+} from "@mantine/core";
+import {
+  AdjustmentForm,
+  type AdjustmentFormValues,
+} from "../Adjustments/AdjustmentForm";
+import type { ExceptionRow, ResolveRequest } from "../../api/exceptions";
+import { strings } from "../../lib/strings";
+
+type Action = "custom" | "dismiss";
+
+type Props = {
+  opened: boolean;
+  exception: ExceptionRow | null;
+  initialAction: Action;
+  onClose: () => void;
+  onResolve: (req: ResolveRequest) => void;
+  busy?: boolean;
+  serverError?: string | null;
+};
+
+export function ResolveModal({
+  opened,
+  exception,
+  initialAction,
+  onClose,
+  onResolve,
+  busy,
+  serverError,
+}: Props) {
+  const [action, setAction] = useState<Action>(initialAction);
+  const [note, setNote] = useState<string>("");
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAction(initialAction);
+    setNote("");
+    setLocalError(null);
+  }, [initialAction, exception?.id]);
+
+  if (!exception) return null;
+
+  const initialCustom: Partial<AdjustmentFormValues> = {
+    outcome:
+      (exception.suggested_fix.outcome as AdjustmentFormValues["outcome"]) ??
+      "worked",
+    time_in: (exception.suggested_fix.time_in as string) ?? null,
+    time_out: (exception.suggested_fix.time_out as string) ?? null,
+    reason_code:
+      (exception.suggested_fix.reason_code as string) ?? exception.type,
+    note: (exception.suggested_fix.note as string) ?? null,
+  };
+
+  const submitDismiss = () => {
+    setLocalError(null);
+    if (note.trim().length < 3) {
+      setLocalError(strings.exceptions.dismissNoteRequired);
+      return;
+    }
+    onResolve({
+      action: "dismiss",
+      custom_adjustment: null,
+      note: note.trim(),
+    });
+  };
+
+  const submitCustom = (values: AdjustmentFormValues) => {
+    onResolve({
+      action: "custom",
+      custom_adjustment: {
+        outcome: values.outcome,
+        time_in: values.time_in,
+        time_out: values.time_out,
+        reason_code: values.reason_code,
+        note: values.note,
+      },
+      note: null,
+    });
+  };
+
+  return (
+    <Modal
+      opened={opened}
+      onClose={onClose}
+      title={strings.exceptions.resolveTitle}
+      size="lg"
+    >
+      <Stack gap="md">
+        <SegmentedControl
+          value={action}
+          onChange={(v) => setAction(v as Action)}
+          data={[
+            { label: strings.exceptions.customAction, value: "custom" },
+            { label: strings.exceptions.dismissAction, value: "dismiss" },
+          ]}
+        />
+        {serverError ? <Alert color="red">{serverError}</Alert> : null}
+        {localError ? <Alert color="red">{localError}</Alert> : null}
+        {action === "custom" ? (
+          <AdjustmentForm
+            workDate={exception.work_date}
+            initial={initialCustom}
+            onSubmit={submitCustom}
+            busy={busy}
+          />
+        ) : (
+          <Stack gap="sm">
+            <Textarea
+              label={strings.exceptions.dismissNote}
+              value={note}
+              onChange={(e) => setNote(e.currentTarget.value)}
+              minRows={3}
+              data-testid="dismiss-note"
+            />
+            <Group justify="flex-end">
+              <Button
+                onClick={submitDismiss}
+                loading={busy}
+                data-testid="dismiss-submit"
+              >
+                {strings.exceptions.dismissSubmit}
+              </Button>
+            </Group>
+          </Stack>
+        )}
+      </Stack>
+    </Modal>
+  );
+}
+=== END FILE: frontend/src/components/Exceptions/ResolveModal.tsx ===
+=== FILE: frontend/src/pages/ExceptionsPage.tsx ===
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Group,
+  Loader,
+  MultiSelect,
+  Paper,
+  SegmentedControl,
+  Stack,
+  Text,
+  Title,
+} from "@mantine/core";
+import { fetchEmployees } from "../api/employees";
+import {
+  fetchExceptions,
+  resolveException,
+  type ExceptionRow,
+  type ResolveRequest,
+} from "../api/exceptions";
+import { mapErrorCode } from "../api/errors";
+import { ExceptionCard } from "../components/Exceptions/ExceptionCard";
+import { ResolveModal } from "../components/Exceptions/ResolveModal";
+import { strings } from "../lib/strings";
+
+const STATUS_OPTIONS = [
+  { label: strings.exceptions.statusOpen, value: "open" },
+  { label: strings.exceptions.statusResolved, value: "resolved" },
+  { label: strings.exceptions.statusDismissed, value: "dismissed" },
+];
+
+const TYPE_OPTIONS = [
+  "missing_punch",
+  "missing_in",
+  "missing_out",
+  "no_shift_match",
+  "low_confidence",
+  "absent_expected",
+  "overtime_unapproved",
+  "too_long",
+  "duplicate",
+  "device_clock_gap",
+].map((t) => ({ label: t.replace(/_/g, " "), value: t }));
+
+type ModalState = { exception: ExceptionRow; action: "custom" | "dismiss" } | null;
+
+export function ExceptionsPage() {
+  const qc = useQueryClient();
+  const [statusFilter, setStatusFilter] = useState<string>("open");
+  const [typeFilter, setTypeFilter] = useState<string[]>([]);
+  const [modal, setModal] = useState<ModalState>(null);
+  const [serverError, setServerError] = useState<string | null>(null);
+
+  const employees = useQuery({
+    queryKey: ["refs", "employees"],
+    queryFn: () => fetchEmployees(),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const exceptions = useQuery({
+    queryKey: ["exceptions", statusFilter, typeFilter.join(",")],
+    queryFn: () =>
+      fetchExceptions({
+        status: statusFilter,
+        type: typeFilter.length === 1 ? typeFilter[0] : undefined,
+      }),
+  });
+
+  const resolve = useMutation({
+    mutationFn: (vars: { id: string; body: ResolveRequest }) =>
+      resolveException(vars.id, vars.body),
+    onSuccess: () => {
+      setModal(null);
+      setServerError(null);
+      qc.invalidateQueries({ queryKey: ["exceptions"] });
+    },
+    onError: (err) => {
+      const code = err instanceof Error ? err.message : "unknown_error";
+      setServerError(mapErrorCode(code));
+    },
+  });
+
+  const empMap = new Map<string, { name: string; code: string }>();
+  for (const e of employees.data ?? []) {
+    empMap.set(e.id, {
+      name: `${e.first_name} ${e.last_name}`.trim(),
+      code: e.employee_code,
+    });
+  }
+
+  const applySuggestion = (row: ExceptionRow) => {
+    setServerError(null);
+    resolve.mutate({
+      id: row.id,
+      body: { action: "apply_suggestion", custom_adjustment: null, note: null },
+    });
+  };
+
+  const items = exceptions.data?.items ?? [];
+
+  return (
+    <Stack gap="md">
+      <Title order={2}>{strings.exceptions.title}</Title>
+      <Paper withBorder p="md">
+        <Group gap="sm" wrap="wrap" align="end">
+          <SegmentedControl
+            value={statusFilter}
+            onChange={(v) => setStatusFilter(v)}
+            data={STATUS_OPTIONS}
+          />
+          <MultiSelect
+            label={strings.exceptions.typeFilter}
+            data={TYPE_OPTIONS}
+            value={typeFilter}
+            onChange={setTypeFilter}
+            placeholder={strings.exceptions.allTypes}
+            clearable
+          />
+        </Group>
+      </Paper>
+      <Paper withBorder p="md">
+        {exceptions.isPending ? (
+          <Group justify="center" p="xl">
+            <Loader />
+          </Group>
+        ) : exceptions.isError ? (
+          <Text c="red">{strings.exceptions.error}</Text>
+        ) : items.length === 0 ? (
+          <Text c="dimmed">{strings.exceptions.empty}</Text>
+        ) : (
+          <Stack gap="sm">
+            {items.map((row) => {
+              const info = empMap.get(row.employee_id);
+              return (
+                <ExceptionCard
+                  key={row.id}
+                  exception={row}
+                  employeeName={
+                    info?.name ?? row.employee_id.slice(0, 8)
+                  }
+                  employeeCode={info?.code ?? ""}
+                  onApplySuggestion={() => applySuggestion(row)}
+                  onCustom={() =>
+                    setModal({ exception: row, action: "custom" })
+                  }
+                  onDismiss={() =>
+                    setModal({ exception: row, action: "dismiss" })
+                  }
+                  busy={resolve.isPending}
+                />
+              );
+            })}
+          </Stack>
+        )}
+      </Paper>
+      <ResolveModal
+        opened={modal !== null}
+        exception={modal?.exception ?? null}
+        initialAction={modal?.action ?? "custom"}
+        onClose={() => {
+          setModal(null);
+          setServerError(null);
+        }}
+        onResolve={(req) => {
+          if (!modal) return;
+          resolve.mutate({ id: modal.exception.id, body: req });
+        }}
+        busy={resolve.isPending}
+        serverError={serverError}
+      />
+    </Stack>
+  );
+}
+=== END FILE: frontend/src/pages/ExceptionsPage.tsx ===
+=== FILE: frontend/src/pages/ExceptionsPage.test.tsx ===
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MantineProvider } from "@mantine/core";
+import { ExceptionsPage } from "./ExceptionsPage";
+
+function jr(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    return input.url;
+  }
+  return String(input);
+}
+
+function requestMethod(input: RequestInfo | URL): string {
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    return input.method;
+  }
+  return "GET";
+}
+
+type Call = { url: string; method: string; body: string };
+
+function setupMock(opts: {
+  exceptions?: unknown[];
+  employees?: unknown[];
+  resolveResponse?: unknown;
+}): { calls: Call[] } {
+  const calls: Call[] = [];
+  global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const url = requestUrl(input);
+    const method = requestMethod(input);
+    let body = "";
+    if (method !== "GET" && typeof Request !== "undefined" && input instanceof Request) {
+      body = await input.clone().text();
+    }
+    calls.push({ url, method, body });
+    if (method === "POST" && url.includes("/attendance/exceptions/") && url.includes("/resolve")) {
+      return jr(opts.resolveResponse ?? { exception: {}, adjustment_id: null, day_status: null });
+    }
+    if (url.includes("/attendance/exceptions")) {
+      return jr({ items: opts.exceptions ?? [], next_cursor: null });
+    }
+    if (url.includes("/api/v1/employees")) {
+      return jr({ items: opts.employees ?? [], next_cursor: null });
+    }
+    return jr({}, 200);
+  }) as unknown as typeof fetch;
+  return { calls };
+}
+
+function renderPage() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <MantineProvider>
+      <QueryClientProvider client={client}>
+        <ExceptionsPage />
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+}
+
+const EMP = {
+  id: "e1",
+  employee_code: "EMP001",
+  first_name: "Ada",
+  last_name: "Lovelace",
+};
+
+const EXC = {
+  id: "exc1",
+  employee_id: "e1",
+  work_date: "2026-10-15",
+  type: "missing_punch",
+  source_ref: { punch_id: "p1" },
+  suggested_fix: {
+    outcome: "worked",
+    time_in: "2026-10-15T08:00:00Z",
+    time_out: "2026-10-15T16:30:00Z",
+    reason_code: "missing_punch",
+  },
+  status: "open",
+  assigned_to: null,
+  resolved_by: null,
+  resolved_at: null,
+  resolution: null,
+  created_at: "2026-10-16T00:00:00Z",
+  updated_at: "2026-10-16T00:00:00Z",
+};
+
+afterEach(cleanup);
+
+describe("ExceptionsPage", () => {
+  beforeEach(() => setupMock({ exceptions: [EXC], employees: [EMP] }));
+
+  it("renders the title, exception row, and employee name", async () => {
+    renderPage();
+    expect(screen.getByText("Exceptions")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("exception-exc1")).toBeInTheDocument();
+    });
+    expect(screen.getByText("missing_punch")).toBeInTheDocument();
+    expect(screen.getByText(/Ada Lovelace/)).toBeInTheDocument();
+    expect(screen.getByText(/EMP001/)).toBeInTheDocument();
+  });
+
+  it("shows empty text when no exceptions", async () => {
+    setupMock({ exceptions: [], employees: [EMP] });
+    renderPage();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/no open exceptions/i),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("shows error state when fetch fails", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.includes("/attendance/exceptions")) {
+        return jr({ error: { code: "boom" } }, 500);
+      }
+      return jr({ items: [], next_cursor: null });
+    }) as unknown as typeof fetch;
+    renderPage();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/could not load exceptions/i),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("apply suggestion POSTs resolve with action=apply_suggestion", async () => {
+    const { calls } = setupMock({
+      exceptions: [EXC],
+      employees: [EMP],
+      resolveResponse: { exception: EXC, adjustment_id: "adj1", day_status: "worked" },
+    });
+    renderPage();
+    const applyBtn = await screen.findByTestId("apply-exc1");
+    fireEvent.click(applyBtn);
+    await waitFor(() => {
+      const post = calls.find(
+        (c) => c.method === "POST" && c.url.includes("/resolve"),
+      );
+      expect(post).toBeTruthy();
+      const parsed = JSON.parse(post!.body) as { action: string };
+      expect(parsed.action).toBe("apply_suggestion");
+    });
+  });
+
+  it("custom button opens modal with adjustment form", async () => {
+    renderPage();
+    const customBtn = await screen.findByTestId("custom-exc1");
+    fireEvent.click(customBtn);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByTestId("adj-submit")).toBeInTheDocument();
+    expect(within(dialog).getByTestId("adj-reason")).toBeInTheDocument();
+  });
+
+  it("dismiss requires a note of at least 3 characters", async () => {
+    renderPage();
+    const dismissBtn = await screen.findByTestId("dismiss-exc1");
+    fireEvent.click(dismissBtn);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByTestId("dismiss-submit"));
+    await waitFor(() => {
+      expect(
+        within(dialog).getByText(/note of at least 3 characters/i),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("adjustment form rejects 'other' reason with a short note", async () => {
+    renderPage();
+    const customBtn = await screen.findByTestId("custom-exc1");
+    fireEvent.click(customBtn);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByTestId("adj-reason"), {
+      target: { value: "other" },
+    });
+    fireEvent.change(within(dialog).getByTestId("adj-note"), {
+      target: { value: "short" },
+    });
+    fireEvent.click(within(dialog).getByTestId("adj-submit"));
+    await waitFor(() => {
+      expect(
+        within(dialog).getByText(/at least 10 characters/i),
+      ).toBeInTheDocument();
+    });
+  });
+});
+=== END FILE: frontend/src/pages/ExceptionsPage.test.tsx ===
+=== FILE: frontend/src/lib/strings.ts ===
+export const strings = {
+  appName: "Payroll",
+  genericError: "Something went wrong. Please try again.",
+  login: {
+    title: "Sign in",
+    identifierLabel: "Username or email",
+    passwordLabel: "Password",
+    tenantLabel: "Tenant slug (development only)",
+    submit: "Sign in",
+    error: "Sign-in failed. Check your details.",
+  },
+  changePassword: {
+    title: "Change your password",
+    intro: "You must set a new password before you can continue.",
+    currentLabel: "Current password",
+    newLabel: "New password",
+    confirmLabel: "Confirm new password",
+    submit: "Change password",
+    tooShort: "Password must be at least 8 characters.",
+    mismatch: "Passwords do not match.",
+  },
+  shell: {
+    logout: "Sign out",
+    roleLabel: (role: string) => `Role: ${role}`,
+  },
+  home: {
+    welcome: (name: string) => (name ? `Welcome, ${name}.` : "Welcome."),
+    roleLabel: (role: string) => (role ? `Signed in as ${role}.` : ""),
+    cards: {
+      attendance: { title: "Attendance", body: "Open the monthly sheet and the daily list.", cta: "View attendance" },
+      exceptions: { title: "Exceptions", body: "Review and resolve open attendance exceptions.", cta: "Open queue" },
+      employees: { title: "Employees", body: "Browse, edit, and import employees.", cta: "View employees" },
+      payPeriods: { title: "Pay periods", body: "Preview and finalise payroll.", cta: "View periods" },
+      changeRequests: { title: "Change requests", body: "Approve or reject pending changes.", cta: "Open inbox" },
+      auditLog: { title: "Audit log", body: "Read-only history of changes.", cta: "Open log" },
+      setup: { title: "Setup", body: "Company, branches, sites, departments.", cta: "Open setup" },
+      payslips: { title: "My payslips", body: "View and download your payslips.", cta: "View payslips" },
+    },
+  },
+  attendance: {
+    title: "Attendance",
+    fromDate: "From",
+    toDate: "To",
+    branch: "Branch",
+    site: "Site",
+    department: "Department",
+    attendanceStatus: "Attendance status",
+    allStatuses: "All statuses",
+    all: "All",
+    includeTerminated: "Include terminated",
+    reset: "Reset",
+    employee: "Employee",
+    empty: "No employees match these filters.",
+    error: "Could not load the attendance sheet.",
+    dailyError: "Could not load the daily list.",
+    rangeTooWide: "Date range must be 31 days or fewer.",
+    firstPage: "First page",
+    nextPage: "Next page",
+    viewMonthly: "Monthly",
+    viewDaily: "Daily",
+    dailyDate: "Date",
+    dayPanel: {
+      title: "Day detail",
+      error: "Could not load this day.",
+      noStatus: "No status",
+      locked: "Locked",
+      reviewed: "Reviewed",
+      openExceptions: "open exception(s)",
+      firstIn: "First in",
+      lastOut: "Last out",
+      worked: "Worked",
+      overtime: "Overtime",
+      minutes: "min",
+      flags: "Flags",
+      punches: "Punches",
+      noPunches: "No punches recorded for this day.",
+      time: "Time",
+      direction: "Direction",
+      source: "Source",
+      confidence: "Confidence",
+      exceptions: "Exceptions",
+      noExceptions: "No exceptions.",
+    },
+    daily: {
+      status: "Status",
+      firstIn: "First in",
+      lastOut: "Last out",
+      worked: "Worked (min)",
+      overtime: "Overtime (min)",
+      exceptions: "Exceptions",
+      locked: "Locked",
+      reviewed: "Reviewed",
+      yes: "Yes",
+    },
+    markReviewed: {
+      submit: "Mark clean days reviewed",
+      body: "Marks every clean day in the selected range as reviewed. Days with open exceptions are refused and listed below.",
+      error: "Could not mark days reviewed.",
+      reviewedCount: "day(s) marked reviewed.",
+      refusedCount: "day(s) refused.",
+      employee: "Employee",
+      date: "Date",
+      reason: "Reason",
+      close: "Close",
+      again: "Run again",
+      title: "Mark clean days reviewed",
+    },
+  },
+  exceptions: {
+    title: "Exceptions",
+    statusOpen: "Open",
+    statusResolved: "Resolved",
+    statusDismissed: "Dismissed",
+    typeFilter: "Type",
+    allTypes: "All types",
+    empty: "No open exceptions match these filters.",
+    error: "Could not load exceptions.",
+    suggestedLabel: "Suggested:",
+    suggestWorked: "worked",
+    applyButton: "Apply",
+    customButton: "Custom",
+    dismissButton: "Dismiss",
+    resolveTitle: "Resolve exception",
+    customAction: "Custom adjustment",
+    dismissAction: "Dismiss",
+    dismissNote: "Reason for dismissing",
+    dismissSubmit: "Dismiss exception",
+    dismissNoteRequired: "Note of at least 3 characters is required.",
+  },
+  adjustments: {
+    outcome: "Outcome",
+    timeIn: "Time in",
+    timeOut: "Time out",
+    reasonCode: "Reason code",
+    reasonCodeHint: "e.g. missing_punch, wrong_shift",
+    note: "Note",
+    noteOtherHint: "Required when reason code is 'other' (at least 10 characters).",
+    submit: "Save adjustment",
+    reasonRequired: "Reason code is required.",
+    timesRequired: "Times are required when outcome is worked.",
+    timeOrder: "Time out must be after time in.",
+    noteRequiredForOther: "Reason 'other' requires a note of at least 10 characters.",
+  },
+} as const;
+=== END FILE: frontend/src/lib/strings.ts ===
+=== FILE: frontend/src/App.tsx ===
+import { Navigate, Route, Routes } from "react-router-dom";
+import { AuthProvider } from "./auth/AuthContext";
+import { ProtectedRoute } from "./auth/ProtectedRoute";
+import { AppShell } from "./shell/AppShell";
+import { AttendanceSheetPage } from "./pages/AttendanceSheetPage";
+import { ExceptionsPage } from "./pages/ExceptionsPage";
+import { ForcePasswordChangePage } from "./pages/ForcePasswordChangePage";
+import { HomePage } from "./pages/HomePage";
+import { LoginPage } from "./pages/LoginPage";
+import { PlaceholderPage } from "./pages/PlaceholderPage";
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="/change-password"
+          element={
+            <ProtectedRoute>
+              <ForcePasswordChangePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <AppShell />
+            </ProtectedRoute>
+          }
+        >
+          <Route index element={<HomePage />} />
+          <Route path="attendance" element={<AttendanceSheetPage />} />
+          <Route path="attendance/exceptions" element={<ExceptionsPage />} />
+          <Route
+            path="attendance/adjustments"
+            element={<PlaceholderPage title="Adjustments" phase="F-3b" />}
+          />
+          <Route
+            path="employees"
+            element={<PlaceholderPage title="Employees" phase="F-4" />}
+          />
+          <Route
+            path="payroll/pay-periods"
+            element={<PlaceholderPage title="Pay periods" phase="F-7" />}
+          />
+          <Route
+            path="payroll/change-requests"
+            element={<PlaceholderPage title="Change requests" phase="F-6" />}
+          />
+          <Route
+            path="audit-log"
+            element={<PlaceholderPage title="Audit log" phase="F-8" />}
+          />
+          <Route
+            path="setup"
+            element={<PlaceholderPage title="Setup" phase="F-5" />}
+          />
+          <Route
+            path="payslips"
+            element={<PlaceholderPage title="My payslips" phase="F-7" />}
+          />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </AuthProvider>
+  );
+}
+=== END FILE: frontend/src/App.tsx ===
+# END OF FILE

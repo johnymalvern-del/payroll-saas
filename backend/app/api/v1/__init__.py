@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1.audit_log import router as audit_log_router
+from app.api.v1.auth.me import router as auth_me_router
 from app.api.v1.auth.router import router as auth_router
 from app.api.v1.branches import router as branches_router
 from app.api.v1.company.router import router as company_router
@@ -36,6 +37,7 @@ from app.api.v1.sheet import router as sheet_router
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(register_router)
 api_router.include_router(auth_router)
+api_router.include_router(auth_me_router)
 api_router.include_router(company_router)
 api_router.include_router(branches_router)
 api_router.include_router(sites_router)
@@ -65,5 +67,3 @@ api_router.include_router(payroll_employee_fields_router)
 api_router.include_router(payroll_system_types_router)
 api_router.include_router(payroll_pay_periods_router)
 api_router.include_router(payroll_payslips_router)
-
-# END OF FILE

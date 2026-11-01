@@ -1,0 +1,312 @@
+=== FILE: backend/app/api/v1/auth/me.py ===
+"""Current-user endpoint (B-1).
+
+GET /auth/me returns the authenticated user's id, username, role,
+employee_id, and permissions from the live ROLE_PERMISSIONS matrix
+(app/core/permissions.py), never a client-side hard-coded copy.
+
+must_change_password is read from the User.must_change_password column
+(explicit flag the app uses to gate the UI). Fallback: if a migration ever
+drops that column, the endpoint falls back to `password_changed_at is None`.
+"""
+from __future__ import annotations
+
+import uuid
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, ConfigDict
+
+from app.core.auth_deps import get_current_user
+from app.core.permissions import ROLE_PERMISSIONS
+
+router = APIRouter(prefix="/auth/me", tags=["auth"])
+
+
+class UserMeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    username: str
+    role: str
+    employee_id: uuid.UUID | None
+    permissions: list[str]
+    must_change_password: bool
+
+
+def _must_change_password(user: Any) -> bool:
+    if hasattr(user, "must_change_password"):
+        return bool(user.must_change_password)
+    # fallback only; the column exists today (ten_0002)
+    if hasattr(user, "password_changed_at"):
+        return user.password_changed_at is None
+    return False
+
+
+@router.get("", response_model=UserMeOut)
+def get_me(
+    user: Annotated[Any, Depends(get_current_user)],
+) -> UserMeOut:
+    role = getattr(user, "role", None) or "unknown"
+    permissions = sorted(
+        p.value for p in ROLE_PERMISSIONS.get(role, frozenset())
+    )
+    return UserMeOut(
+        id=user.id,
+        username=user.username,
+        role=role,
+        employee_id=getattr(user, "employee_id", None),
+        permissions=permissions,
+        must_change_password=_must_change_password(user),
+    )
+=== END FILE: backend/app/api/v1/auth/me.py ===
+=== FILE: backend/tests/test_auth_me.py ===
+"""B-1: GET /auth/me tests.
+
+_mk_user sets every field the login check could plausibly read
+(is_active, must_change_password, failed_attempts, locked_until) so the
+created user is a login-ready account.
+
+The four authed tests exercise role/permission round-trip and
+must_change_password derivation from the real column.
+"""
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from app.core.permissions import ROLE_PERMISSIONS
+from app.core.security import hash_password
+from app.db.tenant.models.people import User
+from app.db.tenant.session import get_tenant_engine
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    from app.db.control.models import Subscriber
+    from app.db.control.session import control_session
+    from app.services.provisioning import (
+        _drop_tenant_database,
+        _tenant_db_name,
+        provision_tenant,
+    )
+    slug = f"auth-me-{uuid.uuid4().hex[:8]}"
+    result = provision_tenant(
+        slug=slug,
+        name="Auth Me Test",
+        admin_username="admin",
+        admin_password_hash=hash_password("TestPassword123!"),
+    )
+    db_name = _tenant_db_name(slug)
+    try:
+        yield _DisposableTenant(
+            slug=result.slug,
+            tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        try:
+            _drop_tenant_database(db_name)
+        except Exception:
+            pass
+        with control_session() as session:
+            row = (
+                session.query(Subscriber)
+                .filter(Subscriber.slug == slug)
+                .one_or_none()
+            )
+            if row is not None:
+                session.delete(row)
+
+
+@pytest.fixture()
+def tenant_session(disposable_tenant):
+    engine = get_tenant_engine(disposable_tenant.tenant_db_name)
+    session = Session(engine)
+    try:
+        yield session, engine
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def _mk_user(
+    session,
+    *,
+    username,
+    role,
+    password,
+    employee_id=None,
+    must_change_password=False,
+    password_changed_at="set",
+):
+    if password_changed_at == "set":
+        password_changed_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    u = User(
+        id=uuid.uuid4(),
+        username=username,
+        password_hash=hash_password(password),
+        role=role,
+        employee_id=employee_id,
+        is_active=True,
+        must_change_password=must_change_password,
+        failed_attempts=0,
+        locked_until=None,
+        password_changed_at=password_changed_at,
+    )
+    session.add(u)
+    session.commit()
+    return u
+
+
+def _client() -> TestClient:
+    from app.main import app
+    return TestClient(app)
+
+
+def _login(client, slug, username, password):
+    r = client.post(
+        "/api/v1/auth/login",
+        headers={"X-Tenant-Slug": slug},
+        json={"identifier": username, "password": password},
+    )
+    assert r.status_code == 200, (
+        f"login failed: status={r.status_code} body={r.text} "
+        f"username={username!r} slug={slug!r}"
+    )
+    body = r.json()
+    token = body.get("access_token") or body.get("access")
+    assert isinstance(token, str) and token, (
+        f"login 200 but no access token in body: keys={sorted(body.keys())}"
+    )
+    return token
+
+
+# ---------------------------------------------------------------------------
+# Auth required
+# ---------------------------------------------------------------------------
+
+def test_auth_me_requires_auth(disposable_tenant):
+    client = _client()
+    r = client.get(
+        "/api/v1/auth/me",
+        headers={"X-Tenant-Slug": disposable_tenant.slug},
+    )
+    assert r.status_code == 401, r.text
+
+
+# ---------------------------------------------------------------------------
+# Role + permissions from the live matrix
+# ---------------------------------------------------------------------------
+
+def test_auth_me_returns_payroll_admin_role_and_permissions(
+    disposable_tenant, tenant_session,
+):
+    session, _ = tenant_session
+    _mk_user(session, username="pa-1", role="payroll_admin", password="PaPass123!")
+    client = _client()
+    token = _login(client, disposable_tenant.slug, "pa-1", "PaPass123!")
+    r = client.get(
+        "/api/v1/auth/me",
+        headers={
+            "X-Tenant-Slug": disposable_tenant.slug,
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["role"] == "payroll_admin"
+    assert body["username"] == "pa-1"
+    expected = sorted(p.value for p in ROLE_PERMISSIONS["payroll_admin"])
+    assert sorted(body["permissions"]) == expected
+    assert body["must_change_password"] is False
+
+
+def test_auth_me_returns_employee_role_and_permissions(
+    disposable_tenant, tenant_session,
+):
+    session, _ = tenant_session
+    _mk_user(session, username="emp-1", role="employee", password="EmpPass123!")
+    client = _client()
+    token = _login(client, disposable_tenant.slug, "emp-1", "EmpPass123!")
+    r = client.get(
+        "/api/v1/auth/me",
+        headers={
+            "X-Tenant-Slug": disposable_tenant.slug,
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["role"] == "employee"
+    expected = sorted(p.value for p in ROLE_PERMISSIONS["employee"])
+    assert sorted(body["permissions"]) == expected
+
+
+# ---------------------------------------------------------------------------
+# must_change_password reflects the column
+# ---------------------------------------------------------------------------
+
+def test_auth_me_must_change_password_true_when_flag_set(
+    disposable_tenant, tenant_session,
+):
+    session, _ = tenant_session
+    _mk_user(
+        session,
+        username="pa-mc-1",
+        role="payroll_admin",
+        password="PaPass123!",
+        must_change_password=True,
+        password_changed_at=None,
+    )
+    client = _client()
+    token = _login(client, disposable_tenant.slug, "pa-mc-1", "PaPass123!")
+    r = client.get(
+        "/api/v1/auth/me",
+        headers={
+            "X-Tenant-Slug": disposable_tenant.slug,
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["must_change_password"] is True
+
+
+def test_auth_me_must_change_password_false_when_flag_clear(
+    disposable_tenant, tenant_session,
+):
+    session, _ = tenant_session
+    _mk_user(
+        session,
+        username="pa-mc-2",
+        role="payroll_admin",
+        password="PaPass123!",
+        must_change_password=False,
+        password_changed_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+    )
+    client = _client()
+    token = _login(client, disposable_tenant.slug, "pa-mc-2", "PaPass123!")
+    r = client.get(
+        "/api/v1/auth/me",
+        headers={
+            "X-Tenant-Slug": disposable_tenant.slug,
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["must_change_password"] is False
+=== END FILE: backend/tests/test_auth_me.py ===
+# END OF FILE

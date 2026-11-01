@@ -1,0 +1,928 @@
+=== FILE: frontend/src/api/attendance.ts ===
+import { wrappedFetch } from "./client";
+
+export type SheetCell = {
+  work_date: string;
+  status: string | null;
+  worked_minutes: number | null;
+  normal_minutes: number | null;
+  overtime_minutes: number | null;
+  flags: string[];
+  open_exception_count: number;
+  locked: boolean;
+  reviewed: boolean;
+};
+
+export type SheetEmployee = {
+  employee_id: string;
+  employee_code: string;
+  employee_name: string;
+  site_id: string | null;
+  department_id: string | null;
+  days: SheetCell[];
+};
+
+export type SheetOut = {
+  items: SheetEmployee[];
+  next_cursor: string | null;
+  total?: number | null;
+};
+
+export type Ref = { id: string; name: string };
+
+function warnShapeMismatch(data: unknown): void {
+  if (!data || typeof data !== "object") {
+    console.warn("[attendance] sheet response is not an object", data);
+    return;
+  }
+  const obj = data as Record<string, unknown>;
+  if (!Array.isArray(obj.items)) {
+    console.warn("[attendance] sheet response missing items array", Object.keys(obj));
+    return;
+  }
+  const emp = obj.items[0];
+  if (!emp || typeof emp !== "object") return;
+  const wantEmp = ["employee_id", "employee_code", "employee_name", "days"];
+  const missEmp = wantEmp.filter((k) => !(k in (emp as Record<string, unknown>)));
+  if (missEmp.length > 0) {
+    console.warn(
+      "[attendance] sheet employee missing keys:",
+      missEmp,
+      "got:",
+      Object.keys(emp as Record<string, unknown>),
+    );
+  }
+  const days = (emp as Record<string, unknown>).days;
+  if (Array.isArray(days) && days.length > 0) {
+    const c = days[0];
+    if (c && typeof c === "object") {
+      const wantCell = [
+        "work_date",
+        "status",
+        "worked_minutes",
+        "flags",
+        "open_exception_count",
+        "locked",
+        "reviewed",
+      ];
+      const missCell = wantCell.filter((k) => !(k in (c as Record<string, unknown>)));
+      if (missCell.length > 0) {
+        console.warn(
+          "[attendance] sheet cell missing keys:",
+          missCell,
+          "got:",
+          Object.keys(c as Record<string, unknown>),
+        );
+      }
+    }
+  }
+}
+
+export async function fetchSheet(params: {
+  fromDate: string;
+  toDate: string;
+  siteId?: string | null;
+  branchId?: string | null;
+  departmentId?: string | null;
+  includeTerminated?: boolean;
+  limit?: number;
+  cursor?: string | null;
+}): Promise<SheetOut> {
+  const qs = new URLSearchParams();
+  qs.set("from_date", params.fromDate);
+  qs.set("to_date", params.toDate);
+  if (params.siteId) qs.set("site_id", params.siteId);
+  if (params.branchId) qs.set("branch_id", params.branchId);
+  if (params.departmentId) qs.set("department_id", params.departmentId);
+  if (params.includeTerminated) qs.set("include_terminated", "true");
+  qs.set("limit", String(params.limit ?? 50));
+  if (params.cursor) qs.set("cursor", params.cursor);
+  const res = await wrappedFetch(
+    new Request(`/api/v1/attendance/sheet?${qs.toString()}`, {
+      credentials: "include",
+    }),
+  );
+  if (!res.ok) {
+    throw new Error(`sheet fetch failed: ${res.status}`);
+  }
+  const data = await res.json();
+  warnShapeMismatch(data);
+  return data as SheetOut;
+}
+
+async function fetchRefs(path: string): Promise<Ref[]> {
+  const res = await wrappedFetch(
+    new Request(`/api/v1${path}?limit=500`, { credentials: "include" }),
+  );
+  if (!res.ok) return [];
+  const body = (await res.json()) as { items?: Ref[] };
+  return body.items ?? [];
+}
+
+export function fetchBranches(): Promise<Ref[]> {
+  return fetchRefs("/branches");
+}
+
+export function fetchSites(): Promise<Ref[]> {
+  return fetchRefs("/sites");
+}
+
+export function fetchDepartments(): Promise<Ref[]> {
+  return fetchRefs("/departments");
+}
+=== END FILE: frontend/src/api/attendance.ts ===
+=== FILE: frontend/src/components/AttendanceSheet/FilterBar.tsx ===
+import { Button, Group, MultiSelect, Select, Switch, TextInput } from "@mantine/core";
+import dayjs from "dayjs";
+import type { Ref } from "../../api/attendance";
+import { strings } from "../../lib/strings";
+
+type Props = {
+  fromDate: Date | null;
+  toDate: Date | null;
+  branchId: string | null;
+  siteId: string | null;
+  departmentId: string | null;
+  attendanceStatus: string[];
+  includeTerminated: boolean;
+  branches: Ref[];
+  sites: Ref[];
+  departments: Ref[];
+  onFromDate: (d: Date | null) => void;
+  onToDate: (d: Date | null) => void;
+  onBranch: (v: string | null) => void;
+  onSite: (v: string | null) => void;
+  onDepartment: (v: string | null) => void;
+  onAttendanceStatus: (v: string[]) => void;
+  onIncludeTerminated: (v: boolean) => void;
+  onReset: () => void;
+};
+
+export function FilterBar(props: Props) {
+  const branchOpts = props.branches.map((b) => ({ value: b.id, label: b.name }));
+  const siteOpts = props.sites.map((s) => ({ value: s.id, label: s.name }));
+  const deptOpts = props.departments.map((d) => ({ value: d.id, label: d.name }));
+  const statusOpts = ["worked", "leave", "sick", "absent", "day_off"].map((s) => ({
+    value: s,
+    label: s.replace("_", " "),
+  }));
+
+  const fromValue = props.fromDate ? dayjs(props.fromDate).format("YYYY-MM-DD") : "";
+  const toValue = props.toDate ? dayjs(props.toDate).format("YYYY-MM-DD") : "";
+
+  return (
+    <Group gap="sm" wrap="wrap" align="end">
+      <TextInput
+        label={strings.attendance.fromDate}
+        type="date"
+        value={fromValue}
+        onChange={(e) => {
+          const v = e.currentTarget.value;
+          props.onFromDate(v ? new Date(v) : null);
+        }}
+      />
+      <TextInput
+        label={strings.attendance.toDate}
+        type="date"
+        value={toValue}
+        onChange={(e) => {
+          const v = e.currentTarget.value;
+          props.onToDate(v ? new Date(v) : null);
+        }}
+      />
+      <Select
+        label={strings.attendance.branch}
+        data={[{ value: "", label: strings.attendance.all }, ...branchOpts]}
+        value={props.branchId ?? ""}
+        onChange={(v) => props.onBranch(v || null)}
+        allowDeselect={false}
+      />
+      <Select
+        label={strings.attendance.site}
+        data={[{ value: "", label: strings.attendance.all }, ...siteOpts]}
+        value={props.siteId ?? ""}
+        onChange={(v) => props.onSite(v || null)}
+        allowDeselect={false}
+      />
+      <Select
+        label={strings.attendance.department}
+        data={[{ value: "", label: strings.attendance.all }, ...deptOpts]}
+        value={props.departmentId ?? ""}
+        onChange={(v) => props.onDepartment(v || null)}
+        allowDeselect={false}
+      />
+      <MultiSelect
+        label={strings.attendance.attendanceStatus}
+        data={statusOpts}
+        value={props.attendanceStatus}
+        onChange={props.onAttendanceStatus}
+        placeholder={strings.attendance.allStatuses}
+        clearable
+      />
+      <Switch
+        label={strings.attendance.includeTerminated}
+        checked={props.includeTerminated}
+        onChange={(e) => props.onIncludeTerminated(e.currentTarget.checked)}
+      />
+      <Button variant="default" onClick={props.onReset}>
+        {strings.attendance.reset}
+      </Button>
+    </Group>
+  );
+}
+=== END FILE: frontend/src/components/AttendanceSheet/FilterBar.tsx ===
+=== FILE: frontend/src/components/AttendanceSheet/MonthlyGrid.tsx ===
+import { Badge, Group, ScrollArea, Table, Text, Tooltip } from "@mantine/core";
+import dayjs from "dayjs";
+import type { SheetCell, SheetEmployee } from "../../api/attendance";
+import { strings } from "../../lib/strings";
+
+type Props = {
+  fromDate: string;
+  toDate: string;
+  employees: SheetEmployee[];
+  attendanceStatus: string[];
+};
+
+function buildDays(fromDate: string, toDate: string): string[] {
+  if (!fromDate || !toDate) return [];
+  const start = dayjs(fromDate);
+  const end = dayjs(toDate);
+  const days: string[] = [];
+  let cur = start;
+  while (cur.isBefore(end) || cur.isSame(end, "day")) {
+    days.push(cur.format("YYYY-MM-DD"));
+    cur = cur.add(1, "day");
+  }
+  return days;
+}
+
+function cellFor(employee: SheetEmployee, date: string): SheetCell | null {
+  return employee.days.find((c) => c.work_date === date) ?? null;
+}
+
+function statusColor(status: string | null): string {
+  switch (status) {
+    case "worked":
+      return "green";
+    case "leave":
+      return "blue";
+    case "sick":
+      return "orange";
+    case "absent":
+      return "red";
+    case "day_off":
+      return "gray";
+    default:
+      return "gray";
+  }
+}
+
+function statusLabel(status: string | null): string {
+  if (!status) return "\u2014";
+  return status.replace("_", " ");
+}
+
+function CellView({ cell }: { cell: SheetCell | null }) {
+  if (!cell) {
+    return (
+      <Text size="xs" c="dimmed">
+        {"\u2014"}
+      </Text>
+    );
+  }
+  const lines: string[] = [statusLabel(cell.status)];
+  if (cell.worked_minutes !== null && cell.worked_minutes !== undefined) {
+    lines.push(`${cell.worked_minutes} worked`);
+  }
+  if (cell.open_exception_count > 0) {
+    lines.push(`${cell.open_exception_count} open exception(s)`);
+  }
+  if (cell.flags && cell.flags.length > 0) {
+    lines.push(`flags: ${cell.flags.join(", ")}`);
+  }
+  if (cell.locked) lines.push("locked");
+  if (cell.reviewed) lines.push("reviewed");
+
+  return (
+    <Tooltip label={lines.join(" \u00b7 ")} withinPortal>
+      <Group gap={4} wrap="nowrap" justify="center">
+        {cell.status ? (
+          <Badge size="xs" color={statusColor(cell.status)} variant="light">
+            {statusLabel(cell.status)}
+          </Badge>
+        ) : (
+          <Text size="xs" c="dimmed">
+            {"\u2014"}
+          </Text>
+        )}
+        {cell.open_exception_count > 0 ? (
+          <Text size="xs" c="red" fw={700}>
+            !
+          </Text>
+        ) : null}
+      </Group>
+    </Tooltip>
+  );
+}
+
+export function MonthlyGrid({ fromDate, toDate, employees, attendanceStatus }: Props) {
+  const days = buildDays(fromDate, toDate);
+  const filterSet = attendanceStatus.length > 0 ? new Set(attendanceStatus) : null;
+
+  const rows = employees
+    .map((emp) => {
+      const cells = days.map((d) => cellFor(emp, d));
+      if (filterSet) {
+        const anyMatch = cells.some(
+          (c) => c && c.status && filterSet.has(c.status),
+        );
+        if (!anyMatch) return null;
+      }
+      return { emp, cells };
+    })
+    .filter(
+      (r): r is { emp: SheetEmployee; cells: (SheetCell | null)[] } => r !== null,
+    );
+
+  if (rows.length === 0) {
+    return <Text c="dimmed">{strings.attendance.empty}</Text>;
+  }
+
+  return (
+    <ScrollArea type="auto" offsetScrollbars>
+      <Table
+        striped
+        withTableBorder
+        withColumnBorders
+        stickyHeader
+        highlightOnHover
+      >
+        <Table.Thead>
+          <Table.Tr>
+            <Table.Th
+              style={{
+                minWidth: 200,
+                position: "sticky",
+                left: 0,
+                background: "white",
+                zIndex: 2,
+              }}
+            >
+              {strings.attendance.employee}
+            </Table.Th>
+            {days.map((d) => (
+              <Table.Th key={d} style={{ minWidth: 70, textAlign: "center" }}>
+                {dayjs(d).format("DD")}
+              </Table.Th>
+            ))}
+          </Table.Tr>
+        </Table.Thead>
+        <Table.Tbody>
+          {rows.map(({ emp, cells }) => (
+            <Table.Tr key={emp.employee_id}>
+              <Table.Td
+                style={{
+                  position: "sticky",
+                  left: 0,
+                  background: "white",
+                  zIndex: 1,
+                }}
+              >
+                <Text size="sm" fw={500}>
+                  {emp.employee_name}
+                </Text>
+                <Text size="xs" c="dimmed">
+                  {emp.employee_code}
+                </Text>
+              </Table.Td>
+              {cells.map((c, i) => (
+                <Table.Td key={days[i]} style={{ textAlign: "center" }}>
+                  <CellView cell={c} />
+                </Table.Td>
+              ))}
+            </Table.Tr>
+          ))}
+        </Table.Tbody>
+      </Table>
+    </ScrollArea>
+  );
+}
+=== END FILE: frontend/src/components/AttendanceSheet/MonthlyGrid.tsx ===
+=== FILE: frontend/src/pages/AttendanceSheetPage.tsx ===
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import {
+  Button,
+  Group,
+  Loader,
+  Paper,
+  Stack,
+  Text,
+  Title,
+} from "@mantine/core";
+import dayjs from "dayjs";
+import {
+  fetchBranches,
+  fetchDepartments,
+  fetchSheet,
+  fetchSites,
+} from "../api/attendance";
+import { FilterBar } from "../components/AttendanceSheet/FilterBar";
+import { MonthlyGrid } from "../components/AttendanceSheet/MonthlyGrid";
+import { strings } from "../lib/strings";
+
+const PAGE_SIZE = 50;
+
+export function AttendanceSheetPage() {
+  const [fromDate, setFromDate] = useState<Date | null>(
+    dayjs().startOf("month").toDate(),
+  );
+  const [toDate, setToDate] = useState<Date | null>(
+    dayjs().endOf("month").toDate(),
+  );
+  const [branchId, setBranchId] = useState<string | null>(null);
+  const [siteId, setSiteId] = useState<string | null>(null);
+  const [departmentId, setDepartmentId] = useState<string | null>(null);
+  const [attendanceStatus, setAttendanceStatus] = useState<string[]>([]);
+  const [includeTerminated, setIncludeTerminated] = useState(false);
+  const [cursor, setCursor] = useState<string | null>(null);
+
+  const fromStr = useMemo(
+    () => (fromDate ? dayjs(fromDate).format("YYYY-MM-DD") : ""),
+    [fromDate],
+  );
+  const toStr = useMemo(
+    () => (toDate ? dayjs(toDate).format("YYYY-MM-DD") : ""),
+    [toDate],
+  );
+  const rangeOk = useMemo(() => {
+    if (!fromDate || !toDate) return false;
+    const diff = dayjs(toDate).diff(dayjs(fromDate), "day");
+    return diff >= 0 && diff <= 30;
+  }, [fromDate, toDate]);
+
+  const branches = useQuery({
+    queryKey: ["refs", "branches"],
+    queryFn: fetchBranches,
+  });
+  const sites = useQuery({
+    queryKey: ["refs", "sites"],
+    queryFn: fetchSites,
+  });
+  const departments = useQuery({
+    queryKey: ["refs", "departments"],
+    queryFn: fetchDepartments,
+  });
+
+  const sheet = useQuery({
+    queryKey: [
+      "attendance",
+      "sheet",
+      fromStr,
+      toStr,
+      branchId,
+      siteId,
+      departmentId,
+      includeTerminated,
+      cursor,
+    ],
+    queryFn: () =>
+      fetchSheet({
+        fromDate: fromStr,
+        toDate: toStr,
+        branchId,
+        siteId,
+        departmentId,
+        includeTerminated,
+        limit: PAGE_SIZE,
+        cursor,
+      }),
+    enabled: rangeOk,
+  });
+
+  const onReset = () => {
+    setFromDate(dayjs().startOf("month").toDate());
+    setToDate(dayjs().endOf("month").toDate());
+    setBranchId(null);
+    setSiteId(null);
+    setDepartmentId(null);
+    setAttendanceStatus([]);
+    setIncludeTerminated(false);
+    setCursor(null);
+  };
+
+  return (
+    <Stack gap="md">
+      <Title order={2}>{strings.attendance.title}</Title>
+      <Paper withBorder p="md">
+        <FilterBar
+          fromDate={fromDate}
+          toDate={toDate}
+          branchId={branchId}
+          siteId={siteId}
+          departmentId={departmentId}
+          attendanceStatus={attendanceStatus}
+          includeTerminated={includeTerminated}
+          branches={branches.data ?? []}
+          sites={sites.data ?? []}
+          departments={departments.data ?? []}
+          onFromDate={(d) => {
+            setFromDate(d);
+            setCursor(null);
+          }}
+          onToDate={(d) => {
+            setToDate(d);
+            setCursor(null);
+          }}
+          onBranch={(v) => {
+            setBranchId(v);
+            setCursor(null);
+          }}
+          onSite={(v) => {
+            setSiteId(v);
+            setCursor(null);
+          }}
+          onDepartment={(v) => {
+            setDepartmentId(v);
+            setCursor(null);
+          }}
+          onAttendanceStatus={setAttendanceStatus}
+          onIncludeTerminated={(v) => {
+            setIncludeTerminated(v);
+            setCursor(null);
+          }}
+          onReset={onReset}
+        />
+        {!rangeOk ? (
+          <Text c="red" size="sm" mt="sm">
+            {strings.attendance.rangeTooWide}
+          </Text>
+        ) : null}
+      </Paper>
+      <Paper withBorder p="md">
+        {sheet.isLoading ? (
+          <Group justify="center" p="xl">
+            <Loader />
+          </Group>
+        ) : sheet.isError ? (
+          <Text c="red">{strings.attendance.error}</Text>
+        ) : (
+          <MonthlyGrid
+            fromDate={fromStr}
+            toDate={toStr}
+            employees={sheet.data?.items ?? []}
+            attendanceStatus={attendanceStatus}
+          />
+        )}
+      </Paper>
+      <Group justify="space-between">
+        <Button
+          variant="default"
+          disabled={!cursor}
+          onClick={() => setCursor(null)}
+        >
+          {strings.attendance.firstPage}
+        </Button>
+        <Button
+          variant="default"
+          disabled={!sheet.data?.next_cursor}
+          onClick={() => setCursor(sheet.data?.next_cursor ?? null)}
+        >
+          {strings.attendance.nextPage}
+        </Button>
+      </Group>
+    </Stack>
+  );
+}
+=== END FILE: frontend/src/pages/AttendanceSheetPage.tsx ===
+=== FILE: frontend/src/pages/AttendanceSheetPage.test.tsx ===
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { AttendanceSheetPage } from "./AttendanceSheetPage";
+
+function jr(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function setupMock(sheetItems: unknown[]): void {
+  global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/attendance/sheet")) {
+      return jr({ items: sheetItems, next_cursor: null });
+    }
+    if (
+      url.includes("/api/v1/branches") ||
+      url.includes("/api/v1/sites") ||
+      url.includes("/api/v1/departments")
+    ) {
+      return jr({ items: [], next_cursor: null });
+    }
+    return jr({}, 200);
+  }) as unknown as typeof fetch;
+}
+
+function renderPage() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={client}>
+      <AttendanceSheetPage />
+    </QueryClientProvider>,
+  );
+}
+
+const SAMPLE_CELL = {
+  work_date: "2025-06-01",
+  status: "worked",
+  worked_minutes: 480,
+  normal_minutes: 480,
+  overtime_minutes: 0,
+  flags: [],
+  open_exception_count: 0,
+  locked: false,
+  reviewed: false,
+};
+
+const SAMPLE_EMPLOYEE = {
+  employee_id: "e1",
+  employee_code: "EMP001",
+  employee_name: "Ada Lovelace",
+  site_id: null,
+  department_id: null,
+  days: [SAMPLE_CELL],
+};
+
+describe("AttendanceSheetPage", () => {
+  beforeEach(() => {
+    setupMock([SAMPLE_EMPLOYEE]);
+  });
+
+  it("renders the title and employee row from the sheet", async () => {
+    renderPage();
+    expect(screen.getByText("Attendance")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
+      expect(screen.getByText("EMP001")).toBeInTheDocument();
+    });
+  });
+
+  it("shows empty text when sheet returns no employees", async () => {
+    setupMock([]);
+    renderPage();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/no employees match these filters/i),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("renders a status badge for a worked cell", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("worked")).toBeInTheDocument();
+    });
+  });
+
+  it("shows an error message when sheet fetch fails", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/api/v1/attendance/sheet")) {
+        return jr({ error: { code: "boom" } }, 500);
+      }
+      return jr({ items: [], next_cursor: null });
+    }) as unknown as typeof fetch;
+    renderPage();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/could not load the attendance sheet/i),
+      ).toBeInTheDocument();
+    });
+  });
+});
+=== END FILE: frontend/src/pages/AttendanceSheetPage.test.tsx ===
+=== FILE: frontend/src/lib/strings.ts ===
+export const strings = {
+  appName: "Payroll",
+  genericError: "Something went wrong. Please try again.",
+  login: {
+    title: "Sign in",
+    identifierLabel: "Username or email",
+    passwordLabel: "Password",
+    tenantLabel: "Tenant slug (development only)",
+    submit: "Sign in",
+    error: "Sign-in failed. Check your details.",
+  },
+  changePassword: {
+    title: "Change your password",
+    intro: "You must set a new password before you can continue.",
+    currentLabel: "Current password",
+    newLabel: "New password",
+    confirmLabel: "Confirm new password",
+    submit: "Change password",
+    tooShort: "Password must be at least 8 characters.",
+    mismatch: "Passwords do not match.",
+  },
+  shell: {
+    logout: "Sign out",
+    roleLabel: (role: string) => `Role: ${role}`,
+  },
+  home: {
+    welcome: (name: string) => (name ? `Welcome, ${name}.` : "Welcome."),
+    roleLabel: (role: string) => (role ? `Signed in as ${role}.` : ""),
+    cards: {
+      attendance: {
+        title: "Attendance",
+        body: "Open the monthly sheet and the daily list.",
+        cta: "View attendance",
+      },
+      exceptions: {
+        title: "Exceptions",
+        body: "Review and resolve open attendance exceptions.",
+        cta: "Open queue",
+      },
+      employees: {
+        title: "Employees",
+        body: "Browse, edit, and import employees.",
+        cta: "View employees",
+      },
+      payPeriods: {
+        title: "Pay periods",
+        body: "Preview and finalise payroll.",
+        cta: "View periods",
+      },
+      changeRequests: {
+        title: "Change requests",
+        body: "Approve or reject pending changes.",
+        cta: "Open inbox",
+      },
+      auditLog: {
+        title: "Audit log",
+        body: "Read-only history of changes.",
+        cta: "Open log",
+      },
+      setup: {
+        title: "Setup",
+        body: "Company, branches, sites, departments.",
+        cta: "Open setup",
+      },
+      payslips: {
+        title: "My payslips",
+        body: "View and download your payslips.",
+        cta: "View payslips",
+      },
+    },
+  },
+  attendance: {
+    title: "Attendance",
+    fromDate: "From",
+    toDate: "To",
+    branch: "Branch",
+    site: "Site",
+    department: "Department",
+    attendanceStatus: "Attendance status",
+    allStatuses: "All statuses",
+    all: "All",
+    includeTerminated: "Include terminated",
+    reset: "Reset",
+    employee: "Employee",
+    empty: "No employees match these filters.",
+    error: "Could not load the attendance sheet.",
+    rangeTooWide: "Date range must be 31 days or fewer.",
+    firstPage: "First page",
+    nextPage: "Next page",
+  },
+} as const;
+=== END FILE: frontend/src/lib/strings.ts ===
+=== FILE: frontend/src/App.tsx ===
+import { Navigate, Route, Routes } from "react-router-dom";
+import { AuthProvider } from "./auth/AuthContext";
+import { ProtectedRoute } from "./auth/ProtectedRoute";
+import { AppShell } from "./shell/AppShell";
+import { AttendanceSheetPage } from "./pages/AttendanceSheetPage";
+import { ForcePasswordChangePage } from "./pages/ForcePasswordChangePage";
+import { HomePage } from "./pages/HomePage";
+import { LoginPage } from "./pages/LoginPage";
+import { PlaceholderPage } from "./pages/PlaceholderPage";
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="/change-password"
+          element={
+            <ProtectedRoute>
+              <ForcePasswordChangePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <AppShell />
+            </ProtectedRoute>
+          }
+        >
+          <Route index element={<HomePage />} />
+          <Route path="attendance" element={<AttendanceSheetPage />} />
+          <Route
+            path="attendance/exceptions"
+            element={<PlaceholderPage title="Exceptions" phase="F-3" />}
+          />
+          <Route
+            path="attendance/adjustments"
+            element={<PlaceholderPage title="Adjustments" phase="F-3" />}
+          />
+          <Route
+            path="employees"
+            element={<PlaceholderPage title="Employees" phase="F-4" />}
+          />
+          <Route
+            path="payroll/pay-periods"
+            element={<PlaceholderPage title="Pay periods" phase="F-7" />}
+          />
+          <Route
+            path="payroll/change-requests"
+            element={<PlaceholderPage title="Change requests" phase="F-6" />}
+          />
+          <Route
+            path="audit-log"
+            element={<PlaceholderPage title="Audit log" phase="F-8" />}
+          />
+          <Route
+            path="setup"
+            element={<PlaceholderPage title="Setup" phase="F-5" />}
+          />
+          <Route
+            path="payslips"
+            element={<PlaceholderPage title="My payslips" phase="F-7" />}
+          />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </AuthProvider>
+  );
+}
+=== END FILE: frontend/src/App.tsx ===
+=== FILE: docs/FRONTEND_STATE.md ===
+# Frontend State
+
+Read this first when opening a new chat. Updated at the end of each phase.
+
+## Phase
+
+F-2a — attendance sheet with filters and monthly grid. Real page replaces the /attendance placeholder.
+
+## Bundles done
+
+F-0a, F-0b + f002-fix, F-1a + f003-fix, B-1 + B-1-fix-2, F-1b + f004-fix + f004-fix2, F-2a (this bundle).
+
+## Bundle plan (13 frontend bundles remaining)
+
+F-2a ✓ | F-2b (day panel, daily list, mark reviewed) | F-3a, F-3b | F-4a, F-4b | F-5a, F-5b | F-6 | F-8 | F-7a, F-7b (waits for B-4).
+
+## Backend requests
+
+| # | Request | Blocks | Status |
+|---|---|---|---|
+| B-1 | GET /auth/me | F-1b | DELIVERED |
+| B-2 | Demo seed via real engine | Demo data | PENDING |
+| B-3a | GET /payroll/pay-periods/{id}/preview/{employee_id} | F-7b | PENDING |
+| B-3b | Own-payslips endpoint | F-7b | PENDING |
+| B-4 | Attendance-to-earnings | F-7 | PENDING |
+
+## Important contracts
+
+- /auth/login returns `{access_token, refresh_token, token_type, expires_in}` only. No must_change_password. UI uses /auth/me.
+- /auth/me returns `{id, username, role, employee_id, permissions[], must_change_password}`.
+- Usernames: normalise_username strips separators when a digit is present. Use `paone` not `pa-1`.
+- Refresh uses `csrf_token` cookie + `csrf_protection`. Client does NOT yet send the CSRF header. Refresh will 403 until fixed. Flagged.
+- Attendance sheet: `GET /api/v1/attendance/sheet?from_date=&to_date=&site_id=&branch_id=&department_id=&include_terminated=&limit=&cursor=` → `{items: SheetEmployee[], next_cursor}` where SheetEmployee = `{employee_id, employee_code, employee_name, site_id, department_id, days: SheetCell[]}` and SheetCell = `{work_date, status, worked_minutes, normal_minutes, overtime_minutes, flags, open_exception_count, locked, reviewed}`. Client logs a console.warn if the shape doesn't match at runtime. Field names assumed from the backend spec; verify on first live run.
+
+## Verified gaps
+
+Only B-2, B-3a, B-3b, B-4 remain. Attendance sheet field names not verified against a live response — client warnShapeMismatch prints the mismatch to console if backend differs.
+
+## Decisions
+
+- Attendance sheet uses `wrappedFetch` + manual type cast (not `api.GET`) until `npm run api:types` is run against a live backend. When the schema is generated, F-2a's `api/attendance.ts` types become authoritative.
+- Attendance status chip is a client-side post-filter (`attendanceStatus` in page state) layered over the sheet response.
+- Employee-status filter is `includeTerminated` only (backend supports that).
+- Sheet cell tooltip surfaces minutes, flags, open exception count, locked, reviewed — colour is never the only signal (status text + tooltip).
+- Pagination: "first page" (clears cursor) and "next page" (uses next_cursor). No "previous" — cursor is forward-only.
+- No row virtualisation yet (20 employees × 31 days = 620 cells, fine at this size).
+- No day panel yet — F-2b.
+
+## Next step
+
+F-2b: day panel (open a cell, fetch `GET /attendance/day/{employee_id}/{work_date}` if it exists, else use `GET /punches` filtered), daily list view, bulk `mark clean days reviewed` with refused-days table. Requires B-2 for realistic data to exercise the flow. If B-2 has not landed, F-2b ships against empty data (screens render, error states tested).
+=== END FILE: docs/FRONTEND_STATE.md ===
+# END OF FILE

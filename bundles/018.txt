@@ -1,0 +1,416 @@
+=== FILE: backend/app/api/v1/auth/me.py ===
+"""Current-user endpoint (B-1).
+
+GET /auth/me returns the authenticated user's id, username, role,
+employee_id, and permissions from the live ROLE_PERMISSIONS matrix
+(app/core/permissions.py), never a client-side hard-coded copy.
+
+must_change_password reflects User.password_changed_at: NULL means the
+user has never changed their password and must do so before continuing.
+If the column is absent (unexpected) the endpoint returns False rather
+than blocking the user.
+"""
+from __future__ import annotations
+
+import uuid
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, ConfigDict
+
+from app.core.auth_deps import get_current_user
+from app.core.permissions import ROLE_PERMISSIONS
+
+router = APIRouter(prefix="/auth/me", tags=["auth"])
+
+
+class UserMeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    username: str
+    role: str
+    employee_id: uuid.UUID | None
+    permissions: list[str]
+    must_change_password: bool
+
+
+@router.get("", response_model=UserMeOut)
+def get_me(
+    user: Annotated[Any, Depends(get_current_user)],
+) -> UserMeOut:
+    role = getattr(user, "role", None) or "unknown"
+    permissions = sorted(
+        p.value for p in ROLE_PERMISSIONS.get(role, frozenset())
+    )
+    if hasattr(user, "password_changed_at"):
+        must_change = user.password_changed_at is None
+    else:
+        must_change = False
+    return UserMeOut(
+        id=user.id,
+        username=user.username,
+        role=role,
+        employee_id=getattr(user, "employee_id", None),
+        permissions=permissions,
+        must_change_password=must_change,
+    )
+=== END FILE: backend/app/api/v1/auth/me.py ===
+=== FILE: backend/app/api/v1/__init__.py ===
+from fastapi import APIRouter
+
+from app.api.v1.audit_log import router as audit_log_router
+from app.api.v1.auth.me import router as auth_me_router
+from app.api.v1.auth.router import router as auth_router
+from app.api.v1.branches import router as branches_router
+from app.api.v1.company.router import router as company_router
+from app.api.v1.departments import router as departments_router
+from app.api.v1.devices import router as devices_router
+from app.api.v1.employee_work_patterns import router as employee_work_patterns_router
+from app.api.v1.employees import router as employees_router
+from app.api.v1.import_employees import router as import_employees_router
+from app.api.v1.pay_history import router as pay_history_router
+from app.api.v1.payroll_change_requests import router as payroll_change_requests_router
+from app.api.v1.payroll_employee_fields import router as payroll_employee_fields_router
+from app.api.v1.payroll_employees import router as payroll_employees_router
+from app.api.v1.payroll_formulas import router as payroll_formulas_router
+from app.api.v1.payroll_pay_periods import router as payroll_pay_periods_router
+from app.api.v1.payroll_payslips import router as payroll_payslips_router
+from app.api.v1.payroll_settings import router as payroll_settings_router
+from app.api.v1.payroll_system_types import router as payroll_system_types_router
+from app.api.v1.payroll_types import router as payroll_types_router
+from app.api.v1.public_holidays import router as public_holidays_router
+from app.api.v1.punches import router as punches_router
+from app.api.v1.register import router as register_router
+from app.api.v1.shift_rate_rules import router as shift_rate_rules_router
+from app.api.v1.shifts import router as shifts_router
+from app.api.v1.sites import router as sites_router
+from app.api.v1.users import router as users_router
+from app.api.v1.work_patterns import router as work_patterns_router
+
+from app.api.v1.attendance import router as attendance_router
+from app.api.v1.exceptions import router as exceptions_router
+from app.api.v1.adjustments import router as adjustments_router
+from app.api.v1.sheet import router as sheet_router
+
+api_router = APIRouter(prefix="/api/v1")
+api_router.include_router(register_router)
+api_router.include_router(auth_router)
+api_router.include_router(auth_me_router)
+api_router.include_router(company_router)
+api_router.include_router(branches_router)
+api_router.include_router(sites_router)
+api_router.include_router(departments_router)
+api_router.include_router(import_employees_router)
+api_router.include_router(employees_router)
+api_router.include_router(pay_history_router)
+api_router.include_router(users_router)
+api_router.include_router(audit_log_router)
+api_router.include_router(shifts_router)
+api_router.include_router(shift_rate_rules_router)
+api_router.include_router(work_patterns_router)
+api_router.include_router(employee_work_patterns_router)
+api_router.include_router(public_holidays_router)
+api_router.include_router(devices_router)
+api_router.include_router(punches_router)
+api_router.include_router(attendance_router)
+api_router.include_router(exceptions_router)
+api_router.include_router(adjustments_router)
+api_router.include_router(sheet_router)
+api_router.include_router(payroll_settings_router)
+api_router.include_router(payroll_types_router)
+api_router.include_router(payroll_employees_router)
+api_router.include_router(payroll_formulas_router)
+api_router.include_router(payroll_change_requests_router)
+api_router.include_router(payroll_employee_fields_router)
+api_router.include_router(payroll_system_types_router)
+api_router.include_router(payroll_pay_periods_router)
+api_router.include_router(payroll_payslips_router)
+=== END FILE: backend/app/api/v1/__init__.py ===
+=== FILE: backend/tests/test_auth_me.py ===
+"""B-1: GET /auth/me tests.
+
+Verifies the endpoint returns role + permissions from the live matrix and
+reflects password_changed_at as must_change_password.
+"""
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from app.core.permissions import ROLE_PERMISSIONS
+from app.core.security import hash_password
+from app.db.tenant.models.people import User
+from app.db.tenant.session import get_tenant_engine
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    from app.db.control.models import Subscriber
+    from app.db.control.session import control_session
+    from app.services.provisioning import (
+        _drop_tenant_database,
+        _tenant_db_name,
+        provision_tenant,
+    )
+    slug = f"auth-me-{uuid.uuid4().hex[:8]}"
+    result = provision_tenant(
+        slug=slug,
+        name="Auth Me Test",
+        admin_username="admin",
+        admin_password_hash=hash_password("TestPassword123!"),
+    )
+    db_name = _tenant_db_name(slug)
+    try:
+        yield _DisposableTenant(
+            slug=result.slug,
+            tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        try:
+            _drop_tenant_database(db_name)
+        except Exception:
+            pass
+        with control_session() as session:
+            row = (
+                session.query(Subscriber)
+                .filter(Subscriber.slug == slug)
+                .one_or_none()
+            )
+            if row is not None:
+                session.delete(row)
+
+
+@pytest.fixture()
+def tenant_session(disposable_tenant):
+    engine = get_tenant_engine(disposable_tenant.tenant_db_name)
+    session = Session(engine)
+    try:
+        yield session, engine
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def _mk_user(
+    session,
+    *,
+    username,
+    role,
+    password,
+    employee_id=None,
+    password_changed_at="set",
+):
+    if password_changed_at == "set":
+        password_changed_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    u = User(
+        id=uuid.uuid4(),
+        username=username,
+        password_hash=hash_password(password),
+        role=role,
+        employee_id=employee_id,
+        password_changed_at=password_changed_at,
+    )
+    session.add(u)
+    session.commit()
+    return u
+
+
+def _client() -> TestClient:
+    from app.main import app
+    return TestClient(app)
+
+
+def _login(client, slug, username, password):
+    r = client.post(
+        "/api/v1/auth/login",
+        headers={"X-Tenant-Slug": slug},
+        json={"identifier": username, "password": password},
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["access_token"]
+
+
+# ---------------------------------------------------------------------------
+# Auth required
+# ---------------------------------------------------------------------------
+
+def test_auth_me_requires_auth(disposable_tenant):
+    client = _client()
+    r = client.get(
+        "/api/v1/auth/me",
+        headers={"X-Tenant-Slug": disposable_tenant.slug},
+    )
+    assert r.status_code == 401, r.text
+
+
+# ---------------------------------------------------------------------------
+# Role + permissions from the live matrix
+# ---------------------------------------------------------------------------
+
+def test_auth_me_returns_payroll_admin_role_and_permissions(
+    disposable_tenant, tenant_session,
+):
+    session, _ = tenant_session
+    _mk_user(session, username="pa-1", role="payroll_admin", password="PaPass123!")
+    client = _client()
+    token = _login(client, disposable_tenant.slug, "pa-1", "PaPass123!")
+    r = client.get(
+        "/api/v1/auth/me",
+        headers={
+            "X-Tenant-Slug": disposable_tenant.slug,
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["role"] == "payroll_admin"
+    assert body["username"] == "pa-1"
+    expected = sorted(p.value for p in ROLE_PERMISSIONS["payroll_admin"])
+    assert sorted(body["permissions"]) == expected
+    assert body["must_change_password"] is False
+
+
+def test_auth_me_returns_employee_role_and_permissions(
+    disposable_tenant, tenant_session,
+):
+    session, _ = tenant_session
+    _mk_user(session, username="emp-1", role="employee", password="EmpPass123!")
+    client = _client()
+    token = _login(client, disposable_tenant.slug, "emp-1", "EmpPass123!")
+    r = client.get(
+        "/api/v1/auth/me",
+        headers={
+            "X-Tenant-Slug": disposable_tenant.slug,
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["role"] == "employee"
+    expected = sorted(p.value for p in ROLE_PERMISSIONS["employee"])
+    assert sorted(body["permissions"]) == expected
+
+
+# ---------------------------------------------------------------------------
+# must_change_password reflects password_changed_at
+# ---------------------------------------------------------------------------
+
+def test_auth_me_must_change_password_true_when_never_changed(
+    disposable_tenant, tenant_session,
+):
+    session, _ = tenant_session
+    _mk_user(
+        session,
+        username="pa-mc-1",
+        role="payroll_admin",
+        password="PaPass123!",
+        password_changed_at=None,
+    )
+    client = _client()
+    token = _login(client, disposable_tenant.slug, "pa-mc-1", "PaPass123!")
+    r = client.get(
+        "/api/v1/auth/me",
+        headers={
+            "X-Tenant-Slug": disposable_tenant.slug,
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["must_change_password"] is True
+
+
+def test_auth_me_must_change_password_false_when_changed(
+    disposable_tenant, tenant_session,
+):
+    session, _ = tenant_session
+    _mk_user(
+        session,
+        username="pa-mc-2",
+        role="payroll_admin",
+        password="PaPass123!",
+        password_changed_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+    )
+    client = _client()
+    token = _login(client, disposable_tenant.slug, "pa-mc-2", "PaPass123!")
+    r = client.get(
+        "/api/v1/auth/me",
+        headers={
+            "X-Tenant-Slug": disposable_tenant.slug,
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["must_change_password"] is False
+=== END FILE: backend/tests/test_auth_me.py ===
+=== FILE: docs/FRONTEND_STATE.md ===
+# Frontend State
+
+Read this first when opening a new chat. Updated at the end of each phase.
+
+## Phase
+
+F-1a done (login + forced password change + auth provider + protected routes). B-1 done (GET /auth/me). Next: F-1b (auth/me integration, shell, role-aware nav, landing cards) — unblocked.
+
+## Bundles done
+
+F-0a (tooling), F-0b + f002-fix (scaffold, typed client, error mapper, theme, strings), F-1a + f003-fix (login/auth/password), B-1 (backend: GET /auth/me).
+
+## Bundle plan (16 frontend bundles)
+
+F-0a done, F-0b done, F-1a done, F-1b next | F-2a, F-2b | F-3a, F-3b | F-4a, F-4b | F-5a, F-5b | F-6 | F-8 | F-7a, F-7b (waits for B-4).
+
+## Backend requests
+
+| # | Request | Blocks | Status |
+|---|---|---|---|
+| B-1 | GET /auth/me returning id, username, role, employee_id, permissions[], must_change_password. | F-1b | DELIVERED (backend bundle 018) |
+| B-2 | Demo seed via real engine, tracked at backend/app/seed/demo_seed.py with wrapper scripts/seed_demo.ps1, --reset/--keep, refuse in prod, fictional SA names, fake tax numbers, real exception types only, credentials in docs/SEED.md. | Demo data (F-2..F-4) | PENDING |
+| B-3a | GET /payroll/pay-periods/{id}/preview/{employee_id}. | F-7b (tab hidden) | PENDING |
+| B-3b | Own-payslips endpoint for employee role via SELF_VIEW. | F-7b | PENDING |
+| B-4 | Attendance-to-earnings integration. | F-7 fully | PENDING |
+
+## Verified gaps
+
+Only B-2, B-3a, B-3b, B-4 remain.
+
+## To verify at relevant phase
+
+Login response exact shape (F-1a assumes {access_token, must_change_password?}); change-password body shape; refresh CSRF header; GET /attendance/day/{employee_id}/{work_date}; GET /punches; nine audit filters; two-step import token; device api_key in 201 only; dry-run token TTL; row_version in each PATCH-able GET; X-Tenant-Slug on /auth/login and /auth/refresh.
+
+## Decisions
+
+- Role gating: B-1 delivers it; F-1b uses it. Never hard-code permissions.
+- Preview detail: hidden until B-3a.
+- Import wizard: two steps.
+- Sheet status filter: employee-status + attendance-status chip (client-side post-filter).
+- Node 20 assumed; apply_bundle.py --frontend halts if < 20.
+- Version pinning: caret ranges; package-lock.json is the real pin.
+
+## Known non-blocking quirks
+
+- apply_bundle.py's frontend table occasionally omits a written row from the display (strings.ts in f003). File is written to disk; commit is unaffected.
+- f003's TSC failure was due to refreshAccessToken not being async; fixed in f003-fix.
+
+## Next step
+
+F-1b: integrate /auth/me. Add `useMe()` TanStack Query hook, load role + permissions on login, render role-aware navigation (employee/manager/hr/payroll_admin/auditor per section 6), landing cards for the five roles (open exceptions count, pending leave requests, open pay period), extract HomePage out of App.tsx, hook logout/expiry through useMe's onUnauthorized.
+
+Report the table after running:
+  python tools\apply_bundle.py bundles\f004.txt --frontend --commit "F-1b: auth/me integration + shell + role-aware nav + landing cards"
+=== END FILE: docs/FRONTEND_STATE.md ===
+# END OF FILE

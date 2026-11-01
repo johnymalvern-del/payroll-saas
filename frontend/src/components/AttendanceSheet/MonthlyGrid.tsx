@@ -81,30 +81,12 @@ function CellView({
   if (cell.locked) lines.push("locked");
   if (cell.reviewed) lines.push("reviewed");
 
-  const content = (
-    <Group gap={4} wrap="nowrap" justify="center">
-      {cell.status ? (
-        <Badge size="xs" color={statusColor(cell.status)} variant="light">
-          {statusLabel(cell.status)}
-        </Badge>
-      ) : (
-        <Text size="xs" c="dimmed">
-          {"\u2014"}
-        </Text>
-      )}
-      {cell.open_exception_count > 0 ? (
-        <Text size="xs" c="red" fw={700}>
-          !
-        </Text>
-      ) : null}
-    </Group>
-  );
-
   return (
     <Tooltip label={lines.join(" \u00b7 ")} withinPortal>
       <div
         role={onCellClick ? "button" : undefined}
         tabIndex={onCellClick ? 0 : undefined}
+        data-testid={`cell-${employeeId}-${workDate}`}
         onClick={() => onCellClick?.(employeeId, workDate)}
         onKeyDown={(e) => {
           if (!onCellClick) return;
@@ -115,7 +97,22 @@ function CellView({
         }}
         style={{ cursor: onCellClick ? "pointer" : "default" }}
       >
-        {content}
+        <Group gap={4} wrap="nowrap" justify="center">
+          {cell.status ? (
+            <Badge size="xs" color={statusColor(cell.status)} variant="light">
+              {statusLabel(cell.status)}
+            </Badge>
+          ) : (
+            <Text size="xs" c="dimmed">
+              {"\u2014"}
+            </Text>
+          )}
+          {cell.open_exception_count > 0 ? (
+            <Text size="xs" c="red" fw={700}>
+              !
+            </Text>
+          ) : null}
+        </Group>
       </div>
     </Tooltip>
   );

@@ -1,0 +1,479 @@
+=== FILE: frontend/src/api/client.ts ===
+import createClient from "openapi-fetch";
+import type { paths } from "./schema";
+import { getTenantSlug } from "./tenant";
+
+export type TokenStore = {
+  getToken: () => string | null;
+  setToken: (token: string | null) => void;
+};
+
+export type RefreshFn = () => Promise<string | null>;
+
+// Builds an absolute URL string. new Request("/path") throws in jsdom and
+// Node >=18 because Request requires absolute URLs. All callers must use this
+// helper before constructing a Request, otherwise fetch is never reached and
+// the query fails silently.
+export function absoluteUrl(path: string): string {
+  const origin =
+    typeof window !== "undefined" && window.location?.origin
+      ? window.location.origin
+      : "http://localhost";
+  try {
+    return new URL(path, origin).toString();
+  } catch {
+    return path;
+  }
+}
+
+export function createWrappedFetch(
+  tokenStore: TokenStore,
+  refresh: RefreshFn,
+  onUnauthorized: () => void,
+): (req: Request) => Promise<Response> {
+  return async (req) => {
+    const original = req.clone();
+    const first = new Request(req);
+    const slug = getTenantSlug();
+    if (slug) first.headers.set("X-Tenant-Slug", slug);
+    const token = tokenStore.getToken();
+    if (token) first.headers.set("Authorization", `Bearer ${token}`);
+    let res = await fetch(first);
+    if (res.status !== 401) return res;
+
+    const newToken = await refresh();
+    if (!newToken) {
+      onUnauthorized();
+      return res;
+    }
+    tokenStore.setToken(newToken);
+
+    const retry = new Request(original);
+    if (slug) retry.headers.set("X-Tenant-Slug", slug);
+    retry.headers.set("Authorization", `Bearer ${newToken}`);
+    res = await fetch(retry);
+    if (res.status === 401) onUnauthorized();
+    return res;
+  };
+}
+
+let accessToken: string | null = null;
+
+export function getAccessToken(): string | null {
+  return accessToken;
+}
+
+export function setAccessToken(token: string | null): void {
+  accessToken = token;
+}
+
+let refreshPromise: Promise<string | null> | null = null;
+
+export async function refreshAccessToken(): Promise<string | null> {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = (async () => {
+    try {
+      const slug = getTenantSlug();
+      const res = await fetch("/api/v1/auth/refresh", {
+        method: "POST",
+        credentials: "include",
+        headers: slug ? { "X-Tenant-Slug": slug } : {},
+      });
+      if (!res.ok) return null;
+      const body = (await res.json().catch(() => null)) as
+        | { access_token?: unknown }
+        | null;
+      return typeof body?.access_token === "string" ? body.access_token : null;
+    } catch {
+      return null;
+    }
+  })();
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
+let onUnauthorizedDefault: (() => void) | null = null;
+
+export function setOnUnauthorized(fn: (() => void) | null): void {
+  onUnauthorizedDefault = fn;
+}
+
+export const wrappedFetch = createWrappedFetch(
+  { getToken: getAccessToken, setToken: setAccessToken },
+  refreshAccessToken,
+  () => onUnauthorizedDefault?.(),
+);
+
+const API_BASE = absoluteUrl("/api/v1");
+
+export const api = createClient<paths>({
+  baseUrl: API_BASE,
+  credentials: "include",
+  fetch: wrappedFetch,
+});
+=== END FILE: frontend/src/api/client.ts ===
+=== FILE: frontend/src/api/attendance.ts ===
+import { absoluteUrl, wrappedFetch } from "./client";
+
+export type SheetCell = {
+  work_date: string;
+  status: string | null;
+  worked_minutes: number | null;
+  normal_minutes: number | null;
+  overtime_minutes: number | null;
+  flags: string[];
+  open_exception_count: number;
+  locked: boolean;
+  reviewed: boolean;
+};
+
+export type SheetEmployee = {
+  employee_id: string;
+  employee_code: string;
+  employee_name: string;
+  site_id: string | null;
+  department_id: string | null;
+  days: SheetCell[];
+};
+
+export type SheetOut = {
+  items: SheetEmployee[];
+  next_cursor: string | null;
+  total?: number | null;
+};
+
+export type Ref = { id: string; name: string };
+
+function warnShapeMismatch(data: unknown): void {
+  if (!data || typeof data !== "object") {
+    console.warn("[attendance] sheet response is not an object", data);
+    return;
+  }
+  const obj = data as Record<string, unknown>;
+  if (!Array.isArray(obj.items)) {
+    console.warn("[attendance] sheet response missing items array", Object.keys(obj));
+    return;
+  }
+  const emp = obj.items[0];
+  if (!emp || typeof emp !== "object") return;
+  const wantEmp = ["employee_id", "employee_code", "employee_name", "days"];
+  const missEmp = wantEmp.filter((k) => !(k in (emp as Record<string, unknown>)));
+  if (missEmp.length > 0) {
+    console.warn(
+      "[attendance] sheet employee missing keys:",
+      missEmp,
+      "got:",
+      Object.keys(emp as Record<string, unknown>),
+    );
+  }
+  const days = (emp as Record<string, unknown>).days;
+  if (Array.isArray(days) && days.length > 0) {
+    const c = days[0];
+    if (c && typeof c === "object") {
+      const wantCell = [
+        "work_date",
+        "status",
+        "worked_minutes",
+        "flags",
+        "open_exception_count",
+        "locked",
+        "reviewed",
+      ];
+      const missCell = wantCell.filter((k) => !(k in (c as Record<string, unknown>)));
+      if (missCell.length > 0) {
+        console.warn(
+          "[attendance] sheet cell missing keys:",
+          missCell,
+          "got:",
+          Object.keys(c as Record<string, unknown>),
+        );
+      }
+    }
+  }
+}
+
+function normaliseSheetOut(data: unknown): SheetOut {
+  const obj = (data ?? {}) as Record<string, unknown>;
+  const items = Array.isArray(obj.items) ? (obj.items as SheetEmployee[]) : [];
+  const next =
+    typeof obj.next_cursor === "string" ? obj.next_cursor : null;
+  const total = typeof obj.total === "number" ? obj.total : null;
+  return { items, next_cursor: next, total };
+}
+
+export async function fetchSheet(params: {
+  fromDate: string;
+  toDate: string;
+  siteId?: string | null;
+  branchId?: string | null;
+  departmentId?: string | null;
+  includeTerminated?: boolean;
+  limit?: number;
+  cursor?: string | null;
+}): Promise<SheetOut> {
+  const qs = new URLSearchParams();
+  qs.set("from_date", params.fromDate);
+  qs.set("to_date", params.toDate);
+  if (params.siteId) qs.set("site_id", params.siteId);
+  if (params.branchId) qs.set("branch_id", params.branchId);
+  if (params.departmentId) qs.set("department_id", params.departmentId);
+  if (params.includeTerminated) qs.set("include_terminated", "true");
+  qs.set("limit", String(params.limit ?? 50));
+  if (params.cursor) qs.set("cursor", params.cursor);
+  const res = await wrappedFetch(
+    new Request(absoluteUrl(`/api/v1/attendance/sheet?${qs.toString()}`), {
+      credentials: "include",
+    }),
+  );
+  if (!res.ok) {
+    throw new Error(`sheet fetch failed: ${res.status}`);
+  }
+  const data = await res.json();
+  warnShapeMismatch(data);
+  return normaliseSheetOut(data);
+}
+
+async function fetchRefs(path: string): Promise<Ref[]> {
+  const res = await wrappedFetch(
+    new Request(absoluteUrl(`/api/v1${path}?limit=500`), {
+      credentials: "include",
+    }),
+  );
+  if (!res.ok) return [];
+  const body = (await res.json().catch(() => ({}))) as { items?: unknown };
+  return Array.isArray(body.items) ? (body.items as Ref[]) : [];
+}
+
+export function fetchBranches(): Promise<Ref[]> {
+  return fetchRefs("/branches");
+}
+
+export function fetchSites(): Promise<Ref[]> {
+  return fetchRefs("/sites");
+}
+
+export function fetchDepartments(): Promise<Ref[]> {
+  return fetchRefs("/departments");
+}
+=== END FILE: frontend/src/api/attendance.ts ===
+=== FILE: frontend/src/auth/useMe.ts ===
+import { useQuery } from "@tanstack/react-query";
+import { absoluteUrl, wrappedFetch } from "../api/client";
+import { useAuth } from "./AuthContext";
+
+export type Me = {
+  id: string;
+  username: string;
+  role: string;
+  employee_id: string | null;
+  permissions: string[];
+  must_change_password: boolean;
+};
+
+export const meQueryKey = ["me"] as const;
+
+export async function fetchMe(): Promise<Me> {
+  const res = await wrappedFetch(
+    new Request(absoluteUrl("/api/v1/auth/me"), { credentials: "include" }),
+  );
+  if (!res.ok) {
+    throw new Error(`/auth/me failed: ${res.status}`);
+  }
+  return (await res.json()) as Me;
+}
+
+export function useMe() {
+  const { status } = useAuth();
+  return useQuery<Me, Error>({
+    queryKey: meQueryKey,
+    queryFn: fetchMe,
+    enabled: status === "authenticated",
+    staleTime: Infinity,
+    retry: 1,
+  });
+}
+=== END FILE: frontend/src/auth/useMe.ts ===
+=== FILE: frontend/src/pages/AttendanceSheetPage.test.tsx ===
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MantineProvider } from "@mantine/core";
+import { AttendanceSheetPage } from "./AttendanceSheetPage";
+
+function jr(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    return input.url;
+  }
+  return String(input);
+}
+
+function setupMock(sheetItems: unknown[]): void {
+  global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const url = requestUrl(input);
+    if (url.includes("/api/v1/attendance/sheet")) {
+      return jr({ items: sheetItems, next_cursor: null });
+    }
+    if (
+      url.includes("/api/v1/branches") ||
+      url.includes("/api/v1/sites") ||
+      url.includes("/api/v1/departments")
+    ) {
+      return jr({ items: [], next_cursor: null });
+    }
+    return jr({}, 200);
+  }) as unknown as typeof fetch;
+}
+
+function renderPage() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <MantineProvider>
+      <QueryClientProvider client={client}>
+        <AttendanceSheetPage />
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+}
+
+const SAMPLE_CELL = {
+  work_date: "2025-06-01",
+  status: "worked",
+  worked_minutes: 480,
+  normal_minutes: 480,
+  overtime_minutes: 0,
+  flags: [],
+  open_exception_count: 0,
+  locked: false,
+  reviewed: false,
+};
+
+const SAMPLE_EMPLOYEE = {
+  employee_id: "e1",
+  employee_code: "EMP001",
+  employee_name: "Ada Lovelace",
+  site_id: null,
+  department_id: null,
+  days: [SAMPLE_CELL],
+};
+
+describe("AttendanceSheetPage", () => {
+  beforeEach(() => {
+    setupMock([SAMPLE_EMPLOYEE]);
+  });
+
+  it("renders the title and employee row from the sheet", async () => {
+    renderPage();
+    expect(screen.getByText("Attendance")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
+      expect(screen.getByText("EMP001")).toBeInTheDocument();
+    });
+  });
+
+  it("shows empty text when sheet returns no employees", async () => {
+    setupMock([]);
+    renderPage();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/no employees match these filters/i),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("renders a status badge for a worked cell", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("worked")).toBeInTheDocument();
+    });
+  });
+
+  it("shows an error message when sheet fetch fails", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.includes("/api/v1/attendance/sheet")) {
+        return jr({ error: { code: "boom" } }, 500);
+      }
+      return jr({ items: [], next_cursor: null });
+    }) as unknown as typeof fetch;
+    renderPage();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/could not load the attendance sheet/i),
+      ).toBeInTheDocument();
+    });
+  });
+});
+=== END FILE: frontend/src/pages/AttendanceSheetPage.test.tsx ===
+=== FILE: docs/FRONTEND_STATE.md ===
+# Frontend State
+
+Read this first when opening a new chat. Updated at the end of each phase.
+
+## Phase
+
+F-2a — attendance sheet with filters and monthly grid. Root cause of the sheet test failures found and fixed: `new Request("/path")` throws in jsdom/Node because Request requires absolute URLs. All manual request construction now goes through `absoluteUrl()` from `client.ts`. This bug would also have broken the app in a real browser.
+
+## Bundles done
+
+F-0a, F-0b + f002-fix, F-1a + f003-fix, B-1 + B-1-fix-2, F-1b + f004-fix + f004-fix2, F-2a + f005-fix + f005-fix2 + f005-fix3 + f005-fix4 (this bundle).
+
+## Bundle plan (13 frontend bundles remaining)
+
+F-2a ✓ | F-2b | F-3a, F-3b | F-4a, F-4b | F-5a, F-5b | F-6 | F-8 | F-7a, F-7b (waits for B-4).
+
+## Backend requests
+
+| # | Request | Blocks | Status |
+|---|---|---|---|
+| B-1 | GET /auth/me | F-1b | DELIVERED |
+| B-2 | Demo seed via real engine | Demo data | PENDING |
+| B-3a | GET /payroll/pay-periods/{id}/preview/{employee_id} | F-7b | PENDING |
+| B-3b | Own-payslips endpoint | F-7b | PENDING |
+| B-4 | Attendance-to-earnings | F-7 | PENDING |
+
+## Important contracts
+
+- `/auth/login` returns `{access_token, refresh_token, token_type, expires_in}` only. No `must_change_password`. UI uses `/auth/me`.
+- `/auth/me` returns `{id, username, role, employee_id, permissions[], must_change_password}`.
+- Usernames: `normalise_username` strips separators when a digit is present. Use `paone` not `pa-1`.
+- Refresh: backend uses `csrf_token` cookie + `csrf_protection` dependency. **Client does not yet send the CSRF header.** Refresh will 403 until fixed. Flagged.
+- **`new Request(relativeUrl)` throws in jsdom and Node >=18.** All manual requests go through `absoluteUrl()` in `client.ts`. `openapi-fetch` receives an absolute baseURL too. Never construct a bare relative Request again.
+- `wrappedFetch(new Request(absoluteUrl(...)))` is the correct pattern for any request outside the openapi-fetch client.
+
+## Verified gaps
+
+Only B-2, B-3a, B-3b, B-4 remain. Sheet response field names not verified against a live backend (`warnShapeMismatch` in `attendance.ts` prints them if the shape differs on first live run).
+
+## Decisions
+
+- Attendance sheet uses `wrappedFetch` + manual type cast (not `api.GET`) until `npm run api:types` is run against a live backend. When the schema is generated, F-2a's `api/attendance.ts` types become authoritative.
+- Attendance status chip is a client-side post-filter over the loaded page.
+- Employee-status filter is `includeTerminated` only.
+- Cell tooltip surfaces minutes, flags, open exception count, locked, reviewed — colour is never the only signal.
+- Pagination: "first page" and "next page"; cursor is forward-only.
+- No row virtualisation yet.
+- No day panel yet (F-2b).
+
+## Known tool limitation
+
+`apply_bundle.py --frontend` runs Vitest only on files written **inside the bundle**, not on `--also` files. Consequence: if you change a source file and the test that covers it was already committed, you must either include the test file in the bundle or run `npx vitest run <file>` manually. This caught us on F-1b and again on F-2a. Fix candidate for a later tool revision: also run tests that import changed source files (backend `find_dependent_tests` logic ported to TS).
+
+## Next step
+
+F-2b: day panel (open a cell, fetch `GET /attendance/day/{employee_id}/{work_date}`), daily list view, bulk `mark clean days reviewed` with refused-days table. Requires B-2 for realistic data to exercise the flow.
+=== END FILE: docs/FRONTEND_STATE.md ===
+# END OF FILE
