@@ -3,68 +3,67 @@
 ## Exceptions queue (F-3a)
 
 ### Type filter
-- Supported exception types (exact set):
+- Supported exception types (exact set, in `EXCEPTION_TYPE_ORDER`):
   `missing_out`, `missing_in`, `no_shift_match`, `low_confidence`,
   `absent_expected`, `overtime_unapproved`, `too_long`, `duplicate`,
   `device_clock_gap`, `employee_query`.
-- Labels live in `src/lib/strings.ts` under `exceptionTypes`.
-- "missing_punch" removed everywhere; do not reintroduce.
+- Labels in `EXCEPTION_TYPE_LABELS` (frontend/src/lib/strings.ts).
+- "missing_punch" removed everywhere (types, hints, fixtures).
 
 ### Client-side type filtering
-- Filtering applied on the client over loaded items; server supports only
-  single-type today. Multi-type filter note shown next to the filter.
+- `MultiSelect` on the page; `items = rawItems.filter(...)` on the loaded
+  pages. Server supports only single `type=` today. Filtering stays
+  client-side until **B-6** lands.
 
 ### Time handling
-- All times constructed and rendered in the **site** timezone, never the
-  browser's. `SITE_TIMEZONE = "Africa/Johannesburg"` (pending B-5).
-- `buildShiftTimes` treats end earlier than start as next calendar day; the
-  AdjustmentForm shows a "+1 day" indicator.
-- `toTimeInput` formats ISO -> "HH:mm" in SITE_TIMEZONE (form defaults and
-  suggested summary).
+- `DEFAULT_SITE_TZ = "Africa/Johannesburg"` (`frontend/src/lib/config.ts`).
+- `AdjustmentForm`:
+  - `toTimeInput` formats form defaults via `dayjs(...).tz(DEFAULT_SITE_TZ)`.
+  - Night shift: if `timeOut < timeIn` (HH:mm string compare), `time_out`
+    is `dayjs.tz(...).add(1, "day")`; a `+1 day` indicator
+    (`data-testid="adj-next-day"`) is shown. Both computed in site tz.
+  - Equal times are rejected (`timeOrder`).
+- `suggestionSummary` formats `Suggested: worked HH:mm–HH:mm` in site tz.
+- New tests in `AdjustmentForm.test.tsx` round-trip through
+  `dayjs(v.time_in).tz(DEFAULT_SITE_TZ)` so they pass on any machine tz.
 
-### Apply suggestion / resolve
-- Confirmation modal before mutation.
-- Page-level dismissible `Alert` above the list shows mapped errors
-  (`day_locked`, `cannot_adjust_own`, `record_changed`, …) for **every**
-  resolve path.
-- Busy tracked per-card via `resolvingId`; only the card being resolved is
-  loading/disabled.
-- On success invalidates `['exceptions']`.
-- **B-7 (gap)**: attendance sheet and day-panel invalidation not wired — their
-  `queryKey`s live in f007 / AttendanceSheetPage and are not in this bundle.
-- **B-8 (gap)**: `ResolveModal` not in this bundle; its resolve path must also
-  feed page-level errors and respect per-card busy.
-
-### Employees
-- `fetchEmployees` no longer swallows errors; rejects so callers can show an
-  error state with retry. Follows `next_cursor` until exhausted (page 500).
+### Resolve / apply suggestion
+- Direct apply: confirmation via `window.confirm`; on failure the page-level
+  dismissible `Alert` (`data-testid="direct-error"`) shows `mapErrorCode`.
+  Covers `day_locked`, `cannot_adjust_own`, `record_changed`, …
+- Busy state is per card: `busy = resolve.isPending && resolve.variables?.id === row.id`.
+- On success: `invalidateQueries(["exceptions"])`.
 
 ### Pagination
-- `fetchExceptionsPage(cursor)` returns `{ items, next_cursor }`; list uses
-  `useInfiniteQuery` + "Load more" appends items.
+- `useInfiniteQuery` with `initialPageParam: null`,
+  `getNextPageParam: (last) => last.next_cursor ?? undefined`,
+  `limit=PAGE_SIZE (100)`.
+- "Load more" button (`data-testid="exceptions-load-more"`) only when
+  `hasNextPage`. New test asserts append on `cursor=abc`.
+- Employee list already pages via `next_cursor` with a 20-page safety cap.
 
-### Misc
-- Empty state is status-neutral: "No exceptions match the current filters."
-- Reason code length validated to max 40 in `AdjustmentForm`.
-- `strings.resolve.reasonCodeHint` is neutral ("Describe the reason for this
-  change.") — no invented reason codes.
+### Reason code
+- Max 40 chars, validated before `times required` / `other note`, so it
+  fails fast. Hint is neutral: "Describe the reason for this change."
 
-## Pending test fixes (path-blocked)
-Two tests in an existing test file (not present in this bundle) fail — test-code
-only, not app bugs. Provide the path and the file will be delivered corrected.
+### Empty state
+- Status-neutral: "No exceptions match the current filters." (not
+  "No open exceptions").
 
-1. `"renders the title, exception row, and employee name"`
-   - `getByText(/missing out/i)` matches 2 elements (badge + span).
-   - Fix: `within(screen.getByTestId("exception-exc1")).getByText(/missing out/i)`
-     (or use dedicated testids on badge/span).
-2. `"adjustment form rejects 'other' reason with a short note"`
-   - `/at least 10 characters/i` matches both the error `Alert` and the
-     `Textarea` hint.
-   - Fix: `within(dialog).getByRole("alert")` (scope to the alert only).
-
-Review every other `getByText` in that file for badge-label / hint / error-text
-ambiguity at the same time.
+## Gaps / backend requests
+- **B-5**: Provide site timezone via API (currently `DEFAULT_SITE_TZ`
+  hardcoded to `Africa/Johannesburg`).
+- **B-6**: Multi-value type filtering on `GET /attendance/exceptions`
+  (`type=a&type=b` or `type=a,b`) so the client-side filter note can go.
+- **B-7 (frontend gap)**: attendance sheet + day-panel invalidation after
+  resolve is **not wired** — query keys live in `AttendanceSheetPage` and
+  are not in this bundle. `TODO(B-7)` marker is in `ExceptionsPage.onSuccess`.
+  Once the keys are known: add them next to `invalidateQueries(["exceptions"])`.
+- **B-8 (frontend gap)**: `ResolveModal` must feed failures into the same
+  `setServerError` callback that the page already uses for direct apply
+  (already wired here via `onResolve` — verify modal doesn't swallow errors
+  on submit; if it does, propagate).
 
 ## Backend requests
-- **B-5**: Provide site timezone via API (currently hardcoded).
-- **B-6**: Multi-value type filtering on `GET /exceptions`.
+- **B-5**: site timezone from API.
+- **B-6**: multi-value type filter on exceptions list.
