@@ -119,6 +119,8 @@ const EXC = {
   updated_at: "2026-10-16T00:00:00Z",
 };
 
+const EXC2 = { ...EXC, id: "exc2" };
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -132,8 +134,6 @@ describe("ExceptionsPage", () => {
     expect(screen.getByText("Exceptions")).toBeInTheDocument();
     const row = await screen.findByTestId("exception-exc1");
     expect(row).toBeInTheDocument();
-    // Scoped to the row: the type label also appears in the filter dropdown
-    // and the reason-code hint, so an unscoped getByText matches multiple.
     expect(within(row).getByText(/missing out/i)).toBeInTheDocument();
     expect(within(row).getByText(/Ada Lovelace/)).toBeInTheDocument();
     expect(within(row).getByText(/EMP001/)).toBeInTheDocument();
@@ -143,7 +143,6 @@ describe("ExceptionsPage", () => {
     setupMock({ exceptions: [], employees: [EMP] });
     renderPage();
     await waitFor(() => {
-      // Status-neutral wording.
       expect(
         screen.getByText(/no exceptions match the current filters/i),
       ).toBeInTheDocument();
@@ -298,8 +297,6 @@ describe("ExceptionsPage", () => {
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByTestId("dismiss-submit"));
     await waitFor(() => {
-      // The textarea hint contains the same wording; the error must be
-      // read from the alert role only.
       const alert = within(dialog).getByRole("alert");
       expect(alert).toHaveTextContent(/note of at least 3 characters/i);
     });
@@ -318,8 +315,6 @@ describe("ExceptionsPage", () => {
     });
     fireEvent.click(within(dialog).getByTestId("adj-submit"));
     await waitFor(() => {
-      // The textarea hint contains "at least 10 characters"; use the
-      // alert role to distinguish the validation error.
       const alert = within(dialog).getByRole("alert");
       expect(alert).toHaveTextContent(/at least 10 characters/i);
     });
@@ -351,5 +346,232 @@ describe("ExceptionsPage", () => {
     fireEvent.click(screen.getByTestId("exceptions-load-more"));
     await screen.findByTestId("exception-exc2");
     expect(screen.getByTestId("exception-exc3")).toBeInTheDocument();
+  });
+
+  it("bulk dry run renders per-row results and enables confirm", async () => {
+    const { calls } = setupMock({ exceptions: [EXC, EXC2], employees: [EMP] });
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      const method = requestMethod(input);
+      let body = "";
+      if (
+        method !== "GET" &&
+        typeof Request !== "undefined" &&
+        input instanceof Request
+      ) {
+        body = await input.clone().text();
+      }
+      calls.push({ url, method, body });
+      if (url.includes("/bulk_resolve")) {
+        const parsed = JSON.parse(body) as {
+          items: { exception_id: string }[];
+          token?: string;
+        };
+        const results = parsed.items.map((it, i) => ({
+          index: i,
+          exception_id: it.exception_id,
+          ok: true,
+        }));
+        return jr({
+          results,
+          applied: 0,
+          dry_run: true,
+          token: "T1",
+        });
+      }
+      if (url.includes("/attendance/exceptions")) {
+        return jr({ items: [EXC, EXC2], next_cursor: null });
+      }
+      if (url.includes("/api/v1/employees")) {
+        return jr({ items: [EMP], next_cursor: null });
+      }
+      return jr({}, 200);
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    await screen.findByTestId("exception-exc1");
+    fireEvent.click(screen.getByTestId("exceptions-bulk-toggle"));
+    fireEvent.click(await screen.findByTestId("exceptions-bulk-select-all"));
+    fireEvent.click(screen.getByTestId("exceptions-bulk-dry-run"));
+
+    await screen.findByTestId("exceptions-bulk-results");
+    expect(screen.getByTestId("exceptions-bulk-row-0")).toBeInTheDocument();
+    expect(screen.getByTestId("exceptions-bulk-row-1")).toBeInTheDocument();
+    const confirmBtn = screen.getByTestId(
+      "exceptions-bulk-confirm",
+    ) as HTMLButtonElement;
+    await waitFor(() => expect(confirmBtn.disabled).toBe(false));
+  });
+
+  it("bulk confirm sends dry-run token and shows applied count", async () => {
+    const calls: Call[] = [];
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      const method = requestMethod(input);
+      let body = "";
+      if (
+        method !== "GET" &&
+        typeof Request !== "undefined" &&
+        input instanceof Request
+      ) {
+        body = await input.clone().text();
+      }
+      calls.push({ url, method, body });
+      if (url.includes("/bulk_resolve")) {
+        const parsed = JSON.parse(body) as {
+          items: { exception_id: string }[];
+          token?: string;
+        };
+        const results = parsed.items.map((it, i) => ({
+          index: i,
+          exception_id: it.exception_id,
+          ok: true,
+          adjustment_id: `adj-${i}`,
+        }));
+        return jr({
+          results,
+          applied: parsed.token ? results.length : 0,
+          dry_run: !parsed.token,
+          token: "T1",
+        });
+      }
+      if (url.includes("/attendance/exceptions")) {
+        return jr({ items: [EXC], next_cursor: null });
+      }
+      if (url.includes("/api/v1/employees")) {
+        return jr({ items: [EMP], next_cursor: null });
+      }
+      return jr({}, 200);
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    await screen.findByTestId("exception-exc1");
+    fireEvent.click(screen.getByTestId("exceptions-bulk-toggle"));
+    fireEvent.click(await screen.findByTestId("exception-select-exc1"));
+    fireEvent.click(screen.getByTestId("exceptions-bulk-dry-run"));
+    await screen.findByTestId("exceptions-bulk-results");
+
+    fireEvent.click(screen.getByTestId("exceptions-bulk-confirm"));
+    fireEvent.click(await screen.findByTestId("exceptions-bulk-confirm-apply"));
+
+    await waitFor(() => {
+      const posts = calls.filter(
+        (c) => c.method === "POST" && c.url.includes("/bulk_resolve"),
+      );
+      expect(posts.length).toBeGreaterThanOrEqual(2);
+      const confirmPost = posts[posts.length - 1];
+      const parsed = JSON.parse(confirmPost.body) as { token?: string };
+      expect(parsed.token).toBe("T1");
+    });
+  });
+
+  it("bulk confirm surfaces token_mismatch as mapped error", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      const method = requestMethod(input);
+      let body = "";
+      if (
+        method !== "GET" &&
+        typeof Request !== "undefined" &&
+        input instanceof Request
+      ) {
+        body = await input.clone().text();
+      }
+      if (url.includes("/bulk_resolve")) {
+        const parsed = JSON.parse(body) as {
+          items: { exception_id: string }[];
+          token?: string;
+        };
+        if (parsed.token) {
+          return jr({ error: { code: "token_mismatch" } }, 409);
+        }
+        const results = parsed.items.map((it, i) => ({
+          index: i,
+          exception_id: it.exception_id,
+          ok: true,
+        }));
+        return jr({
+          results,
+          applied: 0,
+          dry_run: true,
+          token: "T1",
+        });
+      }
+      if (url.includes("/attendance/exceptions")) {
+        return jr({ items: [EXC], next_cursor: null });
+      }
+      if (url.includes("/api/v1/employees")) {
+        return jr({ items: [EMP], next_cursor: null });
+      }
+      return jr({}, 200);
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    await screen.findByTestId("exception-exc1");
+    fireEvent.click(screen.getByTestId("exceptions-bulk-toggle"));
+    fireEvent.click(await screen.findByTestId("exception-select-exc1"));
+    fireEvent.click(screen.getByTestId("exceptions-bulk-dry-run"));
+    await screen.findByTestId("exceptions-bulk-results");
+
+    fireEvent.click(screen.getByTestId("exceptions-bulk-confirm"));
+    fireEvent.click(await screen.findByTestId("exceptions-bulk-confirm-apply"));
+
+    const err = await screen.findByTestId("exceptions-bulk-error");
+    expect(err.textContent ?? "").toMatch(/re-run the dry run/i);
+  });
+
+  it("bulk dry run surfaces per-row cannot_adjust_own without enabling confirm", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      const method = requestMethod(input);
+      let body = "";
+      if (
+        method !== "GET" &&
+        typeof Request !== "undefined" &&
+        input instanceof Request
+      ) {
+        body = await input.clone().text();
+      }
+      if (url.includes("/bulk_resolve")) {
+        const parsed = JSON.parse(body) as {
+          items: { exception_id: string }[];
+        };
+        const results = parsed.items.map((it, i) => ({
+          index: i,
+          exception_id: it.exception_id,
+          ok: false,
+          error_code: "cannot_adjust_own",
+          error_message: "A user cannot adjust their own attendance",
+        }));
+        return jr({
+          results,
+          applied: 0,
+          dry_run: true,
+          token: "T1",
+        });
+      }
+      if (url.includes("/attendance/exceptions")) {
+        return jr({ items: [EXC], next_cursor: null });
+      }
+      if (url.includes("/api/v1/employees")) {
+        return jr({ items: [EMP], next_cursor: null });
+      }
+      return jr({}, 200);
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    await screen.findByTestId("exception-exc1");
+    fireEvent.click(screen.getByTestId("exceptions-bulk-toggle"));
+    fireEvent.click(await screen.findByTestId("exception-select-exc1"));
+    fireEvent.click(screen.getByTestId("exceptions-bulk-dry-run"));
+
+    const row = await screen.findByTestId("exceptions-bulk-row-0");
+    // Actual mapping for cannot_adjust_own is "You cannot adjust your own
+    // attendance." — assert on the invariant prefix rather than "own record".
+    expect(row.textContent ?? "").toMatch(/cannot adjust your own/i);
+    const confirmBtn = screen.getByTestId(
+      "exceptions-bulk-confirm",
+    ) as HTMLButtonElement;
+    expect(confirmBtn.disabled).toBe(true);
   });
 });

@@ -162,6 +162,36 @@ export const strings = {
     employeesRetry: "Retry",
     multiTypeNote: "Type filter applies to the loaded page only.",
     loadMore: "Load more",
+    bulk: {
+      enter: "Bulk mode",
+      exit: "Exit bulk mode",
+      selectAll: "Select all",
+      clear: "Clear",
+      selectedCount: (n: number) => `${n} selected`,
+      actionLabel: "Action",
+      actionApplySuggestion: "Apply suggestion",
+      actionDismiss: "Dismiss",
+      noteLabel: "Dismiss note (min 3 chars, applied to all)",
+      dryRunButton: "Dry run",
+      confirmButton: "Confirm batch",
+      confirmTitle: "Apply bulk resolve?",
+      confirmBody:
+        "This will resolve the selected exceptions. This cannot be undone here.",
+      confirmApply: "Apply",
+      cancel: "Cancel",
+      resultsTitle: "Dry run results",
+      appliedTitle: "Batch applied",
+      resultsOkLabel: "OK",
+      resultsFailLabel: "Failed",
+      rerun: "Re-run dry run",
+      appliedCount: (n: number) => `${n} applied`,
+      errValidationFailed:
+        "One or more rows failed validation. Nothing was applied.",
+      errTokenMismatch:
+        "The batch changed since the dry run. Re-run the dry run.",
+      errBatchFailed:
+        "The batch failed unexpectedly. Nothing was applied.",
+    },
   },
   adjustments: {
     outcome: "Outcome",
@@ -170,12 +200,14 @@ export const strings = {
     reasonCode: "Reason code",
     reasonCodeHint: "Describe the reason for this change.",
     note: "Note",
-    noteOtherHint: "Required when reason code is 'other' (at least 10 characters).",
+    noteOtherHint:
+      "Required when reason code is 'other' (at least 10 characters).",
     submit: "Save adjustment",
     reasonRequired: "Reason code is required.",
     timesRequired: "Times are required when outcome is worked.",
     timeOrder: "Time out must be after time in.",
-    noteRequiredForOther: "Reason 'other' requires a note of at least 10 characters.",
+    noteRequiredForOther:
+      "Reason 'other' requires a note of at least 10 characters.",
     nextDayIndicator: "+1 day",
     reasonCodeTooLong: "Reason code must be 40 characters or fewer.",
   },

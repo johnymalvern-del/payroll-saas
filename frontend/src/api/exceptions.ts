@@ -46,6 +46,51 @@ export type ResolveResponse = {
   day_status: string | null;
 };
 
+export type BulkResolveItemIn = {
+  exception_id: string;
+  action: ResolveAction;
+  custom_adjustment?: CustomAdjustment | null;
+  note?: string | null;
+};
+
+export type BulkResolveIn = {
+  items: BulkResolveItemIn[];
+  token?: string;
+};
+
+export type BulkResolveItemOut = {
+  index: number;
+  exception_id: string;
+  ok: boolean;
+  adjustment_id?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+};
+
+export type BulkResolveOut = {
+  results: BulkResolveItemOut[];
+  applied: number;
+  dry_run: boolean;
+  token: string;
+};
+
+export class BulkApiError extends Error {
+  code: string;
+  status: number;
+  details?: { results?: BulkResolveItemOut[] };
+  constructor(
+    code: string,
+    status: number,
+    details?: { results?: BulkResolveItemOut[] },
+  ) {
+    super(code);
+    this.name = "BulkApiError";
+    this.code = code;
+    this.status = status;
+    this.details = details;
+  }
+}
+
 export async function fetchExceptions(params: {
   status?: string;
   type?: string;
@@ -98,4 +143,31 @@ export async function resolveException(
     throw new Error(detail.error?.code ?? `http_${res.status}`);
   }
   return (await res.json()) as ResolveResponse;
+}
+
+export async function bulkResolveExceptions(
+  body: BulkResolveIn,
+): Promise<BulkResolveOut> {
+  const res = await wrappedFetch(
+    new Request(
+      absoluteUrl("/api/v1/attendance/exceptions/bulk_resolve"),
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  );
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => ({}))) as {
+      error?: { code?: string; details?: { results?: BulkResolveItemOut[] } };
+    };
+    throw new BulkApiError(
+      detail.error?.code ?? `http_${res.status}`,
+      res.status,
+      detail.error?.details,
+    );
+  }
+  return (await res.json()) as BulkResolveOut;
 }
