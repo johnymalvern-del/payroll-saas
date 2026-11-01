@@ -7,80 +7,97 @@
   `missing_out`, `missing_in`, `no_shift_match`, `low_confidence`,
   `absent_expected`, `overtime_unapproved`, `too_long`, `duplicate`,
   `device_clock_gap`, `employee_query`.
-- Labels in `EXCEPTION_TYPE_LABELS` (frontend/src/lib/strings.ts).
-- "missing_punch" removed everywhere (types, hints, fixtures).
+- "missing_punch" removed everywhere.
 
 ### Client-side type filtering
 - `MultiSelect` on the page; `items = rawItems.filter(...)` on the loaded
-  pages. Server supports only single `type=` today. Filtering stays
-  client-side until **B-6** lands.
+  pages. Server supports only single `type=` today (**B-6**).
 
-### Time handling
-- `DEFAULT_SITE_TZ = "Africa/Johannesburg"` (`frontend/src/lib/config.ts`).
-- `AdjustmentForm`: `toTimeInput` formats form defaults in site tz;
-  night shift (`timeOut < timeIn`) emits `time_out` as next calendar day
-  with a `+1 day` indicator; `reason_code` max 40 validated.
-- `suggestionSummary` formats `Suggested: worked HH:mm–HH:mm` in site tz.
-
-### Resolve / apply suggestion (single)
+### Resolve / apply suggestion
 - Direct apply: `window.confirm`; page-level dismissible `Alert`
-  (`data-testid="direct-error"`) shows `mapErrorCode`.
-- Per-card busy: `resolve.isPending && resolve.variables?.id === row.id`.
-- Success: `invalidateQueries(["exceptions"])` + `["attendance"]` (prefix).
+  (`direct-error`); per-card busy; success invalidates
+  `["exceptions"]` + `["attendance"]`.
+
+### Bulk resolve (F-3b)
+- Bulk mode toggle on `ExceptionsPage`; per-card checkbox via
+  `ExceptionCard.selectable`.
+- Actions: `apply_suggestion` | `dismiss`. Dry-run → per-row results →
+  confirm modal → POST with dry-run token. Mapped errors via
+  `mapBulkError` (`token_mismatch` → "re-run the dry run",
+  `bulk_validation_failed` → page alert + re-render from
+  `err.details.results`, `batch_failed` → "nothing was applied").
 
 ### Pagination
-- `useInfiniteQuery` on `["exceptions", status]`; `limit=100`; "Load more"
-  (`data-testid="exceptions-load-more"`) only when `hasNextPage`.
+- `useInfiniteQuery` on `["exceptions", status]`; "Load more" follows
+  `next_cursor`.
 
-### Bulk resolve (F-3b, partial)
-- Bulk mode toggle on the page (`data-testid="exceptions-bulk-toggle"`).
-- Per-card checkbox (`exception-select-{id}`) via `ExceptionCard.selectable`.
-- Actions: `apply_suggestion` | `dismiss` (bulk custom is per-row via the
-  existing single resolve modal; bulk custom with per-row form is not
-  built).
-- Flow: **Dry run** → POST `bulk_resolve` without `token` → shows per-row
-  result panel (`exceptions-bulk-results`); if every row is OK the
-  Confirm button enables → Modal (`exceptions-bulk-confirm-modal`) →
-  POST `bulk_resolve` with the dry-run token. Success invalidates
-  `["exceptions"]` and `["attendance"]`.
-- Mapped errors: `token_mismatch` → "re-run the dry run";
-  `bulk_validation_failed` → page alert + re-render dry-run results from
-  `err.details.results`; `batch_failed` → "nothing was applied".
-  Per-row `error_code` values render inside the results panel via
-  `mapBulkError` (falls back to `mapErrorCode` for standard codes like
-  `day_locked`, `cannot_adjust_own`, `note_required`).
-- All-or-nothing is enforced by the backend; the UI never partially
-  applies.
-- Bulk uses the same `BulkApiError` class for status + `details` so the
-  page can surface stale-token and validation-failed details.
+## Adjustments page (F-3b, new)
 
-## Bulk adjust + revert (F-3b, pending)
-- `POST /api/v1/attendance/adjustments/bulk` exists (dry-run + token, same
-  pattern as bulk resolve) but the exact `BulkAdjustIn` / item-out schema
-  is not yet known. **B-9**.
-- `POST /api/v1/attendance/adjustments` accepts `outcome: "revert"`
-  (frontend `AdjustmentCreateRequest` already includes it); revert UI
-  shares the same page as bulk adjust (replacement of the
-  `/attendance/adjustments` PlaceholderPage) and needs the route file to
-  wire. **B-10**.
-- Both are deferred until B-9 and B-10 land so no fields or routes are
-  invented.
+### Route
+- `/attendance/adjustments` renders `AdjustmentsPage` (was
+  `PlaceholderPage`). `App.tsx` imports `AdjustmentsPage` from
+  `./pages/AdjustmentsPage`.
+
+### Form fields (bulk)
+- Outcome: `worked | leave | sick | absent | day_off | revert`.
+  "revert" is a first-class outcome (`ADJUSTMENT_OUTCOMES` now
+  includes it).
+- Time in / time out only when outcome = `worked`; HH:mm text inputs,
+  constructed via `dayjs.tz(date + "T" + hhmm, DEFAULT_SITE_TZ)`;
+  night-shift rollover (`time_out <= time_in` → `+1 day`).
+- From date, To date (inclusive). Dates are local ISO `YYYY-MM-DD`.
+- Employees: `MultiSelect` fed by `fetchEmployees` (already follows
+  `next_cursor`, rejects on error).
+- Reason code: free text, 1-40 chars. Note: optional; required only
+  when reason = `other` (10+ chars) — matches backend validator.
+- Item list = (selected employees) × (each date in range).
+  Capped at 200 rows per `BulkAdjustIn.items.max_length`; over-cap
+  shows a yellow alert and disables dry-run.
+
+### Flow
+1. Fill in inputs → live row count.
+2. **Dry run** → `POST /api/v1/attendance/adjustments/bulk` with
+   `{items}` (no token). Renders per-row results
+   (`adjustments-bulk-row-{i}`). Confirm only enables when every row
+   is `ok`.
+3. **Confirm batch** → modal (`adjustments-bulk-confirm-modal`) →
+   POST same items + `token` from dry-run. On success shows applied
+   count and invalidates `["attendance"]` + `["exceptions"]`.
+4. On `bulk_validation_failed` during confirm, the page reconstructs
+   the dry-run result panel from `err.results` — no extra call.
+5. On `token_mismatch` the mapped error says "Re-run the dry run".
+
+### Revert
+- Choosing outcome = `revert` produces items with
+  `outcome: "revert", time_in: null, time_out: null`. Same dry-run +
+  confirm + mapped errors. Matches `AdjustmentCreateIn` / `BulkAdjustItemIn`
+  (`revert` is a member of `_OUTCOMES`; backend restores punch computation).
+
+### Error mapping
+`mapBulkAdjustError` handles the three bulk error codes
+(`bulk_validation_failed`, `token_mismatch`, `batch_failed`) and
+otherwise delegates to `mapErrorCode` (so `day_locked`,
+`cannot_adjust_own`, `invalid_reason_code`, `note_required`,
+`record_not_found` all map through their normal strings).
+
+## Gaps / backend requests
+- **B-5**: site timezone via API — currently `DEFAULT_SITE_TZ`
+  (`Africa/Johannesburg`) in `frontend/src/lib/config.ts`.
+- **B-6**: multi-value type filter on `GET /attendance/exceptions`.
+- **B-11**: per-employee site timezone on list endpoints (or
+  `GET /sites?ids=…`) — needed to compute adjustment times in each
+  employee's site tz rather than a single constant.
+- **B-12**: `GET /attendance/adjustments/reason-codes` (or embed the
+  current allowed list in some settings response) so the reason_code
+  field can be a `Select` instead of free text. Backend enforces the
+  list via `_validate_reason`; today we can only surface that in the
+  dry-run per-row error.
 
 ## Closed gaps
-- **B-7 (closed)**: `["attendance"]` prefix invalidation covers the sheet,
-  daily list, and open day panel after resolve.
-- **B-8 (closed)**: `ResolveModal` renders `serverError` as an `Alert`
-  inside the modal; direct-apply errors flow through the same page state.
-
-## Open backend requests
-- **B-5**: site timezone from API — partially satisfied by
-  `GET /api/v1/company` → `default_timezone`; per-employee site tz still
-  needed for full compliance (**B-11**).
-- **B-6**: multi-value type filter on `GET /attendance/exceptions`.
-- **B-9**: full `BulkAdjustIn` / `BulkAdjustItemIn` / `BulkAdjustItemOut`
-  / `BulkAdjustOut` schema so bulk-adjust UI can be built without guesses.
-- **B-10**: frontend route file (App.tsx / routes.tsx) so
-  `/attendance/adjustments` PlaceholderPage can be replaced with the real
-  bulk-adjust + revert page.
-- **B-11**: per-employee site timezone on list endpoints or bulk
-  `GET /sites?ids=…`.
+- **B-7**: `["attendance"]` prefix invalidation covers sheet/daily/day
+  panel after resolve or bulk adjust.
+- **B-8**: `ResolveModal` surfaces `serverError`.
+- **B-9**: `BulkAdjustIn` / `BulkAdjustItemIn` / `BulkAdjustItemOut` /
+  `BulkAdjustOut` read from `adjustments_schemas.py` and implemented.
+- **B-10**: `/attendance/adjustments` placeholder replaced with
+  `AdjustmentsPage`; route unchanged.

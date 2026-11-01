@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./auth/AuthContext";
 import { ProtectedRoute } from "./auth/ProtectedRoute";
 import { AppShell } from "./shell/AppShell";
+import { AdjustmentsPage } from "./pages/AdjustmentsPage";
 import { AttendanceSheetPage } from "./pages/AttendanceSheetPage";
 import { ExceptionsPage } from "./pages/ExceptionsPage";
 import { ForcePasswordChangePage } from "./pages/ForcePasswordChangePage";
@@ -33,10 +34,7 @@ export default function App() {
           <Route index element={<HomePage />} />
           <Route path="attendance" element={<AttendanceSheetPage />} />
           <Route path="attendance/exceptions" element={<ExceptionsPage />} />
-          <Route
-            path="attendance/adjustments"
-            element={<PlaceholderPage title="Adjustments" phase="F-3b" />}
-          />
+          <Route path="attendance/adjustments" element={<AdjustmentsPage />} />
           <Route
             path="employees"
             element={<PlaceholderPage title="Employees" phase="F-4" />}

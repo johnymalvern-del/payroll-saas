@@ -210,5 +210,33 @@ export const strings = {
       "Reason 'other' requires a note of at least 10 characters.",
     nextDayIndicator: "+1 day",
     reasonCodeTooLong: "Reason code must be 40 characters or fewer.",
+    bulk: {
+      title: "Bulk adjustment",
+      employees: "Employees",
+      fromDate: "From date",
+      toDate: "To date",
+      itemCountLabel: (n: number) => `${n} row(s)`,
+      overCapWarning:
+        "Select fewer employees or a smaller date range (200 rows max).",
+      invalidRange: "End date must be on or after start date.",
+      dryRunButton: "Dry run",
+      confirmButton: "Confirm batch",
+      confirmTitle: "Apply bulk adjustment?",
+      confirmBody:
+        "This will create adjustments for all listed rows. This cannot be undone here; use outcome 'revert' later to restore punch computation.",
+      confirmApply: "Apply",
+      cancel: "Cancel",
+      resultsTitle: "Dry run results",
+      appliedTitle: "Batch applied",
+      resultsOkLabel: "OK",
+      resultsFailLabel: "Failed",
+      appliedCount: (n: number) => `${n} applied`,
+      errValidationFailed:
+        "One or more rows failed validation. Nothing was applied.",
+      errTokenMismatch:
+        "The batch changed since the dry run. Re-run the dry run.",
+      errBatchFailed:
+        "The batch failed unexpectedly. Nothing was applied.",
+    },
   },
 } as const;
