@@ -31,39 +31,45 @@
 - Direct apply: confirmation via `window.confirm`; on failure the page-level
   dismissible `Alert` (`data-testid="direct-error"`) shows `mapErrorCode`.
   Covers `day_locked`, `cannot_adjust_own`, `record_changed`, …
+- `ResolveModal` already receives `serverError` from the page and renders
+  it as a Mantine `Alert` (role="alert") inside the modal — the modal path
+  surfaces the same errors.
 - Busy state is per card: `busy = resolve.isPending && resolve.variables?.id === row.id`.
-- On success: `invalidateQueries(["exceptions"])`.
+- On success: `invalidateQueries(["exceptions"])` **and**
+  `invalidateQueries(["attendance"])` (prefix) so the attendance sheet,
+  daily list, and the open day panel all refetch. See B-7 below.
 
 ### Pagination
 - `useInfiniteQuery` with `initialPageParam: null`,
   `getNextPageParam: (last) => last.next_cursor ?? undefined`,
   `limit=PAGE_SIZE (100)`.
-- "Load more" button (`data-testid="exceptions-load-more"`) only when
-  `hasNextPage`. New test asserts append on `cursor=abc`.
+- "Load more" (`data-testid="exceptions-load-more"`) only when
+  `hasNextPage`. Test asserts append on `cursor=abc`.
 - Employee list already pages via `next_cursor` with a 20-page safety cap.
 
 ### Reason code
-- Max 40 chars, validated before `times required` / `other note`, so it
-  fails fast. Hint is neutral: "Describe the reason for this change."
+- Max 40 chars, validated before `times required` / `other note`.
+- Hint neutral: "Describe the reason for this change."
 
 ### Empty state
-- Status-neutral: "No exceptions match the current filters." (not
-  "No open exceptions").
+- Status-neutral: "No exceptions match the current filters."
 
-## Gaps / backend requests
+## Closed gaps
+- **B-7 (closed in f010b)**: `AttendanceSheetPage` uses
+  `queryKey: ["attendance", "sheet", …]` and `["attendance", "daily", …]`,
+  and the day panel is under the same `["attendance"]` prefix; a single
+  `invalidateQueries({ queryKey: ["attendance"] })` in `onSuccess` covers
+  all three. No key was invented.
+- **B-8 (closed in f010b)**: `ResolveModal` already takes `serverError` as
+  a prop and renders it as a Mantine `Alert` inside the modal. The page
+  passes `serverError={serverError}`. Modal path shows mapped errors.
+
+## Open backend requests
 - **B-5**: Provide site timezone via API (currently `DEFAULT_SITE_TZ`
   hardcoded to `Africa/Johannesburg`).
 - **B-6**: Multi-value type filtering on `GET /attendance/exceptions`
   (`type=a&type=b` or `type=a,b`) so the client-side filter note can go.
-- **B-7 (frontend gap)**: attendance sheet + day-panel invalidation after
-  resolve is **not wired** — query keys live in `AttendanceSheetPage` and
-  are not in this bundle. `TODO(B-7)` marker is in `ExceptionsPage.onSuccess`.
-  Once the keys are known: add them next to `invalidateQueries(["exceptions"])`.
-- **B-8 (frontend gap)**: `ResolveModal` must feed failures into the same
-  `setServerError` callback that the page already uses for direct apply
-  (already wired here via `onResolve` — verify modal doesn't swallow errors
-  on submit; if it does, propagate).
 
-## Backend requests
-- **B-5**: site timezone from API.
-- **B-6**: multi-value type filter on exceptions list.
+## Next: F-3b (pending)
+Bulk adjust (dry run + confirm token), bulk resolve, revert. Awaiting the
+trimmed OpenAPI to avoid inventing endpoints, fields, or token semantics.

@@ -85,9 +85,10 @@ export function ExceptionsPage() {
       setModal(null);
       setServerError(null);
       qc.invalidateQueries({ queryKey: ["exceptions"] });
-      // TODO(B-7): also invalidate the attendance sheet and day-panel
-      // query keys once the real keys from AttendanceSheetPage are wired
-      // in (see docs/FRONTEND_STATE.md).
+      // B-7 (closed): attendance sheet, daily list, and the open day panel
+      // all share the ["attendance"] prefix in AttendanceSheetPage, so a
+      // prefix invalidation refreshes whichever of them is currently mounted.
+      qc.invalidateQueries({ queryKey: ["attendance"] });
     },
     onError: (err) => {
       const code = err instanceof Error ? err.message : "unknown_error";
