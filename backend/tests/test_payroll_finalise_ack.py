@@ -1,11 +1,15 @@
-"""Chapter 4H B-4d: finalise open-exceptions ack + preview warning surfacing."""
+"""Chapter 4H B-4d: finalise open-exceptions ack + preview warning surfacing.
+
+Uses the real provisioned admin `User` row for the acting user; a fabricated
+`SimpleNamespace(id=uuid4(), ...)` violates the FK on
+`payroll_run.started_by_user_id`.
+"""
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from types import SimpleNamespace
 from typing import Iterator
 
 import pytest
@@ -21,7 +25,7 @@ from app.db.tenant.models.attendance import ExceptionItem
 from app.db.tenant.models.organisation import Company
 from app.db.tenant.models.pay import PayPeriod, Payslip
 from app.db.tenant.models.payroll_settings import PayrollSettings
-from app.db.tenant.models.people import Employee
+from app.db.tenant.models.people import Employee, User
 from app.services.payroll_formulas import FORMULA_REGISTRY
 from app.services.payroll_runner import (
     _count_open_exceptions_in_period,
@@ -78,6 +82,13 @@ def session(disposable_tenant) -> Iterator[Session]:
         s.rollback()
         s.close()
         engine.dispose()
+
+
+def _admin(session) -> User:
+    """Real admin User row (FK target for payroll_run.started_by_user_id)."""
+    admin = session.scalar(select(User).where(User.username == "admin"))
+    assert admin is not None, "provision_tenant did not create an admin user"
+    return admin
 
 
 def _mk_company(session) -> Company:
@@ -165,10 +176,6 @@ def _mk_open_exception(session, emp, work_date, type_="missing_out", status="ope
     return e
 
 
-def _admin() -> SimpleNamespace:
-    return SimpleNamespace(id=uuid.uuid4(), role="payroll_admin")
-
-
 # ---------------------------------------------------------------------------
 # _count_open_exceptions_in_period helper
 # ---------------------------------------------------------------------------
@@ -214,7 +221,7 @@ def test_finalise_refuses_open_exceptions_without_ack(session):
     _mk_open_exception(session, emp, date(2026, 1, 5), "missing_out")
 
     with pytest.raises(AppError) as exc:
-        finalise(session, _admin(), period)
+        finalise(session, _admin(session), period)
     assert exc.value.code == "open_exceptions_in_period"
     assert (exc.value.details or {}).get("count", 0) >= 1
 
@@ -227,7 +234,7 @@ def test_finalise_refuses_open_exceptions_with_blank_ack(session):
     _mk_open_exception(session, emp, date(2026, 1, 5), "missing_out")
 
     with pytest.raises(AppError) as exc:
-        finalise(session, _admin(), period, ack_open_exceptions_reason="   ")
+        finalise(session, _admin(session), period, ack_open_exceptions_reason="   ")
     assert exc.value.code == "open_exceptions_in_period"
 
 
@@ -245,7 +252,7 @@ def test_finalise_with_ack_passes_open_exceptions_check(session):
 
     with pytest.raises(AppError) as exc:
         finalise(
-            session, _admin(), period,
+            session, _admin(session), period,
             ack_open_exceptions_reason="Acknowledged: 1 open exception for review",
         )
     assert exc.value.code != "open_exceptions_in_period"
