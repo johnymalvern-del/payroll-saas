@@ -1,9 +1,13 @@
-"""Chapter 4H B-4 foundation: new PayrollSettings fields + PATCH validation."""
+"""Chapter 4H B-4 foundation: new PayrollSettings fields + PATCH validation.
+
+Uses the real provisioned admin `User` row for the acting user so the
+`payroll_settings.updated_by_user_id` FK is satisfiable. Fabricated
+`SimpleNamespace(id=uuid4(), ...)` users violate that FK.
+"""
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Iterator
 
 import pytest
@@ -20,6 +24,7 @@ from app.core.security import hash_password
 from app.db.control.models import Subscriber
 from app.db.control.session import control_session
 from app.db.tenant.models.payroll_settings import PayrollSettings
+from app.db.tenant.models.people import User
 from app.services.provisioning import (
     _drop_tenant_database,
     _tenant_db_name,
@@ -73,12 +78,19 @@ def tenant_session(disposable_tenant) -> Iterator[Session]:
         engine.dispose()
 
 
-def _admin() -> SimpleNamespace:
-    return SimpleNamespace(id=uuid.uuid4(), role="payroll_admin")
+def _admin(tenant_session) -> User:
+    """Return the real admin User row created by provision_tenant.
+
+    `payroll_settings.updated_by_user_id` has an FK to `user.id`, so the
+    acting user passed to `patch_payroll_settings` must be a real row.
+    """
+    admin = tenant_session.scalar(select(User).where(User.username == "admin"))
+    assert admin is not None, "provision_tenant did not create an admin user"
+    return admin
 
 
 def test_new_fields_default_when_no_row(tenant_session):
-    out = get_payroll_settings(tenant_session, _admin())
+    out = get_payroll_settings(tenant_session, _admin(tenant_session))
     assert out.attendance_earning_map == {}
     assert out.unpaid_day_behaviour is None
     assert out.unpaid_day_formula_code is None
@@ -102,7 +114,7 @@ def test_patch_creates_row_and_carries_new_fields(tenant_session):
             attendance_earning_map={"normal|weekday|any": "HOURLY_NORMAL"},
         ),
         tenant_session,
-        _admin(),
+        _admin(tenant_session),
     )
     assert out.unpaid_day_behaviour == "deduct_daily"
     assert out.public_holiday_unworked_monthly == "paid"
@@ -114,7 +126,9 @@ def test_patch_creates_row_and_carries_new_fields(tenant_session):
 
 def test_patch_rejects_unknown_formula_code(tenant_session):
     patch_payroll_settings(
-        PayrollSettingsPatchIn(row_version=0), tenant_session, _admin()
+        PayrollSettingsPatchIn(row_version=0),
+        tenant_session,
+        _admin(tenant_session),
     )
     tenant_session.commit()
     row = tenant_session.scalar(select(PayrollSettings))
@@ -128,14 +142,16 @@ def test_patch_rejects_unknown_formula_code(tenant_session):
                 unpaid_day_formula_code="gen_does_not_exist",
             ),
             tenant_session,
-            _admin(),
+            _admin(tenant_session),
         )
     assert exc.value.code == "unknown_formula"
 
 
 def test_patch_rejects_invalid_attendance_map_key(tenant_session):
     patch_payroll_settings(
-        PayrollSettingsPatchIn(row_version=0), tenant_session, _admin()
+        PayrollSettingsPatchIn(row_version=0),
+        tenant_session,
+        _admin(tenant_session),
     )
     tenant_session.commit()
     row = tenant_session.scalar(select(PayrollSettings))
@@ -149,14 +165,16 @@ def test_patch_rejects_invalid_attendance_map_key(tenant_session):
                 attendance_earning_map={"bad_key": "HOURLY_NORMAL"},
             ),
             tenant_session,
-            _admin(),
+            _admin(tenant_session),
         )
     assert exc.value.code == "invalid_attendance_earning_map"
 
 
 def test_patch_rejects_row_version_mismatch(tenant_session):
     patch_payroll_settings(
-        PayrollSettingsPatchIn(row_version=0), tenant_session, _admin()
+        PayrollSettingsPatchIn(row_version=0),
+        tenant_session,
+        _admin(tenant_session),
     )
     tenant_session.commit()
     row = tenant_session.scalar(select(PayrollSettings))
@@ -167,6 +185,6 @@ def test_patch_rejects_row_version_mismatch(tenant_session):
         patch_payroll_settings(
             PayrollSettingsPatchIn(row_version=row.row_version + 7),
             tenant_session,
-            _admin(),
+            _admin(tenant_session),
         )
     assert exc.value.code == "record_changed"
