@@ -1,0 +1,989 @@
+=== FILE: backend/app/api/v1/exceptions.py ===
+"""Exceptions queue endpoints (Chapter 2C + Chapter 4H B-6).
+
+B-6 adds multi-value `type` filtering:
+  ?type=missing_out                    (single, unchanged)
+  ?type=missing_out&type=too_long      (repeated param)
+  ?type=missing_out,too_long           (comma-separated)
+Both forms accepted; union is filtered. Unknown codes ignored.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import uuid
+from datetime import date, datetime, timedelta, timezone
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, Query, Request, status
+from sqlalchemy import func, or_, select
+
+from app.api.deps import TenantDbDep
+from app.api.v1.exceptions_schemas import (
+    BulkResolveIn, BulkResolveItemOut, BulkResolveOut,
+    CustomAdjustmentIn, ExceptionListOut, ExceptionOut,
+    ResolveIn, ResolveOut,
+)
+from app.core.errors import AppError
+from app.core.permissions import Permission, require_permission
+from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
+from app.db.tenant.models.attendance import (
+    Adjustment, AttendanceDay, AttendanceSegment, ExceptionItem, Shift,
+)
+from app.db.tenant.models.organisation import Company, Site
+from app.db.tenant.models.platform import AuditLog
+from app.api.v1.attendance_engine import (
+    _day_snapshot, _persist_adjustment, _sync_exceptions, recompute_day,
+)
+from zoneinfo import ZoneInfo
+from app.db.tenant.models.people import Employee
+
+router = APIRouter(prefix="/attendance/exceptions", tags=["attendance-exceptions"])
+
+_DEFAULT_LIMIT = 100
+_MAX_LIMIT = 500
+
+
+def _to_out(e: ExceptionItem) -> ExceptionOut:
+    return ExceptionOut(
+        id=e.id,
+        employee_id=e.employee_id,
+        work_date=e.work_date,
+        type=e.type,
+        source_ref=dict(e.source_ref or {}),
+        suggested_fix=dict(e.suggested_fix or {}),
+        status=e.status,
+        assigned_to=e.assigned_to,
+        resolved_by=e.resolved_by,
+        resolved_at=e.resolved_at,
+        resolution=dict(e.resolution) if e.resolution else None,
+        created_at=e.created_at,
+        updated_at=e.updated_at,
+    )
+
+
+def _encode_cursor(work_date: date, exc_id: uuid.UUID) -> str:
+    raw = json.dumps({"d": work_date.isoformat(), "i": str(exc_id)},
+                     separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[date, uuid.UUID]:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        payload = json.loads(raw)
+        return date.fromisoformat(payload["d"]), uuid.UUID(payload["i"])
+    except Exception:
+        raise AppError(
+            "invalid_cursor", "The pagination cursor is malformed", 400
+        ) from None
+
+
+def _normalise_type_filter(raw: list[str] | None) -> list[str] | None:
+    """B-6: accept repeated params and comma-separated values.
+
+    Returns None when the effective set is empty (no filter), else a
+    de-duplicated list of codes.
+    """
+    if not raw:
+        return None
+    codes: set[str] = set()
+    for chunk in raw:
+        for part in chunk.split(","):
+            p = part.strip()
+            if p:
+                codes.add(p)
+    if not codes:
+        return None
+    return sorted(codes)
+
+
+@router.get("", response_model=ExceptionListOut)
+def list_exceptions(
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.ATTENDANCE_VIEW))],
+    limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
+    cursor: str | None = Query(None),
+    include_total: bool = Query(False),
+    employee_id: uuid.UUID | None = Query(None),
+    site_id: uuid.UUID | None = Query(None),
+    department_id: uuid.UUID | None = Query(None),
+    from_date: date | None = Query(None),
+    to_date: date | None = Query(None),
+    type_filter: list[str] | None = Query(None, alias="type"),
+    status_filter: str | None = Query(None, alias="status"),
+) -> ExceptionListOut:
+    codes = _normalise_type_filter(type_filter)
+
+    q = select(ExceptionItem)
+    if status_filter is None:
+        q = q.where(ExceptionItem.status == "open")
+    else:
+        q = q.where(ExceptionItem.status == status_filter)
+    if employee_id is not None:
+        q = q.where(ExceptionItem.employee_id == employee_id)
+    if site_id is not None:
+        q = q.where(ExceptionItem.employee_id.in_(
+            select(Employee.id).where(Employee.site_id == site_id)))
+    if department_id is not None:
+        q = q.where(ExceptionItem.employee_id.in_(
+            select(Employee.id).where(Employee.department_id == department_id)))
+    if from_date is not None:
+        q = q.where(ExceptionItem.work_date >= from_date)
+    if to_date is not None:
+        q = q.where(ExceptionItem.work_date <= to_date)
+    if codes is not None:
+        q = q.where(ExceptionItem.type.in_(codes))
+
+    q = apply_scope(q, user, db, model=ExceptionItem)
+
+    if cursor is not None:
+        wd, cid = _decode_cursor(cursor)
+        q = q.where(or_(
+            ExceptionItem.work_date < wd,
+            (ExceptionItem.work_date == wd) & (ExceptionItem.id < cid),
+        ))
+
+    q = q.order_by(ExceptionItem.work_date.desc(), ExceptionItem.id.desc()).limit(limit + 1)
+    rows = list(db.scalars(q).all())
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        last = rows[-1]
+        next_cursor = _encode_cursor(last.work_date, last.id)
+
+    total: int | None = None
+    if include_total:
+        tq = select(func.count()).select_from(ExceptionItem)
+        if status_filter is None:
+            tq = tq.where(ExceptionItem.status == "open")
+        else:
+            tq = tq.where(ExceptionItem.status == status_filter)
+        if employee_id is not None:
+            tq = tq.where(ExceptionItem.employee_id == employee_id)
+        if site_id is not None:
+            tq = tq.where(ExceptionItem.employee_id.in_(
+                select(Employee.id).where(Employee.site_id == site_id)))
+        if department_id is not None:
+            tq = tq.where(ExceptionItem.employee_id.in_(
+                select(Employee.id).where(Employee.department_id == department_id)))
+        if from_date is not None:
+            tq = tq.where(ExceptionItem.work_date >= from_date)
+        if to_date is not None:
+            tq = tq.where(ExceptionItem.work_date <= to_date)
+        if codes is not None:
+            tq = tq.where(ExceptionItem.type.in_(codes))
+        tq = apply_scope(tq, user, db, model=ExceptionItem)
+        total = int(db.scalar(tq) or 0)
+
+    return ExceptionListOut(
+        items=[_to_out(r) for r in rows],
+        next_cursor=next_cursor,
+        total=total,
+    )
+
+
+@router.get("/{exception_id}", response_model=ExceptionOut)
+def get_exception(
+    exception_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.ATTENDANCE_VIEW))],
+) -> ExceptionOut:
+    exc = db.get(ExceptionItem, exception_id)
+    if exc is None:
+        raise AppError("record_not_found", "Exception not found", 404)
+    try:
+        assert_in_scope(user, exc.employee_id, db)
+    except ScopeViolation:
+        raise AppError("record_not_found", "Exception not found", 404) from None
+    return _to_out(exc)
+
+
+_DEFAULT_REASON_CODES = (
+    "device_down",
+    "forgot_clock",
+    "approved_site_work",
+    "system_correction",
+    "other",
+)
+
+
+def _current_reason_codes(db) -> tuple:
+    company = db.scalar(select(Company))
+    if company is None:
+        return _DEFAULT_REASON_CODES
+    settings = company.settings or {}
+    att = settings.get("attendance") or {}
+    codes = att.get("reason_codes")
+    if isinstance(codes, list) and codes and all(isinstance(c, str) for c in codes):
+        return tuple(codes)
+    return _DEFAULT_REASON_CODES
+
+
+def _validate_reason(db, reason_code: str, note: str | None) -> None:
+    allowed = _current_reason_codes(db)
+    if reason_code not in allowed:
+        raise AppError(
+            "invalid_reason_code",
+            f"reason_code must be one of {allowed}",
+            status.HTTP_400_BAD_REQUEST,
+            {"reason_code": reason_code},
+        )
+    if reason_code == "other":
+        if note is None or len(note.strip()) < 10:
+            raise AppError(
+                "note_required",
+                "reason_code 'other' requires a note of at least 10 characters",
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+
+def _site_tz_for_employee(db, employee) -> ZoneInfo:
+    if employee.site_id is not None:
+        site = db.get(Site, employee.site_id)
+        if site is not None and site.timezone:
+            return ZoneInfo(site.timezone)
+    company = db.scalar(select(Company))
+    if company is None:
+        raise AppError("company_missing", "Company row not found", 500)
+    return ZoneInfo(company.default_timezone)
+
+
+def _day_for(db, employee_id, work_date):
+    return db.scalar(select(AttendanceDay).where(
+        AttendanceDay.employee_id == employee_id,
+        AttendanceDay.work_date == work_date,
+    ))
+
+
+def _approve_pending_segments(db, day) -> int:
+    segs = db.scalars(select(AttendanceSegment).where(
+        AttendanceSegment.attendance_day_id == day.id,
+        AttendanceSegment.overtime_status == "pending",
+    )).all()
+    for s in segs:
+        s.overtime_status = "approved"
+    db.flush()
+    return len(segs)
+
+
+def _serialize_adj(adj) -> dict:
+    return {
+        "id": str(adj.id),
+        "employee_id": str(adj.employee_id),
+        "work_date": adj.work_date.isoformat(),
+        "outcome": adj.outcome,
+        "time_in": adj.time_in.isoformat() if adj.time_in else None,
+        "time_out": adj.time_out.isoformat() if adj.time_out else None,
+        "minutes": adj.minutes,
+        "reason_code": adj.reason_code,
+        "note": adj.note,
+        "batch_id": str(adj.batch_id) if adj.batch_id else None,
+        "created_by": str(adj.created_by) if adj.created_by else None,
+    }
+
+
+def _apply_adjustment(db, user, employee_id, work_date, custom,
+                      *, batch_id=None, request_id=None):
+    day_before = _day_for(db, employee_id, work_date)
+    if day_before is not None and day_before.locked:
+        raise AppError(
+            "day_locked",
+            "The payroll period containing this day is closed; corrections after close come with the payroll period feature",
+            status.HTTP_409_CONFLICT,
+        )
+    adj = _persist_adjustment(
+        db,
+        employee_id=employee_id,
+        work_date=work_date,
+        outcome=custom.outcome,
+        time_in=custom.time_in,
+        time_out=custom.time_out,
+        reason_code=custom.reason_code,
+        note=custom.note,
+        created_by=getattr(user, "id", None),
+        batch_id=batch_id,
+    )
+    recompute_day(db, employee_id, work_date)
+    day_after = _day_for(db, employee_id, work_date)
+    adj.new_value = _day_snapshot(day_after)
+    db.add(AuditLog(
+        id=uuid.uuid4(),
+        actor_user_id=getattr(user, "id", None),
+        actor_role=getattr(user, "role", None),
+        entity_type="adjustment",
+        entity_id=str(adj.id),
+        action="attendance.adjustment.create",
+        old_value=adj.old_value,
+        new_value={"day": _day_snapshot(day_after), "adjustment": _serialize_adj(adj)},
+        request_id=request_id,
+    ))
+    if not db.info.get("bulk_no_commit"):
+        db.commit()
+    return adj.id, (day_after.status if day_after else None)
+
+
+def _suggested_adjustment_for(db, exc, day, employee):
+    """Return a CustomAdjustmentIn or None (acceptance-only), or raise."""
+    t = exc.type
+    if t == "missing_out":
+        if day is None or day.shift_id is None or day.first_in is None:
+            raise AppError(
+                "suggestion_requires_params",
+                "missing_out with no shift cannot be auto-applied; use custom",
+                status.HTTP_400_BAD_REQUEST,
+            )
+        shift = db.get(Shift, day.shift_id)
+        if shift is None:
+            raise AppError("suggestion_requires_params", "shift not found", status.HTTP_400_BAD_REQUEST)
+        tz = _site_tz_for_employee(db, employee)
+        end_local = datetime.combine(day.work_date, shift.start_time, tzinfo=tz) + timedelta(minutes=shift.length_minutes)
+        return CustomAdjustmentIn(
+            outcome="worked",
+            time_in=day.first_in,
+            time_out=end_local.astimezone(timezone.utc),
+            reason_code="forgot_clock",
+            note="Auto: apply shift end time",
+        )
+    if t == "too_long":
+        if day is None or day.shift_id is None or day.first_in is None:
+            raise AppError("suggestion_requires_params", "too_long with no shift", status.HTTP_400_BAD_REQUEST)
+        shift = db.get(Shift, day.shift_id)
+        if shift is None:
+            raise AppError("suggestion_requires_params", "shift not found", status.HTTP_400_BAD_REQUEST)
+        return CustomAdjustmentIn(
+            outcome="worked",
+            time_in=day.first_in,
+            time_out=day.first_in + timedelta(minutes=shift.max_shift_minutes),
+            reason_code="system_correction",
+            note="Auto: truncate to max shift",
+        )
+    if t == "absent_expected":
+        return CustomAdjustmentIn(
+            outcome="day_off",
+            reason_code="system_correction",
+            note="Auto: mark as day off",
+        )
+    if t == "no_shift_match":
+        raise AppError(
+            "suggestion_requires_params",
+            "no_shift_match requires choosing a shift via 'custom'",
+            status.HTTP_400_BAD_REQUEST,
+        )
+    if t in ("low_confidence", "overtime_unapproved", "device_clock_gap", "duplicate", "employee_query"):
+        return None
+    raise AppError(
+        "unknown_suggestion",
+        f"No suggestion for exception type {t}",
+        status.HTTP_400_BAD_REQUEST,
+    )
+
+
+@router.post("/{exception_id}/resolve", response_model=ResolveOut)
+def resolve_exception(
+    exception_id: uuid.UUID,
+    payload: ResolveIn,
+    request: Request,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.ATTENDANCE_ADJUST))],
+) -> ResolveOut:
+    exc = db.get(ExceptionItem, exception_id)
+    if exc is None:
+        raise AppError("record_not_found", "Exception not found", 404)
+    try:
+        assert_in_scope(user, exc.employee_id, db)
+    except ScopeViolation:
+        raise AppError("record_not_found", "Exception not found", 404) from None
+    if exc.status != "open":
+        raise AppError(
+            "exception_not_open",
+            f"Exception is already {exc.status}",
+            status.HTTP_409_CONFLICT,
+        )
+    if getattr(user, "employee_id", None) is not None and user.employee_id == exc.employee_id:
+        raise AppError(
+            "cannot_adjust_own",
+            "A user cannot adjust their own attendance",
+            status.HTTP_403_FORBIDDEN,
+        )
+    employee = db.get(Employee, exc.employee_id)
+    if employee is None:
+        raise AppError("record_not_found", "Employee not found", 404)
+    day = _day_for(db, exc.employee_id, exc.work_date)
+    request_id = getattr(request.state, "request_id", None)
+    adjustment_id: uuid.UUID | None = None
+    day_status = day.status if day is not None else None
+
+    try:
+        if payload.action == "dismiss":
+            pass
+        elif payload.action == "custom":
+            ca = payload.custom_adjustment
+            _validate_reason(db, ca.reason_code, ca.note)
+            adjustment_id, day_status = _apply_adjustment(
+                db, user, exc.employee_id, exc.work_date, ca, request_id=request_id
+            )
+        else:
+            ca = _suggested_adjustment_for(db, exc, day, employee)
+            if ca is not None:
+                _validate_reason(db, ca.reason_code, ca.note)
+                adjustment_id, day_status = _apply_adjustment(
+                    db, user, exc.employee_id, exc.work_date, ca, request_id=request_id
+                )
+            elif exc.type == "overtime_unapproved" and day is not None:
+                _approve_pending_segments(db, day)
+                recompute_day(db, exc.employee_id, exc.work_date)
+                db.commit()
+                refreshed = _day_for(db, exc.employee_id, exc.work_date)
+                day_status = refreshed.status if refreshed is not None else None
+    except AppError:
+        db.rollback()
+        raise
+
+    exc = db.get(ExceptionItem, exception_id)
+    exc.status = "resolved"
+    exc.resolved_by = getattr(user, "id", None)
+    exc.resolved_at = datetime.now(timezone.utc)
+    exc.resolution = {
+        "action": payload.action,
+        "adjustment_id": str(adjustment_id) if adjustment_id else None,
+        "note": payload.note,
+    }
+    db.add(AuditLog(
+        id=uuid.uuid4(),
+        actor_user_id=getattr(user, "id", None),
+        actor_role=getattr(user, "role", None),
+        entity_type="exception_item",
+        entity_id=str(exc.id),
+        action="attendance.exception.resolve",
+        old_value={"status": "open"},
+        new_value={
+            "status": "resolved",
+            "action": payload.action,
+            "adjustment_id": str(adjustment_id) if adjustment_id else None,
+        },
+        request_id=request_id,
+    ))
+    db.commit()
+    db.refresh(exc)
+    return ResolveOut(
+        exception=_to_out(exc),
+        adjustment_id=adjustment_id,
+        day_status=day_status,
+    )
+
+
+_ERROR_MESSAGES = {
+    "record_not_found": "Exception not found or out of scope",
+    "cannot_adjust_own": "A user cannot adjust their own attendance",
+    "exception_not_open": "Exception is not open",
+    "day_locked": "Day is in a closed payroll period",
+    "note_required": "Dismiss requires a note of at least 3 characters",
+    "custom_missing": "action='custom' requires custom_adjustment",
+    "invalid_reason_code": "Reason code is not in the current list",
+    "note_too_short": "reason_code 'other' requires a note of at least 10 characters",
+    "suggestion_requires_params": "This exception requires a custom adjustment; apply_suggestion cannot proceed",
+    "token_mismatch": "Payload does not match the dry-run token",
+    "batch_failed": "Batch aborted due to an unexpected error",
+}
+
+
+def _compute_bulk_token(items) -> str:
+    payload = [item.model_dump(mode="json") for item in items]
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _pre_validate_bulk_item(db, user, item, exc):
+    """Return an error code (str) if invalid, else None. Read-only."""
+    if exc is None:
+        return "record_not_found"
+    if getattr(user, "employee_id", None) is not None and user.employee_id == exc.employee_id:
+        return "cannot_adjust_own"
+    try:
+        assert_in_scope(user, exc.employee_id, db)
+    except ScopeViolation:
+        return "record_not_found"
+    if exc.status != "open":
+        return "exception_not_open"
+    day = _day_for(db, exc.employee_id, exc.work_date)
+    if day is not None and day.locked:
+        return "day_locked"
+    if item.action == "dismiss":
+        if item.note is None or len(item.note.strip()) < 3:
+            return "note_required"
+        return None
+    if item.action == "custom":
+        if item.custom_adjustment is None:
+            return "custom_missing"
+        try:
+            _validate_reason(db, item.custom_adjustment.reason_code, item.custom_adjustment.note)
+        except AppError as e:
+            return e.code
+        return None
+    employee = db.get(Employee, exc.employee_id)
+    try:
+        ca = _suggested_adjustment_for(db, exc, day, employee)
+    except AppError as e:
+        return e.code
+    if ca is not None:
+        try:
+            _validate_reason(db, ca.reason_code, ca.note)
+        except AppError as e:
+            return e.code
+    return None
+
+
+@router.post("/bulk_resolve", response_model=BulkResolveOut)
+def bulk_resolve_exception(
+    payload: BulkResolveIn,
+    request: Request,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.ATTENDANCE_ADJUST))],
+) -> BulkResolveOut:
+    computed = _compute_bulk_token(payload.items)
+    if payload.token is not None and payload.token != computed:
+        raise AppError(
+            "token_mismatch",
+            "Payload does not match the dry-run token; re-run dry-run with the same items",
+            status.HTTP_409_CONFLICT,
+        )
+    is_dry_run = payload.token is None
+    request_id = getattr(request.state, "request_id", None)
+
+    exceptions_by_id: dict[uuid.UUID, ExceptionItem | None] = {}
+    for item in payload.items:
+        exceptions_by_id[item.exception_id] = db.get(ExceptionItem, item.exception_id)
+
+    pre_errors: dict[int, str] = {}
+    for idx, item in enumerate(payload.items):
+        code = _pre_validate_bulk_item(db, user, item, exceptions_by_id[item.exception_id])
+        if code is not None:
+            pre_errors[idx] = code
+
+    if is_dry_run:
+        results: list[BulkResolveItemOut] = []
+        for idx, item in enumerate(payload.items):
+            if idx in pre_errors:
+                code = pre_errors[idx]
+                results.append(BulkResolveItemOut(
+                    index=idx, exception_id=item.exception_id, ok=False,
+                    error_code=code, error_message=_ERROR_MESSAGES.get(code, code),
+                ))
+            else:
+                results.append(BulkResolveItemOut(
+                    index=idx, exception_id=item.exception_id, ok=True,
+                ))
+        return BulkResolveOut(
+            results=results,
+            applied=0,
+            dry_run=True,
+            token=computed,
+        )
+
+    if pre_errors:
+        results: list[BulkResolveItemOut] = []
+        for idx, item in enumerate(payload.items):
+            if idx in pre_errors:
+                code = pre_errors[idx]
+                results.append(BulkResolveItemOut(
+                    index=idx, exception_id=item.exception_id, ok=False,
+                    error_code=code, error_message=_ERROR_MESSAGES.get(code, code),
+                ))
+            else:
+                results.append(BulkResolveItemOut(
+                    index=idx, exception_id=item.exception_id, ok=True,
+                ))
+        raise AppError(
+            "bulk_validation_failed",
+            "One or more items failed validation; nothing was applied. Use the dry-run results to fix the batch.",
+            status.HTTP_400_BAD_REQUEST,
+            {"results": [r.model_dump(mode="json") for r in results]},
+        )
+
+    db.info["bulk_no_commit"] = True
+    try:
+        applied_results: list[BulkResolveItemOut] = []
+        for idx, item in enumerate(payload.items):
+            exc = exceptions_by_id[item.exception_id]
+            employee = db.get(Employee, exc.employee_id)
+            day = _day_for(db, exc.employee_id, exc.work_date)
+            adjustment_id: uuid.UUID | None = None
+            try:
+                if item.action == "dismiss":
+                    pass
+                elif item.action == "custom":
+                    ca = item.custom_adjustment
+                    adjustment_id, _ = _apply_adjustment(
+                        db, user, exc.employee_id, exc.work_date, ca, request_id=request_id
+                    )
+                else:
+                    ca = _suggested_adjustment_for(db, exc, day, employee)
+                    if ca is not None:
+                        adjustment_id, _ = _apply_adjustment(
+                            db, user, exc.employee_id, exc.work_date, ca, request_id=request_id
+                        )
+                    elif exc.type == "overtime_unapproved" and day is not None:
+                        _approve_pending_segments(db, day)
+                        recompute_day(db, exc.employee_id, exc.work_date)
+                exc.status = "resolved"
+                exc.resolved_by = getattr(user, "id", None)
+                exc.resolved_at = datetime.now(timezone.utc)
+                exc.resolution = {
+                    "action": item.action,
+                    "adjustment_id": str(adjustment_id) if adjustment_id else None,
+                    "note": item.note,
+                    "batch": True,
+                }
+                db.add(AuditLog(
+                    id=uuid.uuid4(),
+                    actor_user_id=getattr(user, "id", None),
+                    actor_role=getattr(user, "role", None),
+                    entity_type="exception_item",
+                    entity_id=str(exc.id),
+                    action="attendance.exception.resolve",
+                    old_value={"status": "open"},
+                    new_value={
+                        "status": "resolved",
+                        "action": item.action,
+                        "adjustment_id": str(adjustment_id) if adjustment_id else None,
+                        "batch": True,
+                    },
+                    request_id=request_id,
+                ))
+                db.flush()
+                applied_results.append(BulkResolveItemOut(
+                    index=idx, exception_id=item.exception_id, ok=True,
+                    adjustment_id=adjustment_id,
+                ))
+            except AppError as e:
+                db.rollback()
+                raise AppError(
+                    "batch_failed",
+                    f"Batch aborted at item {idx}: {e.message}. Nothing was applied.",
+                    status.HTTP_409_CONFLICT,
+                    {"failed_index": idx, "code": e.code},
+                ) from None
+
+        batch_id = uuid.uuid4()
+        db.add(AuditLog(
+            id=uuid.uuid4(),
+            actor_user_id=getattr(user, "id", None),
+            actor_role=getattr(user, "role", None),
+            entity_type="exception_item",
+            entity_id=str(batch_id),
+            action="attendance.exception.bulk",
+            old_value=None,
+            new_value={
+                "batch_id": str(batch_id),
+                "count": len(applied_results),
+                "ids": [str(item.exception_id) for item in payload.items],
+            },
+            request_id=request_id,
+        ))
+        db.commit()
+    finally:
+        db.info.pop("bulk_no_commit", None)
+
+    return BulkResolveOut(
+        results=applied_results,
+        applied=len(applied_results),
+        dry_run=False,
+        token=computed,
+    )
+=== END FILE: backend/app/api/v1/exceptions.py ===
+
+=== FILE: backend/tests/test_exceptions_multitype.py ===
+"""Chapter 4H B-6: multi-value type filter on GET /attendance/exceptions."""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Iterator
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from app.api.v1.exceptions import _normalise_type_filter, list_exceptions
+from app.core.security import hash_password
+from app.db.control.models import Subscriber
+from app.db.control.session import control_session
+from app.db.tenant.models.attendance import ExceptionItem
+from app.db.tenant.models.organisation import Company
+from app.db.tenant.models.people import Employee, User
+from app.services.provisioning import (
+    _drop_tenant_database,
+    _tenant_db_name,
+    provision_tenant,
+)
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    slug = f"b6-{uuid.uuid4().hex[:8]}"
+    result = provision_tenant(
+        slug=slug,
+        name="B6 Co",
+        admin_username="admin",
+        admin_password_hash=hash_password("AdminPassword123!"),
+    )
+    try:
+        yield _DisposableTenant(
+            slug=slug,
+            tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        _drop_tenant_database(result.tenant_db_name)
+        with control_session() as s:
+            r = s.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if r is not None:
+                s.delete(r)
+
+
+@pytest.fixture()
+def session(disposable_tenant) -> Iterator[Session]:
+    url = (
+        "postgresql+psycopg://payroll_app:payroll_app_dev_password"
+        f"@localhost:5432/{disposable_tenant.tenant_db_name}"
+    )
+    engine = create_engine(url, future=True)
+    s = Session(bind=engine)
+    try:
+        yield s
+    finally:
+        s.rollback()
+        s.close()
+        engine.dispose()
+
+
+def _admin(session) -> User:
+    admin = session.scalar(select(User).where(User.username == "admin"))
+    assert admin is not None
+    return admin
+
+
+def _mk_company(session) -> Company:
+    c = session.scalar(select(Company))
+    if c is not None:
+        return c
+    c = Company(
+        legal_name="B6 Co",
+        country_code="ZA",
+        currency="ZAR",
+        default_timezone="Africa/Johannesburg",
+        settings={},
+        row_version=1,
+    )
+    session.add(c)
+    session.flush()
+    return c
+
+
+def _mk_employee(session) -> Employee:
+    emp = Employee(
+        employee_code=f"E-{uuid.uuid4().hex[:6]}",
+        first_name="Test",
+        last_name="Emp",
+        hire_date=date(2024, 1, 1),
+        status="active",
+        employee_type="hourly",
+        pay_basis="hourly",
+        pay_frequency="monthly",
+        base_rate=Decimal("100.00"),
+        row_version=1,
+    )
+    session.add(emp)
+    session.flush()
+    return emp
+
+
+def _mk_exc(session, emp, work_date, type_: str, status: str = "open") -> ExceptionItem:
+    e = ExceptionItem(
+        id=uuid.uuid4(),
+        employee_id=emp.id,
+        work_date=work_date,
+        type=type_,
+        source_ref={},
+        suggested_fix={},
+        status=status,
+    )
+    session.add(e)
+    session.flush()
+    return e
+
+
+def _seed_exceptions(session):
+    _mk_company(session)
+    emp = _mk_employee(session)
+    _mk_exc(session, emp, date(2026, 1, 5), "missing_out")
+    _mk_exc(session, emp, date(2026, 1, 6), "missing_out")
+    _mk_exc(session, emp, date(2026, 1, 7), "too_long")
+    _mk_exc(session, emp, date(2026, 1, 8), "duplicate")
+    _mk_exc(session, emp, date(2026, 1, 9), "employee_query")
+    session.commit()
+
+
+# ---------------------------------------------------------------------------
+# _normalise_type_filter unit tests
+# ---------------------------------------------------------------------------
+
+def test_normalise_none_returns_none():
+    assert _normalise_type_filter(None) is None
+
+
+def test_normalise_empty_list_returns_none():
+    assert _normalise_type_filter([]) is None
+
+
+def test_normalise_single_value():
+    assert _normalise_type_filter(["missing_out"]) == ["missing_out"]
+
+
+def test_normalise_repeated_values():
+    got = _normalise_type_filter(["missing_out", "too_long"])
+    assert got == ["missing_out", "too_long"]
+
+
+def test_normalise_comma_separated():
+    got = _normalise_type_filter(["missing_out,too_long"])
+    assert got == ["missing_out", "too_long"]
+
+
+def test_normalise_mixed_repeated_and_comma():
+    got = _normalise_type_filter(["missing_out,too_long", "duplicate"])
+    assert got == ["duplicate", "missing_out", "too_long"]
+
+
+def test_normalise_whitespace_stripped():
+    got = _normalise_type_filter([" missing_out , too_long "])
+    assert got == ["missing_out", "too_long"]
+
+
+def test_normalise_all_empty_returns_none():
+    assert _normalise_type_filter([""]) is None
+    assert _normalise_type_filter([",,,"]) is None
+    assert _normalise_type_filter(["", ","]) is None
+
+
+def test_normalise_duplicates_deduped():
+    got = _normalise_type_filter(["missing_out", "missing_out,missing_out"])
+    assert got == ["missing_out"]
+
+
+# ---------------------------------------------------------------------------
+# Endpoint behaviour (list_exceptions called directly)
+# ---------------------------------------------------------------------------
+
+def test_filter_single_type_still_works(session):
+    _seed_exceptions(session)
+    admin = _admin(session)
+    out = list_exceptions(
+        db=session, user=admin,
+        limit=100, cursor=None, include_total=False,
+        employee_id=None, site_id=None, department_id=None,
+        from_date=None, to_date=None,
+        type_filter=["missing_out"], status_filter=None,
+    )
+    assert len(out.items) == 2
+    assert all(i.type == "missing_out" for i in out.items)
+
+
+def test_filter_two_types_repeated_param(session):
+    _seed_exceptions(session)
+    admin = _admin(session)
+    out = list_exceptions(
+        db=session, user=admin,
+        limit=100, cursor=None, include_total=False,
+        employee_id=None, site_id=None, department_id=None,
+        from_date=None, to_date=None,
+        type_filter=["missing_out", "too_long"], status_filter=None,
+    )
+    types = {i.type for i in out.items}
+    assert types == {"missing_out", "too_long"}
+    assert len(out.items) == 3
+
+
+def test_filter_comma_separated(session):
+    _seed_exceptions(session)
+    admin = _admin(session)
+    out = list_exceptions(
+        db=session, user=admin,
+        limit=100, cursor=None, include_total=False,
+        employee_id=None, site_id=None, department_id=None,
+        from_date=None, to_date=None,
+        type_filter=["missing_out,too_long"], status_filter=None,
+    )
+    types = {i.type for i in out.items}
+    assert types == {"missing_out", "too_long"}
+    assert len(out.items) == 3
+
+
+def test_filter_mixed_repeated_and_comma(session):
+    _seed_exceptions(session)
+    admin = _admin(session)
+    out = list_exceptions(
+        db=session, user=admin,
+        limit=100, cursor=None, include_total=False,
+        employee_id=None, site_id=None, department_id=None,
+        from_date=None, to_date=None,
+        type_filter=["missing_out,too_long", "duplicate"], status_filter=None,
+    )
+    types = {i.type for i in out.items}
+    assert types == {"missing_out", "too_long", "duplicate"}
+    assert len(out.items) == 4
+
+
+def test_filter_unknown_type_ignored(session):
+    """Unknown codes don't 400 — they simply match nothing (0 rows)."""
+    _seed_exceptions(session)
+    admin = _admin(session)
+    out = list_exceptions(
+        db=session, user=admin,
+        limit=100, cursor=None, include_total=False,
+        employee_id=None, site_id=None, department_id=None,
+        from_date=None, to_date=None,
+        type_filter=["totally_fake_code"], status_filter=None,
+    )
+    assert out.items == []
+
+
+def test_filter_empty_type_no_filter(session):
+    """`?type=` with empty value = no filter (all open rows)."""
+    _seed_exceptions(session)
+    admin = _admin(session)
+    out = list_exceptions(
+        db=session, user=admin,
+        limit=100, cursor=None, include_total=False,
+        employee_id=None, site_id=None, department_id=None,
+        from_date=None, to_date=None,
+        type_filter=[""], status_filter=None,
+    )
+    assert len(out.items) == 5
+
+
+def test_filter_union_reflected_in_total(session):
+    _seed_exceptions(session)
+    admin = _admin(session)
+    out = list_exceptions(
+        db=session, user=admin,
+        limit=100, cursor=None, include_total=True,
+        employee_id=None, site_id=None, department_id=None,
+        from_date=None, to_date=None,
+        type_filter=["missing_out", "too_long"], status_filter=None,
+    )
+    assert out.total == 3
+    assert len(out.items) == 3
+=== END FILE: backend/tests/test_exceptions_multitype.py ===

@@ -1,21 +1,10 @@
-"""Exceptions queue endpoints (Chapter 2C).
+"""Exceptions queue endpoints (Chapter 2C + Chapter 4H B-6).
 
-Four endpoints:
-  GET  /attendance/exceptions                   cursor list, filters
-  GET  /attendance/exceptions/{id}              single
-  POST /attendance/exceptions/{id}/resolve      apply_suggestion / custom / dismiss
-  POST /attendance/exceptions/bulk_resolve      dry-run + token (C1)
-
-Permissions:
-  list, get     ATTENDANCE_VIEW
-  resolve, bulk ATTENDANCE_ADJUST
-
-Scope:
-  list uses apply_scope(model=ExceptionItem)
-  single uses assert_in_scope on employee_id; out-of-scope returns 404
-
-Self-adjustment (C8) and locked-day (C3) guards live in the resolve and
-bulk_resolve endpoints, added in 2C-3b-ii.
+B-6 adds multi-value `type` filtering:
+  ?type=missing_out                    (single, unchanged)
+  ?type=missing_out&type=too_long      (repeated param)
+  ?type=missing_out,too_long           (comma-separated)
+Both forms accepted; union is filtered. Unknown codes ignored.
 """
 from __future__ import annotations
 
@@ -91,6 +80,25 @@ def _decode_cursor(cursor: str) -> tuple[date, uuid.UUID]:
         ) from None
 
 
+def _normalise_type_filter(raw: list[str] | None) -> list[str] | None:
+    """B-6: accept repeated params and comma-separated values.
+
+    Returns None when the effective set is empty (no filter), else a
+    de-duplicated list of codes.
+    """
+    if not raw:
+        return None
+    codes: set[str] = set()
+    for chunk in raw:
+        for part in chunk.split(","):
+            p = part.strip()
+            if p:
+                codes.add(p)
+    if not codes:
+        return None
+    return sorted(codes)
+
+
 @router.get("", response_model=ExceptionListOut)
 def list_exceptions(
     db: TenantDbDep,
@@ -103,9 +111,11 @@ def list_exceptions(
     department_id: uuid.UUID | None = Query(None),
     from_date: date | None = Query(None),
     to_date: date | None = Query(None),
-    type_filter: str | None = Query(None, alias="type"),
+    type_filter: list[str] | None = Query(None, alias="type"),
     status_filter: str | None = Query(None, alias="status"),
 ) -> ExceptionListOut:
+    codes = _normalise_type_filter(type_filter)
+
     q = select(ExceptionItem)
     if status_filter is None:
         q = q.where(ExceptionItem.status == "open")
@@ -123,8 +133,8 @@ def list_exceptions(
         q = q.where(ExceptionItem.work_date >= from_date)
     if to_date is not None:
         q = q.where(ExceptionItem.work_date <= to_date)
-    if type_filter is not None:
-        q = q.where(ExceptionItem.type == type_filter)
+    if codes is not None:
+        q = q.where(ExceptionItem.type.in_(codes))
 
     q = apply_scope(q, user, db, model=ExceptionItem)
 
@@ -162,8 +172,8 @@ def list_exceptions(
             tq = tq.where(ExceptionItem.work_date >= from_date)
         if to_date is not None:
             tq = tq.where(ExceptionItem.work_date <= to_date)
-        if type_filter is not None:
-            tq = tq.where(ExceptionItem.type == type_filter)
+        if codes is not None:
+            tq = tq.where(ExceptionItem.type.in_(codes))
         tq = apply_scope(tq, user, db, model=ExceptionItem)
         total = int(db.scalar(tq) or 0)
 
@@ -512,7 +522,6 @@ def _pre_validate_bulk_item(db, user, item, exc):
         except AppError as e:
             return e.code
         return None
-    # apply_suggestion
     employee = db.get(Employee, exc.employee_id)
     try:
         ca = _suggested_adjustment_for(db, exc, day, employee)
@@ -683,5 +692,3 @@ def bulk_resolve_exception(
         dry_run=False,
         token=computed,
     )
-
-# END OF FILE
