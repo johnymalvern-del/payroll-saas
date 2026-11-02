@@ -1,4 +1,8 @@
-"""Chapter 4H B-4e: demo PDF watermark tests."""
+"""Chapter 4H B-4e: demo PDF watermark tests.
+
+Uses `_mk_earning_type` as get-or-create because `provision_tenant`
+(B-4f) already seeds the 13 system types.
+"""
 from __future__ import annotations
 
 import uuid
@@ -205,6 +209,9 @@ def _mk_company(session):
 
 
 def _mk_earning_type(session, *, code: str) -> EarningType:
+    existing = session.scalar(select(EarningType).where(EarningType.code == code))
+    if existing is not None:
+        return existing
     et = EarningType(
         id=uuid.uuid4(),
         name=code.replace("_", " ").title(),

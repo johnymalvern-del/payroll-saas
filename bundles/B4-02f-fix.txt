@@ -1,0 +1,1305 @@
+=== FILE: backend/app/services/payroll_seed.py ===
+"""System payroll seed (Chapter 4, Bundle 004a-iv-c + Chapter 4H B-4b).
+
+Idempotent seed of the system earning types required by the attendance-to-
+earnings integration (Chapter 4H B-4). All types are `frequency="regular"`
+per F5 - only genuine one-offs (bonus, commission, advances) use
+once_off/irregular and are refused under the regular-earnings method.
+
+Chapter 4H B-4b additions:
+  - `hourly_normal`, `hourly_saturday`, `hourly_sunday`,
+    `hourly_public_holiday`
+  - `overtime_t1`, `overtime_t2`, `overtime_t3`
+  - `shift_allowance`
+  - `leave_paid`
+These are the earning-type codes that `attendance_earning_map` may reference.
+
+Chapter 4H B-4f: `provision_tenant::_seed_tenant_defaults` calls
+`ensure_system_earning_types` at provisioning time, so a freshly created
+real tenant has all 13 rows before the first request lands. A call to
+`ensure_system_earning_types` on such a tenant returns `created=[]`.
+"""
+from __future__ import annotations
+
+import uuid
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.db.tenant.models.pay import EarningType
+
+
+SYSTEM_TYPES: tuple[dict, ...] = (
+    {
+        "code": "normal_pay",
+        "name": "Normal Pay",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "overtime",
+        "name": "Overtime",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "holiday_pay",
+        "name": "Holiday Pay",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "leave_pay",
+        "name": "Leave Pay",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "hourly_normal",
+        "name": "Normal Hours (Weekday)",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "hourly_saturday",
+        "name": "Saturday Hours",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "hourly_sunday",
+        "name": "Sunday Hours",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "hourly_public_holiday",
+        "name": "Public Holiday Hours",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "overtime_t1",
+        "name": "Overtime Tier 1",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "overtime_t2",
+        "name": "Overtime Tier 2",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "overtime_t3",
+        "name": "Overtime Tier 3",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "shift_allowance",
+        "name": "Shift Allowance",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "leave_paid",
+        "name": "Paid Leave",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+)
+
+
+def ensure_system_earning_types(db: Session) -> dict:
+    """Idempotent. Existing rows (by code) are left untouched even if fields
+    differ - we do not silently rewrite system rows after they have been used.
+    """
+    created: list[str] = []
+    existing: list[str] = []
+    for spec in SYSTEM_TYPES:
+        row = db.scalar(select(EarningType).where(EarningType.code == spec["code"]))
+        if row is not None:
+            existing.append(spec["code"])
+            continue
+        db.add(EarningType(
+            id=uuid.uuid4(),
+            name=spec["name"],
+            code=spec["code"],
+            calc_method=spec["calc_method"],
+            frequency=spec["frequency"],
+            is_taxable=spec["is_taxable"],
+            counts_for_uif=spec["counts_for_uif"],
+            counts_for_sdl=spec["counts_for_sdl"],
+            proration_rule=spec["proration_rule"],
+            is_system=True,
+            is_active=True,
+        ))
+        created.append(spec["code"])
+    db.flush()
+    return {"created": created, "existing": existing, "total": len(SYSTEM_TYPES)}
+=== END FILE: backend/app/services/payroll_seed.py ===
+
+=== FILE: backend/tests/test_payroll_seed.py ===
+"""System payroll seed tests (Chapter 4H B-4b, updated for B-4f).
+
+After B-4f, `provision_tenant` already seeds the 13 system earning types,
+so on a fresh provisioned tenant `ensure_system_earning_types` is a no-op
+returning `created=[]`. These tests verify that:
+  - the SYSTEM_TYPES registry is 13 entries;
+  - calling `ensure_system_earning_types` on a fresh tenant seeds nothing
+    (provision already did), and reports all 13 as existing;
+  - the tenant already has the 13 rows before any explicit call;
+  - a custom user type is not touched.
+"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from typing import Iterator
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from app.core.security import hash_password
+from app.db.control.models import Subscriber
+from app.db.control.session import control_session
+from app.db.tenant.models.pay import EarningType
+from app.services.payroll_seed import SYSTEM_TYPES, ensure_system_earning_types
+from app.services.provisioning import (
+    _drop_tenant_database,
+    _tenant_db_name,
+    provision_tenant,
+)
+
+
+EXPECTED_CODES = {spec["code"] for spec in SYSTEM_TYPES}
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    slug = f"pseed-{uuid.uuid4().hex[:10]}"
+    result = provision_tenant(
+        slug=slug,
+        name="Payroll Seed Co",
+        admin_username="admin",
+        admin_password_hash=hash_password("AdminPassword123!"),
+    )
+    try:
+        yield _DisposableTenant(
+            slug=slug,
+            tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        _drop_tenant_database(result.tenant_db_name)
+        with control_session() as s:
+            r = s.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if r is not None:
+                s.delete(r)
+
+
+@pytest.fixture()
+def tenant_session(disposable_tenant) -> Iterator[Session]:
+    url = (
+        "postgresql+psycopg://payroll_app:payroll_app_dev_password"
+        f"@localhost:5432/{disposable_tenant.tenant_db_name}"
+    )
+    engine = create_engine(url, future=True)
+    s = Session(bind=engine)
+    try:
+        yield s
+    finally:
+        s.rollback()
+        s.close()
+        engine.dispose()
+
+
+def test_system_types_registry_has_thirteen_entries():
+    assert len(SYSTEM_TYPES) == 13
+    codes = {spec["code"] for spec in SYSTEM_TYPES}
+    assert codes == EXPECTED_CODES
+
+
+def test_tenant_already_has_thirteen_types_after_provision(tenant_session):
+    rows = tenant_session.scalars(select(EarningType)).all()
+    assert len(rows) == 13
+    assert {r.code for r in rows} == EXPECTED_CODES
+    for r in rows:
+        assert r.is_system is True
+        assert r.is_active is True
+
+
+def test_ensure_on_fresh_tenant_creates_nothing(tenant_session):
+    result = ensure_system_earning_types(tenant_session)
+    assert result["total"] == 13
+    assert result["created"] == []
+    assert set(result["existing"]) == EXPECTED_CODES
+
+    rows = tenant_session.scalars(select(EarningType)).all()
+    assert len(rows) == 13
+
+
+def test_ensure_is_idempotent(tenant_session):
+    first = ensure_system_earning_types(tenant_session)
+    second = ensure_system_earning_types(tenant_session)
+    assert first["created"] == []
+    assert second["created"] == []
+    assert set(second["existing"]) == EXPECTED_CODES
+
+    rows = tenant_session.scalars(select(EarningType)).all()
+    assert len(rows) == 13
+
+
+def test_system_types_are_regular_and_taxable(tenant_session):
+    rows = tenant_session.scalars(select(EarningType)).all()
+    assert len(rows) == 13
+    for r in rows:
+        assert r.frequency == "regular"
+        assert r.is_taxable is True
+        assert r.counts_for_uif is True
+        assert r.counts_for_sdl is True
+        assert r.calc_method == "per_hour"
+        assert r.proration_rule == "none"
+
+
+def test_ensure_does_not_touch_existing_user_types(tenant_session):
+    user_row = EarningType(
+        id=uuid.uuid4(),
+        name="Custom Bonus",
+        code="custom_bonus",
+        calc_method="fixed_amount",
+        frequency="once_off",
+        is_taxable=True,
+        counts_for_uif=False,
+        counts_for_sdl=False,
+        proration_rule="none",
+        is_system=False,
+        is_active=True,
+        row_version=1,
+    )
+    tenant_session.add(user_row)
+    tenant_session.flush()
+
+    ensure_system_earning_types(tenant_session)
+
+    still = tenant_session.scalar(
+        select(EarningType).where(EarningType.code == "custom_bonus")
+    )
+    assert still is not None
+    assert still.is_system is False
+    assert still.frequency == "once_off"
+    assert still.calc_method == "fixed_amount"
+=== END FILE: backend/tests/test_payroll_seed.py ===
+
+=== FILE: backend/tests/test_payroll_attendance_earnings.py ===
+"""Chapter 4H B-4c: attendance-to-earnings integration tests.
+
+Uses `_mk_earning_type` as an idempotent get-or-create because
+`provision_tenant` already seeds the 13 system types (B-4f). A bare
+`session.add(EarningType(...))` would violate the unique constraint on
+`earning_type.code`.
+"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Iterator
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from app.core.errors import AppError
+from app.core.security import hash_password
+from app.db.control.models import Subscriber
+from app.db.control.session import control_session
+from app.db.tenant.models.attendance import (
+    AttendanceDay,
+    AttendanceSegment,
+    Shift,
+    ShiftRateRule,
+)
+from app.db.tenant.models.organisation import Company
+from app.db.tenant.models.pay import EarningType, PayPeriod
+from app.db.tenant.models.payroll_settings import PayrollSettings
+from app.db.tenant.models.people import Employee, EmployeePayHistory
+from app.services import payroll_pipeline as P
+from app.services import payroll_tax as T
+from app.services.payroll_runner import _build_attendance_earnings
+from app.services.provisioning import (
+    _drop_tenant_database,
+    _tenant_db_name,
+    provision_tenant,
+)
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    slug = f"attearn-{uuid.uuid4().hex[:10]}"
+    result = provision_tenant(
+        slug=slug,
+        name="Att Earnings Co",
+        admin_username="admin",
+        admin_password_hash=hash_password("AdminPassword123!"),
+    )
+    try:
+        yield _DisposableTenant(
+            slug=slug,
+            tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        _drop_tenant_database(result.tenant_db_name)
+        with control_session() as s:
+            r = s.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if r is not None:
+                s.delete(r)
+
+
+@pytest.fixture()
+def session(disposable_tenant) -> Iterator[Session]:
+    url = (
+        "postgresql+psycopg://payroll_app:payroll_app_dev_password"
+        f"@localhost:5432/{disposable_tenant.tenant_db_name}"
+    )
+    engine = create_engine(url, future=True)
+    s = Session(bind=engine)
+    try:
+        yield s
+    finally:
+        s.rollback()
+        s.close()
+        engine.dispose()
+
+
+def _mk_company(session) -> Company:
+    c = Company(
+        legal_name="Att Earnings Co",
+        country_code="ZA",
+        currency="ZAR",
+        default_timezone="Africa/Johannesburg",
+        settings={},
+        row_version=1,
+    )
+    session.add(c)
+    session.flush()
+    return c
+
+
+def _mk_settings(session, **overrides) -> PayrollSettings:
+    defaults = dict(
+        id=uuid.uuid4(),
+        age_reference_date="date_of_birth",
+        sdl_applies=True,
+        net_pay_floor=Decimal("0.00"),
+        formula_acks={},
+        attendance_earning_map={},
+        unpaid_day_behaviour=None,
+        unpaid_day_formula_code=None,
+        public_holiday_unworked_monthly=None,
+        public_holiday_paid=None,
+        leave_authoritative_source=None,
+        monthly_hourly_derivation_formula_code=None,
+        leave_earning_for_monthly=None,
+        demo_values=False,
+        row_version=1,
+    )
+    defaults.update(overrides)
+    row = PayrollSettings(**defaults)
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _mk_employee(session, *, pay_basis="hourly", base_rate="100.00",
+                 contracted_weekly_hours=None, default_shift_id=None) -> Employee:
+    emp = Employee(
+        employee_code=f"E-{uuid.uuid4().hex[:6]}",
+        first_name="Test",
+        last_name="Emp",
+        hire_date=date(2024, 1, 1),
+        status="active",
+        employee_type="hourly",
+        pay_basis=pay_basis,
+        pay_frequency="monthly",
+        base_rate=Decimal(base_rate) if base_rate else None,
+        contracted_weekly_hours=contracted_weekly_hours,
+        default_shift_id=default_shift_id,
+        row_version=1,
+    )
+    session.add(emp)
+    session.flush()
+    return emp
+
+
+def _mk_shift(session, *, length_minutes=480, overtime_requires_approval=True) -> Shift:
+    s = Shift(
+        name=f"S-{uuid.uuid4().hex[:6]}",
+        start_time=time_8,
+        length_minutes=length_minutes,
+        unpaid_break_minutes=0,
+        paid_break_minutes=0,
+        grace_late_minutes=0,
+        grace_early_minutes=0,
+        rounding_minutes=0,
+        rounding_mode="nearest",
+        min_overtime_minutes=0,
+        overtime_requires_approval=overtime_requires_approval,
+        max_shift_minutes=600,
+        match_tolerance_minutes=60,
+        salaried_premium_mode="full",
+        grace_mode="threshold",
+        pay_early_arrival=False,
+        is_active=True,
+        row_version=1,
+    )
+    session.add(s)
+    session.flush()
+    return s
+
+
+def _mk_earning_type(session, *, code="hourly_normal", is_system=True) -> EarningType:
+    """Get-or-create by code. Idempotent because provision_tenant (B-4f)
+    already seeded the 13 system types — a bare `add` would violate the
+    unique constraint on `earning_type.code`."""
+    existing = session.scalar(select(EarningType).where(EarningType.code == code))
+    if existing is not None:
+        return existing
+    et = EarningType(
+        id=uuid.uuid4(),
+        name=code.replace("_", " ").title(),
+        code=code,
+        calc_method="per_hour",
+        frequency="regular",
+        is_taxable=True,
+        counts_for_uif=True,
+        counts_for_sdl=True,
+        proration_rule="none",
+        is_system=is_system,
+        is_active=True,
+        row_version=1,
+    )
+    session.add(et)
+    session.flush()
+    return et
+
+
+def _mk_day(session, emp, work_date, *, status="present", shift_id=None,
+            locked=False, worked_minutes=0) -> AttendanceDay:
+    d = AttendanceDay(
+        id=uuid.uuid4(),
+        employee_id=emp.id,
+        work_date=work_date,
+        status=status,
+        shift_id=shift_id,
+        worked_minutes=worked_minutes,
+        normal_minutes=0,
+        overtime_minutes=0,
+        raw_minutes=0,
+        flags=[],
+        source_version=0,
+        locked=locked,
+        row_version=1,
+        computed_at=datetime.now(timezone.utc),
+    )
+    session.add(d)
+    session.flush()
+    return d
+
+
+def _mk_seg(session, day, *, kind="normal", day_type="weekday", tier=1,
+            minutes=480, rate_method="multiplier", rate_value="1.0",
+            overtime_status=None) -> AttendanceSegment:
+    s = AttendanceSegment(
+        id=uuid.uuid4(),
+        attendance_day_id=day.id,
+        local_date=day.work_date,
+        day_type=day_type,
+        kind=kind,
+        tier=tier,
+        minutes=minutes,
+        rate_method=rate_method,
+        rate_value=Decimal(rate_value),
+        overtime_status=overtime_status,
+        source_refs=[],
+    )
+    session.add(s)
+    session.flush()
+    return s
+
+
+def _mk_period(session, start=None, end=None) -> PayPeriod:
+    p = PayPeriod(
+        id=uuid.uuid4(),
+        period_key=f"P-{uuid.uuid4().hex[:6]}",
+        start_date=start or date(2026, 1, 1),
+        end_date=end or date(2026, 1, 31),
+        pay_date=(end or date(2026, 1, 31)),
+        status="open",
+        cutoff_at=datetime(2026, 1, 31, 23, 59, tzinfo=timezone.utc),
+    )
+    session.add(p)
+    session.flush()
+    return p
+
+
+time_8 = datetime.strptime("08:00", "%H:%M").time()
+
+
+def test_attendance_earnings_mapping_missing_409(session):
+    _mk_company(session)
+    _mk_settings(session, attendance_earning_map={})
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    day = _mk_day(session, emp, date(2026, 1, 5))
+    _mk_seg(session, day, kind="normal", day_type="weekday", minutes=480)
+
+    with pytest.raises(AppError) as exc:
+        _build_attendance_earnings(session, emp, period)
+    assert exc.value.code == "attendance_earning_map_incomplete"
+    assert "normal|weekday|any" in (exc.value.details or {}).get("missing_keys", [])
+
+
+def test_attendance_earnings_locked_day_still_included(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="hourly_normal")
+    _mk_settings(
+        session,
+        attendance_earning_map={"normal|weekday|any": "hourly_normal"},
+    )
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    day = _mk_day(session, emp, date(2026, 1, 5), locked=True)
+    _mk_seg(session, day, kind="normal", day_type="weekday", minutes=480)
+
+    lines, warnings, _snap = _build_attendance_earnings(session, emp, period)
+    assert len(lines) == 1
+    assert lines[0].amount == Decimal("800.00")
+
+
+def test_attendance_earnings_hourly_saturday_uses_saturday_type(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="hourly_saturday")
+    _mk_settings(
+        session,
+        attendance_earning_map={"normal|saturday|any": "hourly_saturday"},
+    )
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    day = _mk_day(session, emp, date(2026, 1, 10))
+    _mk_seg(session, day, kind="normal", day_type="saturday", minutes=480,
+            rate_value="1.5")
+
+    lines, _, _ = _build_attendance_earnings(session, emp, period)
+    assert len(lines) == 1
+    assert lines[0].amount == Decimal("1200.00")
+    assert "hourly_saturday" in (lines[0].source_ref or {}).get("earning_type_code", "")
+
+
+def test_attendance_earnings_hourly_sunday_uses_sunday_type(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="hourly_sunday")
+    _mk_settings(
+        session,
+        attendance_earning_map={"normal|sunday|any": "hourly_sunday"},
+    )
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    day = _mk_day(session, emp, date(2026, 1, 11))
+    _mk_seg(session, day, kind="normal", day_type="sunday", minutes=480,
+            rate_value="2.0")
+
+    lines, _, _ = _build_attendance_earnings(session, emp, period)
+    assert len(lines) == 1
+    assert lines[0].amount == Decimal("1600.00")
+
+
+def test_attendance_earnings_hourly_ph_uses_ph_type(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="hourly_public_holiday")
+    _mk_settings(
+        session,
+        attendance_earning_map={"normal|public_holiday|any": "hourly_public_holiday"},
+    )
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    day = _mk_day(session, emp, date(2026, 1, 1))
+    _mk_seg(session, day, kind="normal", day_type="public_holiday",
+            minutes=480, rate_value="2.0")
+
+    lines, _, _ = _build_attendance_earnings(session, emp, period)
+    assert len(lines) == 1
+    assert lines[0].amount == Decimal("1600.00")
+
+
+def test_attendance_earnings_monthly_normal_skipped(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="hourly_normal")
+    _mk_settings(
+        session,
+        attendance_earning_map={"normal|weekday|any": "hourly_normal"},
+    )
+    emp = _mk_employee(session, pay_basis="monthly", base_rate=None,
+                       contracted_weekly_hours=40.0)
+    period = _mk_period(session)
+    day = _mk_day(session, emp, date(2026, 1, 5))
+    _mk_seg(session, day, kind="normal", day_type="weekday", minutes=480)
+
+    lines, _, _ = _build_attendance_earnings(session, emp, period)
+    assert lines == []
+
+
+def test_attendance_earnings_monthly_overtime_derivation_unset_409(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="overtime_t1")
+    _mk_settings(
+        session,
+        attendance_earning_map={"overtime|weekday|1": "overtime_t1"},
+        monthly_hourly_derivation_formula_code=None,
+    )
+    emp = _mk_employee(session, pay_basis="monthly", base_rate=None,
+                       contracted_weekly_hours=40.0)
+    period = _mk_period(session)
+    shift = _mk_shift(session, overtime_requires_approval=False)
+    day = _mk_day(session, emp, date(2026, 1, 5), shift_id=shift.id)
+    _mk_seg(session, day, kind="overtime", day_type="weekday", tier=1,
+            minutes=60, overtime_status="approved")
+
+    with pytest.raises(AppError) as exc:
+        _build_attendance_earnings(session, emp, period)
+    assert exc.value.code == "monthly_hourly_derivation_not_configured"
+
+
+def test_attendance_earnings_monthly_overtime_derivation_set_produces_line(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="overtime_t1")
+    _mk_earning_type(session, code="BASE_MONTHLY")
+    _mk_settings(
+        session,
+        attendance_earning_map={"overtime|weekday|1": "overtime_t1"},
+        monthly_hourly_derivation_formula_code="hourly_rate_from_monthly",
+    )
+    emp = _mk_employee(session, pay_basis="monthly", base_rate=None,
+                       contracted_weekly_hours=40.0)
+    from app.db.tenant.models.pay import EmployeeEarning
+    base_et = session.scalar(select(EarningType).where(EarningType.code == "BASE_MONTHLY"))
+    session.add(EmployeeEarning(
+        id=uuid.uuid4(),
+        employee_id=emp.id,
+        earning_type_id=base_et.id,
+        amount=Decimal("25000.00"),
+        effective_from=date(2024, 1, 1),
+        is_active=True,
+        row_version=1,
+    ))
+    session.flush()
+
+    period = _mk_period(session)
+    shift = _mk_shift(session, overtime_requires_approval=False)
+    day = _mk_day(session, emp, date(2026, 1, 5), shift_id=shift.id)
+    _mk_seg(session, day, kind="overtime", day_type="weekday", tier=1,
+            minutes=60, rate_value="1.5", overtime_status="approved")
+
+    lines, _, _ = _build_attendance_earnings(session, emp, period)
+    ot_lines = [l for l in lines if (l.source_ref or {}).get("earning_type_code") == "overtime_t1"]
+    assert len(ot_lines) == 1
+    assert ot_lines[0].amount == Decimal("216.35")
+
+
+def test_attendance_earnings_overtime_unapproved_skipped_with_warning(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="overtime_t1")
+    _mk_settings(
+        session,
+        attendance_earning_map={"overtime|weekday|1": "overtime_t1"},
+    )
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    shift = _mk_shift(session, overtime_requires_approval=True)
+    day = _mk_day(session, emp, date(2026, 1, 5), shift_id=shift.id)
+    _mk_seg(session, day, kind="overtime", day_type="weekday", tier=1,
+            minutes=60, overtime_status=None)
+
+    lines, warnings, _ = _build_attendance_earnings(session, emp, period)
+    assert lines == []
+    assert any("overtime_unapproved" in w for w in warnings)
+
+
+def test_attendance_earnings_overtime_approved_paid(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="overtime_t1")
+    _mk_settings(
+        session,
+        attendance_earning_map={"overtime|weekday|1": "overtime_t1"},
+    )
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    shift = _mk_shift(session, overtime_requires_approval=True)
+    day = _mk_day(session, emp, date(2026, 1, 5), shift_id=shift.id)
+    _mk_seg(session, day, kind="overtime", day_type="weekday", tier=1,
+            minutes=60, rate_value="1.5", overtime_status="approved")
+
+    lines, warnings, _ = _build_attendance_earnings(session, emp, period)
+    assert len(lines) == 1
+    assert lines[0].amount == Decimal("150.00")
+    assert not any("overtime_unapproved" in w for w in warnings)
+
+
+def test_attendance_earnings_unpaid_day_behaviour_unset_409(session):
+    _mk_company(session)
+    _mk_settings(session, unpaid_day_behaviour=None)
+    emp = _mk_employee(session, pay_basis="monthly", base_rate=None,
+                       contracted_weekly_hours=40.0)
+    period = _mk_period(session)
+    _mk_day(session, emp, date(2026, 1, 5), status="absent")
+
+    with pytest.raises(AppError) as exc:
+        _build_attendance_earnings(session, emp, period)
+    assert exc.value.code == "unpaid_day_behaviour_not_configured"
+
+
+def test_attendance_earnings_unpaid_day_monthly_negates_gross(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="BASE_MONTHLY")
+    _mk_settings(
+        session,
+        unpaid_day_behaviour="deduct_daily",
+        unpaid_day_formula_code="gen_unpaid_absence",
+        monthly_hourly_derivation_formula_code="hourly_rate_from_monthly",
+    )
+    shift = _mk_shift(session, length_minutes=480)
+    emp = _mk_employee(session, pay_basis="monthly", base_rate=None,
+                       contracted_weekly_hours=40.0, default_shift_id=shift.id)
+    from app.db.tenant.models.pay import EmployeeEarning
+    base_et = session.scalar(select(EarningType).where(EarningType.code == "BASE_MONTHLY"))
+    session.add(EmployeeEarning(
+        id=uuid.uuid4(),
+        employee_id=emp.id,
+        earning_type_id=base_et.id,
+        amount=Decimal("25000.00"),
+        effective_from=date(2024, 1, 1),
+        is_active=True,
+        row_version=1,
+    ))
+    session.flush()
+
+    period = _mk_period(session)
+    _mk_day(session, emp, date(2026, 1, 5), status="absent")
+
+    lines, _, _ = _build_attendance_earnings(session, emp, period)
+    unpaid = [l for l in lines if (l.source_ref or {}).get("kind") == "unpaid_day"]
+    assert len(unpaid) == 1
+    assert unpaid[0].amount < Decimal("0.00")
+
+
+def test_attendance_earnings_leave_source_not_adjustment_422(session):
+    _mk_company(session)
+    _mk_settings(session, leave_authoritative_source="leave_request")
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+
+    with pytest.raises(AppError) as exc:
+        _build_attendance_earnings(session, emp, period)
+    assert exc.value.code == "leave_source_not_available"
+
+
+def test_attendance_earnings_leave_adjustment_earns_leave_paid_hourly(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="leave_paid")
+    _mk_settings(
+        session,
+        leave_authoritative_source="adjustment",
+        leave_earning_for_monthly=False,
+    )
+    shift = _mk_shift(session, length_minutes=480)
+    emp = _mk_employee(session, default_shift_id=shift.id)
+    period = _mk_period(session)
+    _mk_day(session, emp, date(2026, 1, 5), status="leave")
+
+    lines, _, _ = _build_attendance_earnings(session, emp, period)
+    leave = [l for l in lines if (l.source_ref or {}).get("kind") == "paid_leave"]
+    assert len(leave) == 1
+    assert leave[0].amount == Decimal("800.00")
+
+
+def test_attendance_earnings_snapshot_captures_inputs(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="hourly_normal")
+    _mk_settings(
+        session,
+        attendance_earning_map={"normal|weekday|any": "hourly_normal"},
+    )
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    day = _mk_day(session, emp, date(2026, 1, 5))
+    _mk_seg(session, day, kind="normal", day_type="weekday", minutes=480)
+
+    _lines, _warnings, snap = _build_attendance_earnings(session, emp, period)
+    assert snap["grouped_minutes"].get("normal|weekday|any") == 480
+    assert snap["mapping_used"]["normal|weekday|any"] == "hourly_normal"
+    assert "rates_by_date" in snap
+    assert "settings" in snap
+
+
+def _fake_pipeline_config() -> P.PipelineConfig:
+    return P.PipelineConfig(
+        tax_engine=T.default_engine(),
+        tax_tables=T.TaxTables(
+            brackets=[
+                {"row_key": "1", "lower_bound": "0", "upper_bound": "10000",
+                 "rate": "0.18", "base_tax": "0"},
+            ],
+            rebates={"primary": Decimal("1000"), "secondary_65": Decimal("0"),
+                     "tertiary_75": Decimal("0")},
+            thresholds={"below_age_65": Decimal("5000"),
+                        "age_65_to_74": Decimal("5000"),
+                        "age_75_plus": Decimal("5000")},
+            medical_credits={"first_member": Decimal("0"),
+                             "additional_member": Decimal("0"),
+                             "first_dependant": Decimal("0")},
+            retirement_limit={"percentage_of_taxable_income": Decimal("0.10"),
+                              "annual_cap": Decimal("100000")},
+            source_version="test",
+        ),
+        uif_rows=[
+            {"row_key": "employee_rate", "value": "0.01"},
+            {"row_key": "employer_rate", "value": "0.01"},
+            {"row_key": "monthly_ceiling", "value": "100000"},
+        ],
+        sdl_rows=[
+            {"row_key": "rate", "value": "0.01"},
+            {"row_key": "exemption_threshold_annual", "value": "50000"},
+        ],
+        retirement_rows=[
+            {"row_key": "percentage_of_taxable_income", "value": "0.10"},
+            {"row_key": "annual_cap", "value": "1000"},
+        ],
+        periods_per_year=12,
+        employee_age=40,
+        medical_members=0,
+        uif_exempt=False,
+        sdl_applies=True,
+        net_pay_floor=Decimal("0.00"),
+    )
+
+
+def test_attendance_earnings_end_to_end_hourly_gross_paye_net(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="hourly_normal")
+    _mk_settings(
+        session,
+        attendance_earning_map={"normal|weekday|any": "hourly_normal"},
+    )
+    emp = _mk_employee(session, pay_basis="hourly", base_rate="100.00")
+    period = _mk_period(session)
+    day = _mk_day(session, emp, date(2026, 1, 5))
+    _mk_seg(session, day, kind="normal", day_type="weekday", minutes=480)
+
+    earnings, _warnings, _snap = _build_attendance_earnings(session, emp, period)
+    assert len(earnings) == 1
+    assert earnings[0].amount == Decimal("800.00")
+
+    draft = P.run_pipeline(_fake_pipeline_config(), earnings, [])
+    assert not draft.refused
+    assert draft.gross == Decimal("800.00")
+    assert draft.uif_employee == Decimal("8.00")
+    assert draft.paye > Decimal("0.00")
+    assert Decimal("0.00") < draft.net < draft.gross
+=== END FILE: backend/tests/test_payroll_attendance_earnings.py ===
+
+=== FILE: backend/tests/test_payroll_pdf_demo.py ===
+"""Chapter 4H B-4e: demo PDF watermark tests.
+
+Uses `_mk_earning_type` as get-or-create because `provision_tenant`
+(B-4f) already seeds the 13 system types.
+"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Iterator
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from app.core.security import hash_password
+from app.db.control.models import Subscriber
+from app.db.control.session import control_session
+from app.db.tenant.models.attendance import (
+    AttendanceDay,
+    AttendanceSegment,
+)
+from app.db.tenant.models.organisation import Company
+from app.db.tenant.models.pay import EarningType, PayPeriod
+from app.db.tenant.models.payroll_settings import PayrollSettings
+from app.db.tenant.models.people import Employee
+from app.services.payroll_pdf import (
+    _DEMO_MARK,
+    _demo_flag_from_payslip,
+    _payslip_text_lines,
+    render_payslip_pdf,
+)
+from app.services.payroll_runner import _build_attendance_earnings
+from app.services.provisioning import (
+    _drop_tenant_database,
+    _tenant_db_name,
+    provision_tenant,
+)
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    slug = f"pdfdemo-{uuid.uuid4().hex[:8]}"
+    result = provision_tenant(
+        slug=slug,
+        name="PDF Demo Co",
+        admin_username="admin",
+        admin_password_hash=hash_password("AdminPassword123!"),
+    )
+    try:
+        yield _DisposableTenant(
+            slug=slug,
+            tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        _drop_tenant_database(result.tenant_db_name)
+        with control_session() as s:
+            r = s.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if r is not None:
+                s.delete(r)
+
+
+@pytest.fixture()
+def session(disposable_tenant) -> Iterator[Session]:
+    url = (
+        "postgresql+psycopg://payroll_app:payroll_app_dev_password"
+        f"@localhost:5432/{disposable_tenant.tenant_db_name}"
+    )
+    engine = create_engine(url, future=True)
+    s = Session(bind=engine)
+    try:
+        yield s
+    finally:
+        s.rollback()
+        s.close()
+        engine.dispose()
+
+
+class _FakePayslip:
+    def __init__(self, *, ctx=None):
+        self.revision = 1
+        self.status = "current"
+        self.gross = Decimal("1000.00")
+        self.pre_tax_deductions = Decimal("0.00")
+        self.taxable_income = Decimal("1000.00")
+        self.paye = Decimal("100.00")
+        self.uif_employee = Decimal("10.00")
+        self.other_deductions = Decimal("0.00")
+        self.reimbursements = Decimal("0.00")
+        self.net = Decimal("890.00")
+        self.uif_employer = Decimal("10.00")
+        self.sdl = Decimal("10.00")
+        self.calculation_context = ctx
+
+
+class _FakeEmployee:
+    def __init__(self):
+        self.employee_code = "EMP-001"
+        self.first_name = "Ada"
+        self.last_name = "Mokoena"
+
+
+class _FakePeriod:
+    def __init__(self):
+        self.period_key = "2026-01"
+        self.pay_date = date(2026, 1, 31)
+
+
+def test_render_payslip_pdf_without_demo_no_marker():
+    payslip = _FakePayslip(ctx=None)
+    pdf = render_payslip_pdf(payslip, _FakeEmployee(), _FakePeriod())
+    assert pdf.startswith(b"%PDF-1.4")
+    assert _DEMO_MARK.encode("latin-1") not in pdf
+
+
+def test_render_payslip_pdf_with_explicit_demo_flag():
+    payslip = _FakePayslip(ctx=None)
+    pdf = render_payslip_pdf(
+        payslip, _FakeEmployee(), _FakePeriod(), demo_values=True,
+    )
+    assert _DEMO_MARK.encode("latin-1") in pdf
+
+
+def test_render_payslip_pdf_reads_demo_flag_from_context():
+    payslip = _FakePayslip(ctx={
+        "attendance_inputs": {
+            "settings": {"demo_values": True},
+        },
+    })
+    pdf = render_payslip_pdf(payslip, _FakeEmployee(), _FakePeriod())
+    assert _DEMO_MARK.encode("latin-1") in pdf
+
+
+def test_demo_flag_false_when_context_missing():
+    payslip = _FakePayslip(ctx=None)
+    assert _demo_flag_from_payslip(payslip) is False
+
+
+def test_demo_flag_false_when_context_shallow():
+    payslip = _FakePayslip(ctx={"attendance_inputs": {}})
+    assert _demo_flag_from_payslip(payslip) is False
+
+
+def test_payslip_text_lines_have_marker_when_demo():
+    lines = _payslip_text_lines(
+        _FakePayslip(), _FakeEmployee(), _FakePeriod(), demo_values=True,
+    )
+    assert lines[0] == _DEMO_MARK
+    assert lines[-1] == _DEMO_MARK
+
+
+def test_payslip_text_lines_no_marker_when_not_demo():
+    lines = _payslip_text_lines(
+        _FakePayslip(), _FakeEmployee(), _FakePeriod(), demo_values=False,
+    )
+    assert _DEMO_MARK not in lines
+
+
+def _mk_settings(
+    session,
+    *,
+    demo_values: bool,
+    attendance_earning_map: dict | None = None,
+) -> PayrollSettings:
+    row = PayrollSettings(
+        id=uuid.uuid4(),
+        age_reference_date="date_of_birth",
+        sdl_applies=True,
+        net_pay_floor=Decimal("0.00"),
+        formula_acks={},
+        attendance_earning_map=attendance_earning_map or {},
+        unpaid_day_behaviour=None,
+        unpaid_day_formula_code=None,
+        public_holiday_unworked_monthly=None,
+        public_holiday_paid=None,
+        leave_authoritative_source=None,
+        monthly_hourly_derivation_formula_code=None,
+        leave_earning_for_monthly=None,
+        demo_values=demo_values,
+        row_version=1,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _mk_company(session):
+    c = Company(
+        legal_name="PDF Demo Co",
+        country_code="ZA",
+        currency="ZAR",
+        default_timezone="Africa/Johannesburg",
+        settings={},
+        row_version=1,
+    )
+    session.add(c)
+    session.flush()
+    return c
+
+
+def _mk_earning_type(session, *, code: str) -> EarningType:
+    existing = session.scalar(select(EarningType).where(EarningType.code == code))
+    if existing is not None:
+        return existing
+    et = EarningType(
+        id=uuid.uuid4(),
+        name=code.replace("_", " ").title(),
+        code=code,
+        calc_method="per_hour",
+        frequency="regular",
+        is_taxable=True,
+        counts_for_uif=True,
+        counts_for_sdl=True,
+        proration_rule="none",
+        is_system=True,
+        is_active=True,
+        row_version=1,
+    )
+    session.add(et)
+    session.flush()
+    return et
+
+
+def _mk_period(session):
+    p = PayPeriod(
+        id=uuid.uuid4(),
+        period_key=f"P-{uuid.uuid4().hex[:6]}",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 1, 31),
+        pay_date=date(2026, 1, 31),
+        status="open",
+        cutoff_at=datetime(2026, 1, 31, 23, 59, tzinfo=timezone.utc),
+    )
+    session.add(p)
+    session.flush()
+    return p
+
+
+def _mk_employee(session):
+    emp = Employee(
+        employee_code=f"E-{uuid.uuid4().hex[:6]}",
+        first_name="Test",
+        last_name="Emp",
+        hire_date=date(2024, 1, 1),
+        status="active",
+        employee_type="hourly",
+        pay_basis="hourly",
+        pay_frequency="monthly",
+        base_rate=Decimal("100.00"),
+        row_version=1,
+    )
+    session.add(emp)
+    session.flush()
+    return emp
+
+
+def test_runner_snapshot_includes_demo_values_true(session):
+    _mk_company(session)
+    _mk_earning_type(session, code="hourly_normal")
+    _mk_settings(
+        session,
+        demo_values=True,
+        attendance_earning_map={"normal|weekday|any": "hourly_normal"},
+    )
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    day = AttendanceDay(
+        id=uuid.uuid4(),
+        employee_id=emp.id,
+        work_date=date(2026, 1, 5),
+        status="present",
+        first_in=None,
+        last_out=None,
+        worked_minutes=480,
+        normal_minutes=480,
+        overtime_minutes=0,
+        raw_minutes=480,
+        shift_id=None,
+        flags=[],
+        source_version=0,
+        locked=False,
+        row_version=1,
+        computed_at=datetime.now(timezone.utc),
+    )
+    session.add(day)
+    session.flush()
+    session.add(AttendanceSegment(
+        id=uuid.uuid4(),
+        attendance_day_id=day.id,
+        local_date=day.work_date,
+        day_type="weekday",
+        kind="normal",
+        tier=1,
+        minutes=480,
+        rate_method="multiplier",
+        rate_value=Decimal("1.0"),
+        overtime_status=None,
+        source_refs=[],
+    ))
+    session.flush()
+
+    _lines, _warnings, snap = _build_attendance_earnings(session, emp, period)
+    assert snap["settings"]["demo_values"] is True
+
+
+def test_runner_snapshot_includes_demo_values_false(session):
+    _mk_company(session)
+    _mk_settings(session, demo_values=False)
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    session.flush()
+
+    _lines, _warnings, snap = _build_attendance_earnings(session, emp, period)
+    assert snap["settings"]["demo_values"] is False
+=== END FILE: backend/tests/test_payroll_pdf_demo.py ===

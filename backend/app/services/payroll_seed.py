@@ -1,18 +1,22 @@
-"""System payroll seed (Chapter 4, Bundle 004a-iv-c).
+"""System payroll seed (Chapter 4, Bundle 004a-iv-c + Chapter 4H B-4b).
 
-Idempotent seed of the four system earning types (normal_pay, overtime,
-holiday_pay, leave_pay) required by the pipeline for standard SA payroll.
-All four are classified `frequency="regular"` per F5 - only genuine one-offs
-(bonus, commission, advances) use once_off/irregular and are refused under
-the regular-earnings method.
+Idempotent seed of the system earning types required by the attendance-to-
+earnings integration (Chapter 4H B-4). All types are `frequency="regular"`
+per F5 - only genuine one-offs (bonus, commission, advances) use
+once_off/irregular and are refused under the regular-earnings method.
 
-Called from:
-  - POST /payroll/earning-types/ensure-system  (this bundle)
-  - import_employees.py on first import (future refinement, noted in STATE.md)
-  - provision_tenant post-migration hook (future refinement, noted in STATE.md)
+Chapter 4H B-4b additions:
+  - `hourly_normal`, `hourly_saturday`, `hourly_sunday`,
+    `hourly_public_holiday`
+  - `overtime_t1`, `overtime_t2`, `overtime_t3`
+  - `shift_allowance`
+  - `leave_paid`
+These are the earning-type codes that `attendance_earning_map` may reference.
 
-Never from tests' disposable-tenant fixture directly - they call the endpoint
-or the service function explicitly so the seed state is deterministic.
+Chapter 4H B-4f: `provision_tenant::_seed_tenant_defaults` calls
+`ensure_system_earning_types` at provisioning time, so a freshly created
+real tenant has all 13 rows before the first request lands. A call to
+`ensure_system_earning_types` on such a tenant returns `created=[]`.
 """
 from __future__ import annotations
 
@@ -65,12 +69,103 @@ SYSTEM_TYPES: tuple[dict, ...] = (
         "counts_for_sdl": True,
         "proration_rule": "none",
     },
+    {
+        "code": "hourly_normal",
+        "name": "Normal Hours (Weekday)",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "hourly_saturday",
+        "name": "Saturday Hours",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "hourly_sunday",
+        "name": "Sunday Hours",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "hourly_public_holiday",
+        "name": "Public Holiday Hours",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "overtime_t1",
+        "name": "Overtime Tier 1",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "overtime_t2",
+        "name": "Overtime Tier 2",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "overtime_t3",
+        "name": "Overtime Tier 3",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "shift_allowance",
+        "name": "Shift Allowance",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
+    {
+        "code": "leave_paid",
+        "name": "Paid Leave",
+        "calc_method": "per_hour",
+        "frequency": "regular",
+        "is_taxable": True,
+        "counts_for_uif": True,
+        "counts_for_sdl": True,
+        "proration_rule": "none",
+    },
 )
 
 
 def ensure_system_earning_types(db: Session) -> dict:
-    """Idempotent. Existing rows (by code) are left untouched even if fields differ -
-    we do not silently rewrite system rows after they have been used."""
+    """Idempotent. Existing rows (by code) are left untouched even if fields
+    differ - we do not silently rewrite system rows after they have been used.
+    """
     created: list[str] = []
     existing: list[str] = []
     for spec in SYSTEM_TYPES:
@@ -94,5 +189,3 @@ def ensure_system_earning_types(db: Session) -> dict:
         created.append(spec["code"])
     db.flush()
     return {"created": created, "existing": existing, "total": len(SYSTEM_TYPES)}
-
-# END OF FILE

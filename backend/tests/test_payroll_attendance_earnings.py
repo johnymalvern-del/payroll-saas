@@ -1,13 +1,9 @@
 """Chapter 4H B-4c: attendance-to-earnings integration tests.
 
-Covers `_build_attendance_earnings` and its end-to-end wiring through
-`run_pipeline`. Locked days are INCLUDED (round-2 §1); missing mapping
-keys 409 (round-2 §2); unpaid-day amounts are NEGATIVE earnings
-(round-2 §3); monthly derivation formula required (round-2 §4); rate
-in force uses `EmployeePayHistory` (round-2 §5); unapproved overtime
-skipped with warning (round-2 §6); Decimal rounding per segment
-(round-2 §7); leave source restricted to 'adjustment' (round-2 §9);
-attendance snapshot stored on `calculation_context` (round-2 §10).
+Uses `_mk_earning_type` as an idempotent get-or-create because
+`provision_tenant` already seeds the 13 system types (B-4f). A bare
+`session.add(EarningType(...))` would violate the unique constraint on
+`earning_type.code`.
 """
 from __future__ import annotations
 
@@ -90,10 +86,6 @@ def session(disposable_tenant) -> Iterator[Session]:
         s.close()
         engine.dispose()
 
-
-# ---------------------------------------------------------------------------
-# Fixtures / helpers
-# ---------------------------------------------------------------------------
 
 def _mk_company(session) -> Company:
     c = Company(
@@ -182,6 +174,12 @@ def _mk_shift(session, *, length_minutes=480, overtime_requires_approval=True) -
 
 
 def _mk_earning_type(session, *, code="hourly_normal", is_system=True) -> EarningType:
+    """Get-or-create by code. Idempotent because provision_tenant (B-4f)
+    already seeded the 13 system types — a bare `add` would violate the
+    unique constraint on `earning_type.code`."""
+    existing = session.scalar(select(EarningType).where(EarningType.code == code))
+    if existing is not None:
+        return existing
     et = EarningType(
         id=uuid.uuid4(),
         name=code.replace("_", " ").title(),
@@ -263,10 +261,6 @@ def _mk_period(session, start=None, end=None) -> PayPeriod:
 time_8 = datetime.strptime("08:00", "%H:%M").time()
 
 
-# ---------------------------------------------------------------------------
-# Mapping gate (round-2 §2)
-# ---------------------------------------------------------------------------
-
 def test_attendance_earnings_mapping_missing_409(session):
     _mk_company(session)
     _mk_settings(session, attendance_earning_map={})
@@ -280,10 +274,6 @@ def test_attendance_earnings_mapping_missing_409(session):
     assert exc.value.code == "attendance_earning_map_incomplete"
     assert "normal|weekday|any" in (exc.value.details or {}).get("missing_keys", [])
 
-
-# ---------------------------------------------------------------------------
-# Locked day included (round-2 §1)
-# ---------------------------------------------------------------------------
 
 def test_attendance_earnings_locked_day_still_included(session):
     _mk_company(session)
@@ -301,10 +291,6 @@ def test_attendance_earnings_locked_day_still_included(session):
     assert len(lines) == 1
     assert lines[0].amount == Decimal("800.00")
 
-
-# ---------------------------------------------------------------------------
-# Kind / day_type mapping
-# ---------------------------------------------------------------------------
 
 def test_attendance_earnings_hourly_saturday_uses_saturday_type(session):
     _mk_company(session)
@@ -361,10 +347,6 @@ def test_attendance_earnings_hourly_ph_uses_ph_type(session):
     assert lines[0].amount == Decimal("1600.00")
 
 
-# ---------------------------------------------------------------------------
-# Monthly normal segments covered by BASE_MONTHLY (skipped)
-# ---------------------------------------------------------------------------
-
 def test_attendance_earnings_monthly_normal_skipped(session):
     _mk_company(session)
     _mk_earning_type(session, code="hourly_normal")
@@ -381,10 +363,6 @@ def test_attendance_earnings_monthly_normal_skipped(session):
     lines, _, _ = _build_attendance_earnings(session, emp, period)
     assert lines == []
 
-
-# ---------------------------------------------------------------------------
-# Monthly derivation formula required for OT (round-2 §4)
-# ---------------------------------------------------------------------------
 
 def test_attendance_earnings_monthly_overtime_derivation_unset_409(session):
     _mk_company(session)
@@ -443,10 +421,6 @@ def test_attendance_earnings_monthly_overtime_derivation_set_produces_line(sessi
     assert ot_lines[0].amount == Decimal("216.35")
 
 
-# ---------------------------------------------------------------------------
-# Overtime approval gate (round-2 §6)
-# ---------------------------------------------------------------------------
-
 def test_attendance_earnings_overtime_unapproved_skipped_with_warning(session):
     _mk_company(session)
     _mk_earning_type(session, code="overtime_t1")
@@ -485,10 +459,6 @@ def test_attendance_earnings_overtime_approved_paid(session):
     assert lines[0].amount == Decimal("150.00")
     assert not any("overtime_unapproved" in w for w in warnings)
 
-
-# ---------------------------------------------------------------------------
-# Unpaid day (round-2 §3)
-# ---------------------------------------------------------------------------
 
 def test_attendance_earnings_unpaid_day_behaviour_unset_409(session):
     _mk_company(session)
@@ -537,10 +507,6 @@ def test_attendance_earnings_unpaid_day_monthly_negates_gross(session):
     assert unpaid[0].amount < Decimal("0.00")
 
 
-# ---------------------------------------------------------------------------
-# Leave source (round-2 §9)
-# ---------------------------------------------------------------------------
-
 def test_attendance_earnings_leave_source_not_adjustment_422(session):
     _mk_company(session)
     _mk_settings(session, leave_authoritative_source="leave_request")
@@ -571,10 +537,6 @@ def test_attendance_earnings_leave_adjustment_earns_leave_paid_hourly(session):
     assert leave[0].amount == Decimal("800.00")
 
 
-# ---------------------------------------------------------------------------
-# Snapshot (round-2 §10)
-# ---------------------------------------------------------------------------
-
 def test_attendance_earnings_snapshot_captures_inputs(session):
     _mk_company(session)
     _mk_earning_type(session, code="hourly_normal")
@@ -593,10 +555,6 @@ def test_attendance_earnings_snapshot_captures_inputs(session):
     assert "rates_by_date" in snap
     assert "settings" in snap
 
-
-# ---------------------------------------------------------------------------
-# End-to-end pipeline (round-2 §8)
-# ---------------------------------------------------------------------------
 
 def _fake_pipeline_config() -> P.PipelineConfig:
     return P.PipelineConfig(
