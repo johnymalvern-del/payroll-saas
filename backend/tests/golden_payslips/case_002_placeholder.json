@@ -1,0 +1,14 @@
+{
+  "case_id": "placeholder_002",
+  "description": "Placeholder — awaiting accountant to fill in and mark accountant_reviewed: true",
+  "accountant_reviewed": false,
+  "employee": {},
+  "pay_period": {},
+  "expected": {
+    "gross": "0.00",
+    "paye": "0.00",
+    "net": "0.00",
+    "lines": [],
+    "deductions": []
+  }
+}

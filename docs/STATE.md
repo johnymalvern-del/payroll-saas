@@ -3,45 +3,48 @@
 ## Payroll settings approval flow (gap)
 Money-affecting payroll settings (`sdl_applies`, `net_pay_floor`, and the
 Chapter 4H closing fields added by `ten_0021`) are changed via direct
-`PATCH /payroll/settings` by a user holding `PAYROLL_FINALISE`. There is no
-separate approval workflow. Before/after values are audited.
+`PATCH /payroll/settings` by a user holding `PAYROLL_FINALISE`. No
+two-person control. Before/after values are audited.
 
 ## System earning types auto-seed
-**Closed in B4-02f.** `provision_tenant` seeds 13 system earning types at
-provisioning time.
+**Closed in B4-02f.** `provision_tenant` seeds 13 system earning types
+at provisioning time.
 
-## Chapter 4H B-4 progress — core complete
-- **B4-01** (committed): migration `ten_0021`, `PayrollSettings` extension.
-- **B4-02a** (committed): demo seed pay setup.
-- **B4-02b** (committed): 13 system earning types.
-- **B4-02c.1** (committed): attendance-to-earnings integration in
-  `payroll_runner`.
-- **B4-02c.2** (committed): demo seed `ShiftRateRule` rows + 16 tests.
-- **B4-02d.1** (committed): finalise open-exceptions ack.
-- **B4-02e** (committed): demo PDF watermark.
-- **B4-02f** (committed): provision auto-seeds 13 system types.
-- **B4-02d.2** (committed): end-to-end demo preview + non-demo 409.
+## Chapter 4H B-4 — core complete
+All B-4 sub-bundles committed (B4-01, B4-02a/b/c.1/c.2/d.1/d.2/e/f).
 
-## Chapter 4H B-3 — committed in this bundle
-- **B-3.1** `GET /payroll/pay-periods/{period_id}/preview/{employee_id}`
-  (single-employee preview detail; `PAYROLL_PREVIEW`).
-- **B-3.2** `GET /payroll/payslips/me`, `/me/{id}`, `/me/{id}/pdf`
-  (`SELF_VIEW`, self-service, own payslips only, finalised only).
-  - Registered BEFORE `/{payslip_id}` so `me` is not parsed as a UUID
-    (round-2 §12, tested in `test_me_not_parsed_as_id_by_route`).
-  - Auditor role refused with 403 (round-2 §13, tested per-role).
-  - `no_employee_record` (404) for users without `employee_id`.
-- **B-3.3** 4G-b paylip endpoints unchanged (already implemented,
-  verified by content).
-- **B-3.4** PDF responses add `Cache-Control: no-store` and generic
-  `filename="payslip.pdf"`; the generic `/{payslip_id}/pdf` audits when
-  the caller is not the payslip's employee (round-2 §14).
-- `payroll_runner._write_payslip` now persists one `PayslipLine` per
-  earning/deduction so the new detail endpoint can surface line breakdown
-  without recomputation.
+## Chapter 4H B-3 — committed
+`GET /payroll/pay-periods/{period_id}/preview/{employee_id}`,
+`GET /payroll/payslips/me{,/{id},/{id}/pdf}`. Registered in that order so
+`me` is not parsed as a UUID. Auditor 403 on /me. PDF `Cache-Control:
+no-store` + generic filename + audit on non-owner download.
+
+## Chapter 4H B-6 — committed
+`GET /attendance/exceptions` accepts repeated + comma `type` params;
+unknown codes ignored; empty = no filter.
+
+## Payroll golden cases (Chapter 4H, 4G-c)
+Framework committed under `backend/tests/golden_payslips/`:
+
+- `_schema.py` (Pydantic; `reviewed_by`/`reviewed_on` required when
+  `accountant_reviewed=true`).
+- `README.md` — accountant-facing instructions + statutory fixture
+  documentation.
+- 2 placeholder case files (unreviewed).
+- `backend/tests/test_golden_payslips.py` — 6 framework tests.
+
+**Pending from accountant:**
+
+- 2 placeholder cases need filling in and signing off
+  (`accountant_reviewed: true` + `reviewed_by` + `reviewed_on`).
+- Additional cases as the accountant prepares them.
+
+**Reviewed:** 0
+**Unreviewed:** 2
+**Tests state:** `test_golden_unreviewed_cases_skipped_loudly` skips
+with file names listed; `test_golden_reviewed_cases_pass` skips because
+0 reviewed.
 
 ## Chapter 4H remaining
-- **B4-03 (4G-c)**: golden payslip-case framework — deferred.
-- **B-6**: multi-value type filter on `GET /attendance/exceptions` —
-  pending.
-- **14 seed tests**: session-scoped seed-once fixture — pending.
+- **14 seed tests** — session-scoped seed-once fixture (needs
+  `conftest.py`).
