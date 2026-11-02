@@ -1,3 +1,7 @@
+"""Payslip schemas (Chapter 4 Bundle 004b-b + Chapter 4H B-3).
+
+B-3 adds self-service list/detail shapes (PayslipMeRow, PayslipMeListOut).
+"""
 from __future__ import annotations
 
 import uuid
@@ -9,7 +13,6 @@ from pydantic import BaseModel, ConfigDict
 
 class PayslipOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-
     id: uuid.UUID
     payroll_run_id: uuid.UUID
     pay_period_id: uuid.UUID
@@ -38,7 +41,6 @@ class PayslipListOut(BaseModel):
 
 class PayslipLineOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-
     id: uuid.UUID
     line_type: str
     step: str
@@ -54,4 +56,19 @@ class PayslipExplainOut(BaseModel):
     snapshot: dict
     calculation_context: dict
 
-# END OF FILE
+
+class PayslipMeRow(BaseModel):
+    """Lean self-service row (B-3)."""
+    id: uuid.UUID
+    pay_period_id: uuid.UUID
+    period_key: str
+    pay_date: date
+    status: str
+    gross: Decimal
+    net: Decimal
+    computed_at: datetime
+
+
+class PayslipMeListOut(BaseModel):
+    items: list[PayslipMeRow]
+    next_cursor: str | None = None

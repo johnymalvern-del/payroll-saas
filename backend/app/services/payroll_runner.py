@@ -1,11 +1,9 @@
-"""Payroll runner (Chapter 4 Bundle 004b-a + Chapter 4H B-4c/d/e).
+"""Payroll runner (Chapter 4 Bundle 004b-a + Chapter 4H B-4c/d/e + B-3).
 
-Chapter 4H B-4c: attendance-to-earnings integration.
-Chapter 4H B-4d: finalise refuses open exceptions in period without ack.
-Chapter 4H B-4e: the attendance snapshot stored in
-`Payslip.calculation_context["attendance_inputs"]["settings"]` now includes
-`demo_values`, so `payroll_pdf.render_payslip_pdf` can prepend a demo
-watermark on payslips from demo-flagged tenants.
+B-3 additions: `_write_payslip` now persists one `PayslipLine` per
+`EarningLine` and per `DeductionLine` so `GET /payroll/pay-periods/{id}/
+preview/{employee_id}` can surface the actual line detail without
+recomputing.
 """
 from __future__ import annotations
 
@@ -682,7 +680,10 @@ def _build_deductions(db: Session, employee: Employee, on_date: date) -> list[P.
 
 def _write_payslip(
     db: Session, run: PayrollRun, pay_period: PayPeriod,
-    employee: Employee, draft: P.PayslipDraft, *, status: str,
+    employee: Employee, draft: P.PayslipDraft, *,
+    earnings: list[P.EarningLine],
+    deductions: list[P.DeductionLine],
+    status: str,
     prior: Payslip | None,
 ) -> Payslip:
     payslip = Payslip(
@@ -713,6 +714,31 @@ def _write_payslip(
     if prior is not None and prior.status == "current" and status == "current":
         prior.status = "superseded"
 
+    # B-3: persist each earning and deduction as a PayslipLine for
+    # GET .../preview/{employee_id}. Persisted amount matches the pipeline's
+    # contribution to gross / other_deductions.
+    for i, e in enumerate(earnings):
+        src = dict(e.source_ref or {})
+        if "attendance_derived" in src:
+            src["rate_source"] = "attendance"
+        else:
+            src["rate_source"] = "employee_earning"
+        src.setdefault("amount", str(e.amount))
+        db.add(PayslipLine(
+            id=uuid.uuid4(), payslip_id=payslip.id,
+            line_type="earning", step="gross", sort_order=i,
+            label=e.label, amount=e.amount, source_ref=src,
+        ))
+    for i, d in enumerate(deductions):
+        src = dict(d.source_ref or {})
+        src.setdefault("amount", str(d.amount))
+        db.add(PayslipLine(
+            id=uuid.uuid4(), payslip_id=payslip.id,
+            line_type="deduction",
+            step="pre_tax" if d.is_pre_tax else "other",
+            sort_order=500 + i,
+            label=d.label, amount=d.amount, source_ref=src,
+        ))
     for i, d in enumerate(draft.deferred_deductions):
         db.add(PayslipLine(
             id=uuid.uuid4(), payslip_id=payslip.id,
@@ -848,7 +874,11 @@ def run_preview(db: Session, user, pay_period: PayPeriod) -> PayrollRun:
             raise AppError(draft.refusal_code or "compute_refused", draft.refusal_message or "", 409)
         draft.calculation_context["attendance_warnings"] = attn_warnings
         draft.calculation_context["attendance_inputs"] = attn_snapshot
-        _write_payslip(db, run, pay_period, emp, draft, status="preview", prior=None)
+        _write_payslip(
+            db, run, pay_period, emp, draft,
+            earnings=earnings, deductions=deductions,
+            status="preview", prior=None,
+        )
         run.rules_snapshot["employee_count"] = run.rules_snapshot["employee_count"] + 1
 
     run.status = "completed"
@@ -935,7 +965,11 @@ def finalise(
             raise AppError(draft.refusal_code or "compute_refused", draft.refusal_message or "", 409)
         draft.calculation_context["attendance_warnings"] = attn_warnings
         draft.calculation_context["attendance_inputs"] = attn_snapshot
-        _write_payslip(db, run, pay_period, emp, draft, status="current", prior=prior)
+        _write_payslip(
+            db, run, pay_period, emp, draft,
+            earnings=earnings, deductions=deductions,
+            status="current", prior=prior,
+        )
         run.rules_snapshot["employee_count"] = run.rules_snapshot["employee_count"] + 1
 
     pay_period.status = "locked"

@@ -1,7 +1,6 @@
-"""Pay period schemas (Chapter 4 + Chapter 4H B-4d).
+"""Pay period schemas (Chapter 4 + Chapter 4H B-4d + B-3).
 
-B-4d adds FinaliseIn: optional body for POST .../finalise to pass an
-explicit acknowledgement of open exceptions in the period.
+B-3 adds PreviewEmployeeOut (single-employee preview detail).
 """
 from __future__ import annotations
 
@@ -84,11 +83,33 @@ class ReopenLogOut(BaseModel):
 
 
 class FinaliseIn(BaseModel):
-    """Optional body for POST /payroll/pay-periods/{id}/finalise.
-
-    Round-2 amendment §1: a payroll_admin can acknowledge open exceptions
-    in the period with a reason. The reason is recorded in the audit log;
-    a blank/None reason means "no acknowledgement" and finalise refuses
-    with 409 open_exceptions_in_period when open exceptions exist.
-    """
     ack_open_exceptions_reason: str | None = Field(default=None, max_length=500)
+
+
+class PreviewEmployeeLineOut(BaseModel):
+    earning_type_code: str
+    earning_type_name: str
+    rate_source: str | None = None
+    amount: Decimal
+    minutes: int | None = None
+
+
+class PreviewEmployeeDeductionOut(BaseModel):
+    deduction_type_code: str
+    deduction_type_name: str
+    amount: Decimal
+
+
+class PreviewEmployeeOut(BaseModel):
+    employee_id: uuid.UUID
+    employee_code: str
+    employee_name: str
+    pay_period_id: uuid.UUID
+    revision: int
+    status: str
+    gross: Decimal
+    paye: Decimal
+    net: Decimal
+    warnings: list[str] = Field(default_factory=list)
+    lines: list[PreviewEmployeeLineOut] = Field(default_factory=list)
+    deductions: list[PreviewEmployeeDeductionOut] = Field(default_factory=list)

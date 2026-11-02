@@ -1,0 +1,2706 @@
+=== FILE: backend/app/services/payroll_runner.py ===
+"""Payroll runner (Chapter 4 Bundle 004b-a + Chapter 4H B-4c/d/e + B-3).
+
+B-3 additions: `_write_payslip` now persists one `PayslipLine` per
+`EarningLine` and per `DeductionLine` so `GET /payroll/pay-periods/{id}/
+preview/{employee_id}` can surface the actual line detail without
+recomputing.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import date, datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.core.errors import AppError
+from app.db.tenant.models.attendance import (
+    AttendanceDay,
+    AttendanceSegment,
+    ExceptionItem,
+    Shift,
+)
+from app.db.tenant.models.pay import (
+    EarningType, EmployeeEarning, EmployeeDeduction, DeductionType,
+    PayPeriod, PayrollRun, Payslip, PayslipLine, PeriodReopenLog,
+)
+from app.db.tenant.models.payroll_settings import PayrollSettings
+from app.db.tenant.models.people import (
+    Employee, EmployeePayHistory,
+)
+from app.services import payroll_pipeline as P
+from app.services import payroll_refusals as R
+from app.services import payroll_tax as T
+from app.services.payroll_audit import write_audit
+from app.services.payroll_formulas import (
+    DERIVATION_FORMULAS,
+    FORMULA_REGISTRY,
+    gen_paid_leave,
+    gen_unpaid_absence,
+    hourly_rate_from_monthly,
+)
+from app.services.payroll_seed import ensure_system_earning_types
+from app.services.statutory_loader import (
+    _default_engine, _ensure_bootstrapped, get_active_table,
+)
+
+
+_COUNTRY_CODE = "ZA"
+_PERIODS_PER_YEAR = {"monthly": 12, "weekly": 52, "fortnightly": 26}
+
+_UNPAID_DAY_FORMULAS = {
+    "gen_unpaid_absence": gen_unpaid_absence,
+}
+
+
+def _load_settings(db: Session) -> PayrollSettings:
+    settings = db.scalar(select(PayrollSettings).limit(1))
+    if settings is None:
+        raise AppError(
+            "settings_missing",
+            "Payroll settings have not been created yet; call PATCH /payroll/settings first",
+            409,
+        )
+    return settings
+
+
+def _load_control_table(table_type: str, on_date: date) -> list[dict]:
+    engine = _default_engine()
+    _ensure_bootstrapped(engine)
+    row = get_active_table(engine, _COUNTRY_CODE, table_type, on_date)
+    if row is None:
+        raise AppError(
+            "statutory_table_missing",
+            f"{_COUNTRY_CODE}/{table_type} has no active version covering {on_date.isoformat()}",
+            409,
+        )
+    return row["rows"]
+
+
+def _resolve_age(employee: Employee, on_date: date, age_ref: str) -> int:
+    if employee.date_of_birth is None:
+        raise AppError("missing_date_of_birth", "employee.date_of_birth is null", 409)
+    return T.compute_age(employee.date_of_birth, on_date)
+
+
+def build_pipeline_config(
+    db: Session, employee: Employee, pay_date: date,
+) -> P.PipelineConfig:
+    settings = _load_settings(db)
+    if settings.sdl_applies is None:
+        raise AppError("sdl_applies_unset", "payroll.sdl_applies is unset", 409)
+    if settings.age_reference_date is None:
+        raise AppError("age_reference_date_unset", "payroll.age_reference_date is unset", 409)
+    if employee.pay_frequency not in _PERIODS_PER_YEAR:
+        raise AppError(
+            "unsupported_pay_frequency",
+            f"pay_frequency {employee.pay_frequency!r} not supported",
+            409,
+        )
+
+    age_date = pay_date
+    age = _resolve_age(employee, age_date, settings.age_reference_date)
+
+    control_engine = _default_engine()
+    _ensure_bootstrapped(control_engine)
+    try:
+        tax_tables = T.load_tax_tables(control_engine, pay_date, country_code=_COUNTRY_CODE)
+    except R.PayrollRefusal as exc:
+        raise AppError(exc.code, exc.message, exc.http_status) from None
+
+    return P.PipelineConfig(
+        tax_engine=T.default_engine(),
+        tax_tables=tax_tables,
+        uif_rows=_load_control_table("uif", pay_date),
+        sdl_rows=_load_control_table("sdl", pay_date),
+        retirement_rows=_load_control_table("retirement_limit", pay_date),
+        periods_per_year=_PERIODS_PER_YEAR[employee.pay_frequency],
+        employee_age=age,
+        medical_members=employee.medical_scheme_members or 0,
+        uif_exempt=bool(employee.uif_exempt),
+        sdl_applies=settings.sdl_applies,
+        net_pay_floor=settings.net_pay_floor or Decimal("0.00"),
+    )
+
+
+def _build_fixed_earnings(
+    db: Session, employee: Employee, on_date: date,
+) -> list[P.EarningLine]:
+    rows = db.scalars(
+        select(EmployeeEarning).where(
+            EmployeeEarning.employee_id == employee.id,
+            EmployeeEarning.is_active.is_(True),
+            EmployeeEarning.effective_from <= on_date,
+        )
+    ).all()
+    lines: list[P.EarningLine] = []
+    for r in rows:
+        if r.effective_to is not None and r.effective_to < on_date:
+            continue
+        et = db.scalar(select(EarningType).where(EarningType.id == r.earning_type_id))
+        if et is None:
+            raise AppError(
+                "earning_type_missing",
+                f"employee_earning {r.id} references missing earning_type",
+                500,
+            )
+        if et.calc_method != "fixed_amount":
+            raise AppError(
+                "calc_method_unsupported",
+                f"earning_type {et.code!r} has calc_method {et.calc_method!r}; "
+                f"use ensure-system or a fixed_amount earning_type for direct "
+                f"employee_earning rows",
+                409,
+            )
+        if r.amount is None:
+            raise AppError(
+                "amount_missing",
+                f"employee_earning {r.id} has null amount with fixed_amount calc_method",
+                500,
+            )
+        lines.append(P.EarningLine(
+            label=et.name,
+            amount=Decimal(r.amount),
+            frequency=et.frequency,
+            is_taxable=bool(et.is_taxable),
+            counts_for_uif=bool(et.counts_for_uif),
+            counts_for_sdl=bool(et.counts_for_sdl),
+            source_ref={"employee_earning_id": str(r.id), "earning_type_code": et.code},
+        ))
+    return lines
+
+
+def _rate_in_force_for(
+    db: Session,
+    employee: Employee,
+    on_date: date,
+    settings: PayrollSettings,
+    warnings: list[str],
+) -> Decimal:
+    if employee.pay_basis == "hourly" or employee.pay_basis == "daily":
+        ph = db.scalar(
+            select(EmployeePayHistory).where(
+                EmployeePayHistory.employee_id == employee.id,
+                EmployeePayHistory.status == "approved",
+                EmployeePayHistory.effective_from <= on_date,
+            ).order_by(
+                EmployeePayHistory.effective_from.desc(),
+                EmployeePayHistory.created_at.desc(),
+                EmployeePayHistory.id.desc(),
+            ).limit(1)
+        )
+        if ph is not None:
+            return Decimal(ph.base_rate)
+        if employee.base_rate is not None:
+            warnings.append(
+                f"rate_history_missing:{employee.employee_code}:"
+                f"{on_date.isoformat()}:using_current_base_rate"
+            )
+            return Decimal(employee.base_rate)
+        raise AppError(
+            "missing_base_rate",
+            f"employee {employee.employee_code} has no approved pay history "
+            f"and no base_rate; cannot compute hourly amount",
+            409,
+        )
+
+    code = settings.monthly_hourly_derivation_formula_code
+    if code is None:
+        raise AppError(
+            "monthly_hourly_derivation_not_configured",
+            f"employee {employee.employee_code} is monthly-paid; hourly rate "
+            f"is needed here but payroll.monthly_hourly_derivation_formula_code "
+            f"is unset",
+            409,
+            {"employee_code": employee.employee_code},
+        )
+    if code not in DERIVATION_FORMULAS:
+        raise AppError(
+            "monthly_hourly_derivation_unknown",
+            f"monthly_hourly_derivation_formula_code={code!r} is not in "
+            f"DERIVATION_FORMULAS={sorted(DERIVATION_FORMULAS)}",
+            409,
+        )
+    if employee.contracted_weekly_hours is None:
+        raise AppError(
+            "missing_contracted_hours",
+            f"employee {employee.employee_code} is monthly-paid but has no "
+            f"contracted_weekly_hours; cannot derive hourly rate",
+            409,
+        )
+    monthly_salary = _monthly_salary_from_earnings(db, employee, on_date)
+    if monthly_salary is None:
+        raise AppError(
+            "monthly_salary_not_configured",
+            f"employee {employee.employee_code} has no BASE_MONTHLY earning "
+            f"effective on {on_date.isoformat()}; cannot derive hourly rate",
+            409,
+        )
+    return hourly_rate_from_monthly(
+        monthly_salary=monthly_salary,
+        contracted_weekly_hours=Decimal(employee.contracted_weekly_hours),
+    )
+
+
+def _monthly_salary_from_earnings(
+    db: Session, employee: Employee, on_date: date,
+) -> Decimal | None:
+    et = db.scalar(select(EarningType).where(EarningType.code == "BASE_MONTHLY"))
+    if et is None:
+        return None
+    row = db.scalar(
+        select(EmployeeEarning).where(
+            EmployeeEarning.employee_id == employee.id,
+            EmployeeEarning.earning_type_id == et.id,
+            EmployeeEarning.is_active.is_(True),
+            EmployeeEarning.effective_from <= on_date,
+        ).order_by(EmployeeEarning.effective_from.desc()).limit(1)
+    )
+    if row is None or row.amount is None:
+        return None
+    if row.effective_to is not None and row.effective_to < on_date:
+        return None
+    return Decimal(row.amount)
+
+
+def _daily_rate_for_employee_on_date(
+    db: Session,
+    employee: Employee,
+    on_date: date,
+    settings: PayrollSettings,
+    warnings: list[str],
+) -> Decimal:
+    rate = _rate_in_force_for(db, employee, on_date, settings, warnings)
+    if employee.default_shift_id is not None:
+        shift = db.get(Shift, employee.default_shift_id)
+        if shift is not None:
+            return rate * (Decimal(shift.length_minutes) / Decimal(60))
+    if employee.contracted_weekly_hours is not None:
+        return rate * (Decimal(employee.contracted_weekly_hours) / Decimal(5))
+    raise AppError(
+        "daily_rate_unavailable",
+        f"cannot compute daily rate for {employee.employee_code}: no default "
+        f"shift and no contracted_weekly_hours",
+        409,
+    )
+
+
+def _group_key_for_segment(seg: AttendanceSegment) -> str:
+    tier_part = str(seg.tier) if seg.kind == "overtime" else "any"
+    return f"{seg.kind}|{seg.day_type}|{tier_part}"
+
+
+def _segment_amount(seg: AttendanceSegment, rate: Decimal) -> Decimal:
+    if seg.rate_method == "multiplier":
+        per_hour = rate * Decimal(seg.rate_value)
+        return (Decimal(seg.minutes) / Decimal(60) * per_hour).quantize(
+            Decimal("0.0001"), rounding=ROUND_HALF_UP,
+        )
+    if seg.rate_method == "flat":
+        raise AppError(
+            "flat_rate_unsupported",
+            f"attendance segment id={seg.id} has rate_method='flat'; a "
+            f"flat-allowance divisor is not yet configured (round-2 "
+            f"amendment 3 keeps invented divisors out of code). Use "
+            f"rate_method='multiplier' on the shift_rate_rule, or wait for a "
+            f"future allowance policy setting.",
+            409,
+        )
+    raise AppError(
+        "unknown_rate_method",
+        f"attendance segment id={seg.id} has unknown rate_method="
+        f"{seg.rate_method!r}",
+        409,
+    )
+
+
+def _build_attendance_earnings(
+    db: Session,
+    employee: Employee,
+    pay_period: PayPeriod,
+) -> tuple[list[P.EarningLine], list[str], dict]:
+    settings = _load_settings(db)
+    warnings: list[str] = []
+    snapshot: dict = {
+        "grouped_minutes": {},
+        "mapping_used": {},
+        "rates_by_date": {},
+        "settings": {
+            "unpaid_day_behaviour": settings.unpaid_day_behaviour,
+            "unpaid_day_formula_code": settings.unpaid_day_formula_code,
+            "public_holiday_unworked_monthly": settings.public_holiday_unworked_monthly,
+            "public_holiday_paid": settings.public_holiday_paid,
+            "leave_authoritative_source": settings.leave_authoritative_source,
+            "monthly_hourly_derivation_formula_code":
+                settings.monthly_hourly_derivation_formula_code,
+            "attendance_earning_map": dict(settings.attendance_earning_map or {}),
+            "demo_values": bool(settings.demo_values),
+        },
+    }
+    lines: list[P.EarningLine] = []
+
+    if settings.leave_authoritative_source in ("leave_request", "both"):
+        raise AppError(
+            "leave_source_not_available",
+            f"leave_authoritative_source={settings.leave_authoritative_source!r} "
+            f"is not supported until Chapter 3 leave services land; only "
+            f"'adjustment' is available",
+            422,
+            {"leave_authoritative_source": settings.leave_authoritative_source},
+        )
+
+    days = list(db.scalars(
+        select(AttendanceDay).where(
+            AttendanceDay.employee_id == employee.id,
+            AttendanceDay.work_date >= pay_period.start_date,
+            AttendanceDay.work_date <= pay_period.end_date,
+        )
+    ).all())
+    if not days:
+        return [], warnings, snapshot
+
+    day_by_id = {d.id: d for d in days}
+    segments = list(db.scalars(
+        select(AttendanceSegment).where(
+            AttendanceSegment.attendance_day_id.in_(list(day_by_id.keys()))
+        )
+    ).all())
+
+    grouped: dict[str, int] = {}
+    for seg in segments:
+        if seg.minutes <= 0:
+            continue
+        key = _group_key_for_segment(seg)
+        grouped[key] = grouped.get(key, 0) + int(seg.minutes)
+    snapshot["grouped_minutes"] = dict(grouped)
+
+    mapping = settings.attendance_earning_map or {}
+    missing_keys = [k for k in grouped.keys() if k not in mapping]
+    if missing_keys:
+        raise AppError(
+            "attendance_earning_map_incomplete",
+            f"attendance_earning_map is missing keys: {sorted(missing_keys)}; "
+            f"set them via PATCH /payroll/settings before previewing",
+            409,
+            {"missing_keys": sorted(missing_keys)},
+        )
+    snapshot["mapping_used"] = {k: mapping[k] for k in grouped.keys()}
+
+    type_codes = {mapping[k] for k in grouped.keys()}
+    types_by_code = {t.code: t for t in db.scalars(
+        select(EarningType).where(EarningType.code.in_(type_codes))
+    ).all()}
+    missing_types = type_codes - set(types_by_code.keys())
+    if missing_types:
+        raise AppError(
+            "attendance_earning_type_missing",
+            f"earning types referenced by attendance_earning_map are missing: "
+            f"{sorted(missing_types)}; call POST /payroll/earning-types/ensure-system",
+            409,
+            {"missing_types": sorted(missing_types)},
+        )
+
+    agg: dict[str, dict] = {}
+    for seg in segments:
+        if seg.minutes <= 0:
+            continue
+        day = day_by_id.get(seg.attendance_day_id)
+        if day is None:
+            continue
+        if employee.pay_basis == "monthly" and seg.kind == "normal":
+            continue
+
+        key = _group_key_for_segment(seg)
+        code = mapping[key]
+        et = types_by_code[code]
+
+        if seg.kind == "overtime":
+            shift = db.get(Shift, day.shift_id) if day.shift_id else None
+            requires_approval = bool(shift and shift.overtime_requires_approval)
+            if requires_approval and seg.overtime_status != "approved":
+                warnings.append(
+                    f"overtime_unapproved:{employee.employee_code}:"
+                    f"{day.work_date.isoformat()}:{seg.minutes}min"
+                )
+                continue
+
+        rate = _rate_in_force_for(db, employee, seg.local_date, settings, warnings)
+        snapshot["rates_by_date"][seg.local_date.isoformat()] = str(rate)
+
+        amount = _segment_amount(seg, rate)
+        bucket = agg.setdefault(code, {
+            "minutes": 0,
+            "amount": Decimal("0.0000"),
+            "count": 0,
+            "label": et.name,
+            "frequency": et.frequency,
+            "is_taxable": bool(et.is_taxable),
+            "counts_for_uif": bool(et.counts_for_uif),
+            "counts_for_sdl": bool(et.counts_for_sdl),
+        })
+        bucket["minutes"] += int(seg.minutes)
+        bucket["amount"] += amount
+        bucket["count"] += 1
+
+    for code, b in agg.items():
+        lines.append(P.EarningLine(
+            label=f"{b['label']} ({b['minutes']} min)",
+            amount=b["amount"].quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            frequency=b["frequency"],
+            is_taxable=b["is_taxable"],
+            counts_for_uif=b["counts_for_uif"],
+            counts_for_sdl=b["counts_for_sdl"],
+            source_ref={
+                "attendance_derived": True,
+                "earning_type_code": code,
+                "minutes": b["minutes"],
+                "segment_count": b["count"],
+            },
+        ))
+
+    absent_days = [
+        d for d in days
+        if d.status == "absent" and (d.worked_minutes or 0) == 0
+    ]
+    if absent_days:
+        if settings.unpaid_day_behaviour is None:
+            raise AppError(
+                "unpaid_day_behaviour_not_configured",
+                f"payroll.unpaid_day_behaviour is unset but "
+                f"{len(absent_days)} absent day(s) exist in the period",
+                409,
+            )
+        if settings.unpaid_day_behaviour == "skip":
+            pass
+        elif settings.unpaid_day_behaviour == "deduct_daily":
+            if employee.pay_basis != "monthly":
+                warnings.append(
+                    f"unpaid_day_hourly_not_deducted:{employee.employee_code}:"
+                    f"{len(absent_days)}day(s)"
+                )
+            else:
+                formula_code = settings.unpaid_day_formula_code
+                if formula_code is None:
+                    raise AppError(
+                        "unpaid_day_formula_code_not_configured",
+                        "unpaid_day_behaviour='deduct_daily' requires "
+                        "unpaid_day_formula_code",
+                        409,
+                    )
+                fn = _UNPAID_DAY_FORMULAS.get(formula_code)
+                if fn is None:
+                    raise AppError(
+                        "unpaid_day_formula_unsupported",
+                        f"unpaid_day_formula_code={formula_code!r} cannot "
+                        f"compute an unpaid-day amount; supported: "
+                        f"{sorted(_UNPAID_DAY_FORMULAS)}",
+                        409,
+                    )
+                daily_rate = _daily_rate_for_employee_on_date(
+                    db, employee, pay_period.pay_date, settings, warnings,
+                )
+                positive = fn(
+                    daily_rate=daily_rate,
+                    unpaid_days=Decimal(len(absent_days)),
+                )
+                lines.append(P.EarningLine(
+                    label=f"Unpaid absence ({len(absent_days)} day(s))",
+                    amount=-positive,
+                    frequency="regular",
+                    is_taxable=True,
+                    counts_for_uif=True,
+                    counts_for_sdl=True,
+                    source_ref={
+                        "attendance_derived": True,
+                        "kind": "unpaid_day",
+                        "formula_code": formula_code,
+                        "absent_count": len(absent_days),
+                    },
+                ))
+        elif settings.unpaid_day_behaviour == "deduct_hourly":
+            raise AppError(
+                "unpaid_day_behaviour_not_supported",
+                "unpaid_day_behaviour='deduct_hourly' is not supported; use "
+                "'deduct_daily' with an accountant-acknowledged formula code",
+                409,
+            )
+        else:
+            raise AppError(
+                "unpaid_day_behaviour_invalid",
+                f"unpaid_day_behaviour={settings.unpaid_day_behaviour!r} unknown",
+                409,
+            )
+
+    unworked_ph = [d for d in days if d.status == "public_holiday_unworked"]
+    if unworked_ph:
+        beh = settings.public_holiday_unworked_monthly
+        if beh is None:
+            raise AppError(
+                "public_holiday_behaviour_not_configured",
+                f"payroll.public_holiday_unworked_monthly is unset but "
+                f"{len(unworked_ph)} unworked public-holiday day(s) exist",
+                409,
+            )
+        if beh == "settings_per_day_type":
+            if settings.public_holiday_paid is None:
+                raise AppError(
+                    "public_holiday_paid_unset",
+                    "public_holiday_unworked_monthly='settings_per_day_type' "
+                    "requires public_holiday_paid to be set (true/false)",
+                    409,
+                )
+            beh = "paid" if settings.public_holiday_paid else "unpaid"
+        if beh == "paid":
+            pass
+        elif beh == "unpaid":
+            if employee.pay_basis != "monthly":
+                warnings.append(
+                    f"public_holiday_unpaid_hourly:{employee.employee_code}:"
+                    f"{len(unworked_ph)}day(s)"
+                )
+            else:
+                formula_code = settings.unpaid_day_formula_code
+                if formula_code is None:
+                    raise AppError(
+                        "public_holiday_formula_code_not_configured",
+                        "public_holiday_unworked_monthly='unpaid' requires "
+                        "unpaid_day_formula_code",
+                        409,
+                    )
+                fn = _UNPAID_DAY_FORMULAS.get(formula_code)
+                if fn is None:
+                    raise AppError(
+                        "public_holiday_formula_unsupported",
+                        f"unpaid_day_formula_code={formula_code!r} cannot "
+                        f"compute a public-holiday amount",
+                        409,
+                    )
+                daily_rate = _daily_rate_for_employee_on_date(
+                    db, employee, pay_period.pay_date, settings, warnings,
+                )
+                positive = fn(
+                    daily_rate=daily_rate,
+                    unpaid_days=Decimal(len(unworked_ph)),
+                )
+                lines.append(P.EarningLine(
+                    label=f"Unworked public holiday ({len(unworked_ph)} day(s))",
+                    amount=-positive,
+                    frequency="regular",
+                    is_taxable=True,
+                    counts_for_uif=True,
+                    counts_for_sdl=True,
+                    source_ref={
+                        "attendance_derived": True,
+                        "kind": "public_holiday_unpaid",
+                        "formula_code": formula_code,
+                        "day_count": len(unworked_ph),
+                    },
+                ))
+        else:
+            raise AppError(
+                "public_holiday_behaviour_invalid",
+                f"public_holiday_unworked_monthly={beh!r} unknown",
+                409,
+            )
+
+    leave_days = [d for d in days if d.status == "leave"]
+    if leave_days:
+        if settings.leave_authoritative_source is None:
+            raise AppError(
+                "leave_source_not_configured",
+                "payroll.leave_authoritative_source is unset but "
+                f"{len(leave_days)} leave day(s) exist in the period",
+                409,
+            )
+        if employee.pay_basis == "monthly" and not bool(settings.leave_earning_for_monthly):
+            pass
+        else:
+            daily_rate = _daily_rate_for_employee_on_date(
+                db, employee, pay_period.pay_date, settings, warnings,
+            )
+            amount = gen_paid_leave(
+                daily_rate=daily_rate,
+                paid_leave_days=Decimal(len(leave_days)),
+            )
+            lines.append(P.EarningLine(
+                label=f"Paid leave ({len(leave_days)} day(s))",
+                amount=amount,
+                frequency="regular",
+                is_taxable=True,
+                counts_for_uif=True,
+                counts_for_sdl=True,
+                source_ref={
+                    "attendance_derived": True,
+                    "kind": "paid_leave",
+                    "day_count": len(leave_days),
+                },
+            ))
+
+    return lines, warnings, snapshot
+
+
+def _build_all_earnings(
+    db: Session, employee: Employee, pay_period: PayPeriod,
+) -> tuple[list[P.EarningLine], list[str], dict]:
+    fixed = _build_fixed_earnings(db, employee, pay_period.pay_date)
+    attn, warnings, snapshot = _build_attendance_earnings(db, employee, pay_period)
+    return fixed + attn, warnings, snapshot
+
+
+def _build_deductions(db: Session, employee: Employee, on_date: date) -> list[P.DeductionLine]:
+    rows = db.scalars(
+        select(EmployeeDeduction).where(
+            EmployeeDeduction.employee_id == employee.id,
+            EmployeeDeduction.is_active.is_(True),
+            EmployeeDeduction.effective_from <= on_date,
+        )
+    ).all()
+    lines: list[P.DeductionLine] = []
+    for r in rows:
+        if r.effective_to is not None and r.effective_to < on_date:
+            continue
+        dt = db.scalar(select(DeductionType).where(DeductionType.id == r.deduction_type_id))
+        if dt is None:
+            raise AppError(
+                "deduction_type_missing",
+                f"employee_deduction {r.id} references missing deduction_type",
+                500,
+            )
+        lines.append(P.DeductionLine(
+            label=dt.name,
+            amount=Decimal(r.amount),
+            category=dt.category,
+            is_pre_tax=bool(dt.is_pre_tax),
+            priority=dt.priority,
+            source_ref={"employee_deduction_id": str(r.id), "deduction_type_code": dt.code},
+        ))
+    return lines
+
+
+def _write_payslip(
+    db: Session, run: PayrollRun, pay_period: PayPeriod,
+    employee: Employee, draft: P.PayslipDraft, *,
+    earnings: list[P.EarningLine],
+    deductions: list[P.DeductionLine],
+    status: str,
+    prior: Payslip | None,
+) -> Payslip:
+    payslip = Payslip(
+        id=uuid.uuid4(),
+        payroll_run_id=run.id,
+        pay_period_id=pay_period.id,
+        employee_id=employee.id,
+        revision=run.revision,
+        status=status,
+        gross=draft.gross,
+        pre_tax_deductions=draft.pre_tax_deductions,
+        taxable_income=draft.taxable_income,
+        paye=draft.paye,
+        uif_employee=draft.uif_employee,
+        uif_employer=draft.uif_employer,
+        sdl=draft.sdl,
+        other_deductions=draft.other_deductions,
+        reimbursements=draft.reimbursements,
+        net=draft.net,
+        employer_costs=draft.employer_costs(),
+        snapshot={"calculation_context": draft.calculation_context, "tax_trace": draft.tax_trace},
+        calculation_context=draft.calculation_context,
+        predecessor_payslip_id=prior.id if prior else None,
+    )
+    db.add(payslip)
+    db.flush()
+
+    if prior is not None and prior.status == "current" and status == "current":
+        prior.status = "superseded"
+
+    # B-3: persist each earning and deduction as a PayslipLine for
+    # GET .../preview/{employee_id}. Persisted amount matches the pipeline's
+    # contribution to gross / other_deductions.
+    for i, e in enumerate(earnings):
+        src = dict(e.source_ref or {})
+        if "attendance_derived" in src:
+            src["rate_source"] = "attendance"
+        else:
+            src["rate_source"] = "employee_earning"
+        src.setdefault("amount", str(e.amount))
+        db.add(PayslipLine(
+            id=uuid.uuid4(), payslip_id=payslip.id,
+            line_type="earning", step="gross", sort_order=i,
+            label=e.label, amount=e.amount, source_ref=src,
+        ))
+    for i, d in enumerate(deductions):
+        src = dict(d.source_ref or {})
+        src.setdefault("amount", str(d.amount))
+        db.add(PayslipLine(
+            id=uuid.uuid4(), payslip_id=payslip.id,
+            line_type="deduction",
+            step="pre_tax" if d.is_pre_tax else "other",
+            sort_order=500 + i,
+            label=d.label, amount=d.amount, source_ref=src,
+        ))
+    for i, d in enumerate(draft.deferred_deductions):
+        db.add(PayslipLine(
+            id=uuid.uuid4(), payslip_id=payslip.id,
+            line_type="deduction", step="other", sort_order=1000 + i,
+            label=f"Deferred: {d['label']}",
+            amount=Decimal(d["amount"]),
+            source_ref={"deferred": True, "category": d.get("category")},
+        ))
+    db.add(PayslipLine(
+        id=uuid.uuid4(), payslip_id=payslip.id,
+        line_type="tax", step="tax", sort_order=200, label="PAYE",
+        amount=draft.paye, source_ref={"method": draft.calculation_context.get("tax_method")},
+    ))
+    db.add(PayslipLine(
+        id=uuid.uuid4(), payslip_id=payslip.id,
+        line_type="deduction", step="statutory", sort_order=300, label="UIF (employee)",
+        amount=draft.uif_employee, source_ref={"statutory": "uif"},
+    ))
+    db.add(PayslipLine(
+        id=uuid.uuid4(), payslip_id=payslip.id,
+        line_type="employer_cost", step="employer_cost", sort_order=800,
+        label="UIF (employer)", amount=draft.uif_employer,
+        source_ref={"statutory": "uif"},
+    ))
+    db.add(PayslipLine(
+        id=uuid.uuid4(), payslip_id=payslip.id,
+        line_type="employer_cost", step="employer_cost", sort_order=810,
+        label="SDL", amount=draft.sdl, source_ref={"statutory": "sdl"},
+    ))
+    db.flush()
+    return payslip
+
+
+def _purge_preview(db: Session, pay_period_id: uuid.UUID) -> None:
+    prior = db.scalar(
+        select(PayrollRun).where(
+            PayrollRun.pay_period_id == pay_period_id,
+            PayrollRun.kind == "preview",
+        ).order_by(PayrollRun.started_at.desc())
+    )
+    if prior is None:
+        return
+    db.execute(
+        PayslipLine.__table__.delete().where(
+            PayslipLine.payslip_id.in_(
+                select(Payslip.id).where(Payslip.payroll_run_id == prior.id)
+            )
+        )
+    )
+    db.execute(Payslip.__table__.delete().where(Payslip.payroll_run_id == prior.id))
+    db.execute(PayrollRun.__table__.delete().where(PayrollRun.id == prior.id))
+    db.flush()
+
+
+def _in_scope_employees(db: Session) -> list[Employee]:
+    return list(db.scalars(
+        select(Employee).where(Employee.status != "terminated")
+    ).all())
+
+
+def _formula_warnings(db: Session) -> list[str]:
+    settings = _load_settings(db)
+    acks = settings.formula_acks or {}
+    return [code for code in FORMULA_REGISTRY if code not in acks]
+
+
+def _count_open_exceptions_in_period(
+    db: Session, pay_period: PayPeriod,
+) -> tuple[int, list[dict]]:
+    rows = db.execute(
+        select(
+            ExceptionItem.employee_id,
+            ExceptionItem.work_date,
+            ExceptionItem.type,
+        ).where(
+            ExceptionItem.work_date >= pay_period.start_date,
+            ExceptionItem.work_date <= pay_period.end_date,
+            ExceptionItem.status == "open",
+        ).limit(1000)
+    ).all()
+    count = len(rows)
+    sample = [
+        {"employee_id": str(r[0]), "work_date": r[1].isoformat(), "type": r[2]}
+        for r in rows[:5]
+    ]
+    return count, sample
+
+
+def run_preview(db: Session, user, pay_period: PayPeriod) -> PayrollRun:
+    if pay_period.status == "locked":
+        raise AppError("period_locked", "Cannot preview a finalised period; reopen it first", 409)
+
+    _purge_preview(db, pay_period.id)
+    ensure_system_earning_types(db)
+
+    prior_final_max = db.scalar(
+        select(Payslip.revision).where(Payslip.pay_period_id == pay_period.id)
+        .order_by(Payslip.revision.desc())
+    ) or 0
+    rev = int(prior_final_max) + 1
+
+    run = PayrollRun(
+        id=uuid.uuid4(),
+        pay_period_id=pay_period.id,
+        kind="preview",
+        revision=rev,
+        status="running",
+        rules_snapshot={},
+        started_by_user_id=getattr(user, "id", None),
+    )
+    db.add(run)
+    db.flush()
+
+    warnings = _formula_warnings(db)
+    run.rules_snapshot = {
+        "preview": True,
+        "unacknowledged_formulas": warnings,
+        "employee_count": 0,
+    }
+
+    employees = _in_scope_employees(db)
+    for emp in employees:
+        config = build_pipeline_config(db, emp, pay_period.pay_date)
+        earnings, attn_warnings, attn_snapshot = _build_all_earnings(db, emp, pay_period)
+        deductions = _build_deductions(db, emp, pay_period.pay_date)
+        draft = P.run_pipeline(config, earnings, deductions, [])
+        if draft.refused:
+            run.status = "failed"
+            run.error_code = draft.refusal_code
+            run.error_detail = f"employee {emp.employee_code}: {draft.refusal_message}"
+            run.completed_at = datetime.now(timezone.utc)
+            db.flush()
+            raise AppError(draft.refusal_code or "compute_refused", draft.refusal_message or "", 409)
+        draft.calculation_context["attendance_warnings"] = attn_warnings
+        draft.calculation_context["attendance_inputs"] = attn_snapshot
+        _write_payslip(
+            db, run, pay_period, emp, draft,
+            earnings=earnings, deductions=deductions,
+            status="preview", prior=None,
+        )
+        run.rules_snapshot["employee_count"] = run.rules_snapshot["employee_count"] + 1
+
+    run.status = "completed"
+    run.completed_at = datetime.now(timezone.utc)
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="payroll_run", entity_id=run.id, action="preview",
+        new_value={"pay_period_id": str(pay_period.id), "employee_count": run.rules_snapshot["employee_count"]},
+    )
+    return run
+
+
+def finalise(
+    db: Session, user, pay_period: PayPeriod,
+    *, ack_open_exceptions_reason: str | None = None,
+) -> PayrollRun:
+    if pay_period.status == "locked":
+        raise AppError("period_locked", "Period is already finalised", 409)
+
+    warnings = _formula_warnings(db)
+    if warnings:
+        raise AppError(
+            "formula_unacknowledged",
+            f"cannot finalise until all formulas are acknowledged; missing: {warnings}",
+            409,
+        )
+
+    open_count, open_sample = _count_open_exceptions_in_period(db, pay_period)
+    ack_used = False
+    if open_count > 0:
+        if not ack_open_exceptions_reason or not ack_open_exceptions_reason.strip():
+            raise AppError(
+                "open_exceptions_in_period",
+                f"{open_count} open exception(s) exist in this period; pass "
+                f"ack_open_exceptions_reason to acknowledge and proceed",
+                409,
+                {"count": open_count, "sample": open_sample},
+            )
+        ack_used = True
+
+    _purge_preview(db, pay_period.id)
+    ensure_system_earning_types(db)
+
+    prior_final_max = db.scalar(
+        select(Payslip.revision).where(Payslip.pay_period_id == pay_period.id)
+        .order_by(Payslip.revision.desc())
+    ) or 0
+    rev = int(prior_final_max) + 1
+
+    run = PayrollRun(
+        id=uuid.uuid4(),
+        pay_period_id=pay_period.id,
+        kind="final",
+        revision=rev,
+        status="running",
+        rules_snapshot={},
+        started_by_user_id=getattr(user, "id", None),
+    )
+    db.add(run)
+    db.flush()
+
+    employees = _in_scope_employees(db)
+    run.rules_snapshot = {"final": True, "employee_count": 0, "revision": rev}
+
+    for emp in employees:
+        prior = db.scalar(
+            select(Payslip).where(
+                Payslip.pay_period_id == pay_period.id,
+                Payslip.employee_id == emp.id,
+                Payslip.status == "current",
+            )
+        )
+        config = build_pipeline_config(db, emp, pay_period.pay_date)
+        earnings, attn_warnings, attn_snapshot = _build_all_earnings(db, emp, pay_period)
+        deductions = _build_deductions(db, emp, pay_period.pay_date)
+        draft = P.run_pipeline(config, earnings, deductions, [])
+        if draft.refused:
+            run.status = "failed"
+            run.error_code = draft.refusal_code
+            run.error_detail = f"employee {emp.employee_code}: {draft.refusal_message}"
+            run.completed_at = datetime.now(timezone.utc)
+            db.flush()
+            raise AppError(draft.refusal_code or "compute_refused", draft.refusal_message or "", 409)
+        draft.calculation_context["attendance_warnings"] = attn_warnings
+        draft.calculation_context["attendance_inputs"] = attn_snapshot
+        _write_payslip(
+            db, run, pay_period, emp, draft,
+            earnings=earnings, deductions=deductions,
+            status="current", prior=prior,
+        )
+        run.rules_snapshot["employee_count"] = run.rules_snapshot["employee_count"] + 1
+
+    pay_period.status = "locked"
+    pay_period.row_version += 1
+    run.status = "completed"
+    run.completed_at = datetime.now(timezone.utc)
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="payroll_run", entity_id=run.id, action="finalise",
+        new_value={
+            "pay_period_id": str(pay_period.id),
+            "revision": rev,
+            "employee_count": run.rules_snapshot["employee_count"],
+            "open_exception_count_at_finalise": open_count,
+            "ack_open_exceptions_reason": ack_open_exceptions_reason if ack_used else None,
+        },
+    )
+    return run
+
+
+def reopen(db: Session, user, pay_period: PayPeriod, reason: str) -> PeriodReopenLog:
+    if pay_period.status != "locked":
+        raise AppError("period_not_locked", "Only a locked period can be reopened", 409)
+
+    later_locked = db.scalar(
+        select(PayPeriod).where(
+            PayPeriod.status == "locked",
+            PayPeriod.pay_date > pay_period.pay_date,
+        ).limit(1)
+    )
+    if later_locked is not None:
+        raise AppError(
+            "later_period_locked",
+            f"reopen later locked period {later_locked.period_key!r} first",
+            409,
+        )
+
+    prior_rev = db.scalar(
+        select(Payslip.revision).where(Payslip.pay_period_id == pay_period.id)
+        .order_by(Payslip.revision.desc())
+    ) or 0
+    new_rev = int(prior_rev) + 1
+
+    log = PeriodReopenLog(
+        id=uuid.uuid4(),
+        pay_period_id=pay_period.id,
+        reopened_by_user_id=getattr(user, "id", None),
+        reason=reason,
+        prior_revision=int(prior_rev),
+        new_revision=new_rev,
+    )
+    db.add(log)
+    pay_period.status = "open"
+    pay_period.row_version += 1
+    db.flush()
+    write_audit(
+        db, user,
+        entity_type="pay_period", entity_id=pay_period.id, action="reopen",
+        old_value={"status": "locked"}, new_value={"status": "open", "reason": reason},
+    )
+    return log
+=== END FILE: backend/app/services/payroll_runner.py ===
+
+=== FILE: backend/app/api/v1/payroll_payslips_schemas.py ===
+"""Payslip schemas (Chapter 4 Bundle 004b-b + Chapter 4H B-3).
+
+B-3 adds self-service list/detail shapes (PayslipMeRow, PayslipMeListOut).
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import date, datetime
+from decimal import Decimal
+
+from pydantic import BaseModel, ConfigDict
+
+
+class PayslipOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    payroll_run_id: uuid.UUID
+    pay_period_id: uuid.UUID
+    employee_id: uuid.UUID
+    revision: int
+    status: str
+    gross: Decimal
+    pre_tax_deductions: Decimal
+    taxable_income: Decimal
+    paye: Decimal
+    uif_employee: Decimal
+    uif_employer: Decimal
+    sdl: Decimal
+    other_deductions: Decimal
+    reimbursements: Decimal
+    net: Decimal
+    pdf_object_key: str | None = None
+    predecessor_payslip_id: uuid.UUID | None = None
+    computed_at: datetime
+
+
+class PayslipListOut(BaseModel):
+    items: list[PayslipOut]
+    next_cursor: str | None = None
+
+
+class PayslipLineOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    line_type: str
+    step: str
+    sort_order: int
+    label: str
+    amount: Decimal
+    source_ref: dict
+
+
+class PayslipExplainOut(BaseModel):
+    payslip: PayslipOut
+    lines: list[PayslipLineOut]
+    snapshot: dict
+    calculation_context: dict
+
+
+class PayslipMeRow(BaseModel):
+    """Lean self-service row (B-3)."""
+    id: uuid.UUID
+    pay_period_id: uuid.UUID
+    period_key: str
+    pay_date: date
+    status: str
+    gross: Decimal
+    net: Decimal
+    computed_at: datetime
+
+
+class PayslipMeListOut(BaseModel):
+    items: list[PayslipMeRow]
+    next_cursor: str | None = None
+=== END FILE: backend/app/api/v1/payroll_payslips_schemas.py ===
+
+=== FILE: backend/app/api/v1/payroll_payslips.py ===
+"""Payslip read endpoints (Chapter 4 Bundle 004b-b + Chapter 4H B-3).
+
+Chapter 4H B-3 additions (round-2 amendments §12–§14):
+  - `/me`, `/me/{id}`, `/me/{id}/pdf` — SELF_VIEW routes for own payslips.
+    Registered BEFORE `/{payslip_id}` so FastAPI does not try to parse
+    "me" as a UUID.
+  - `/me` returns FINALISED payslips only (`status != "preview"`).
+  - Auditor role is refused with 403 on the /me endpoints (master brief §6).
+  - PDF responses add `Cache-Control: no-store` and a generic
+    `filename="payslip.pdf"`.
+  - The generic `/{payslip_id}/pdf` writes an audit entry when the caller
+    is not the payslip's employee.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import uuid
+from datetime import date
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, Query, Response
+from sqlalchemy import or_, select
+
+from app.api.deps import TenantDbDep
+from app.api.v1.payroll_payslips_schemas import (
+    PayslipExplainOut,
+    PayslipLineOut,
+    PayslipListOut,
+    PayslipMeListOut,
+    PayslipMeRow,
+    PayslipOut,
+)
+from app.core.errors import AppError
+from app.core.permissions import Permission, require_permission
+from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
+from app.db.tenant.models.pay import PayPeriod, Payslip, PayslipLine, PayrollRun
+from app.db.tenant.models.people import Employee
+from app.services.payroll_audit import write_audit
+from app.services.payroll_pdf import render_payslip_pdf
+
+router = APIRouter(prefix="/payroll/payslips", tags=["payroll-payslips"])
+
+_DEFAULT_LIMIT = 100
+_MAX_LIMIT = 500
+
+
+def _encode_cursor(uid: uuid.UUID) -> str:
+    raw = json.dumps({"i": str(uid)}, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> uuid.UUID:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        return uuid.UUID(json.loads(raw)["i"])
+    except Exception:
+        raise AppError("invalid_cursor", "The pagination cursor is malformed", 400) from None
+
+
+def _encode_me_cursor(pay_date: date, payslip_id: uuid.UUID) -> str:
+    raw = json.dumps(
+        {"d": pay_date.isoformat(), "i": str(payslip_id)},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_me_cursor(cursor: str) -> tuple[date, uuid.UUID]:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        payload = json.loads(raw)
+        return date.fromisoformat(payload["d"]), uuid.UUID(payload["i"])
+    except Exception:
+        raise AppError("invalid_cursor", "The pagination cursor is malformed", 400) from None
+
+
+def _load_payslip_scoped(db, user, payslip_id: uuid.UUID) -> Payslip:
+    row = db.scalar(select(Payslip).where(Payslip.id == payslip_id))
+    if row is None or row.status == "preview":
+        raise AppError("not_found", "Payslip not found", 404)
+    try:
+        assert_in_scope(user, row.employee_id, db)
+    except ScopeViolation:
+        raise AppError("not_found", "Payslip not found", 404)
+    return row
+
+
+def _require_non_auditor(user: Any) -> None:
+    """Master brief section 6: auditors must not access the self-service
+    payslip routes (they see every payslip via their day-to-day role).
+    """
+    if getattr(user, "role", None) == "auditor":
+        raise AppError(
+            "forbidden",
+            "Auditors cannot access the self-service payslip endpoints",
+            403,
+            {"role": "auditor"},
+        )
+
+
+def _me_employee_id(user: Any) -> uuid.UUID:
+    employee_id = getattr(user, "employee_id", None)
+    if employee_id is None:
+        raise AppError(
+            "no_employee_record",
+            "User has no employee record",
+            404,
+        )
+    return employee_id
+
+
+def _load_my_payslip(
+    db, user, payslip_id: uuid.UUID,
+) -> Payslip:
+    employee_id = _me_employee_id(user)
+    row = db.scalar(
+        select(Payslip).where(
+            Payslip.id == payslip_id,
+            Payslip.employee_id == employee_id,
+            Payslip.status != "preview",
+        )
+    )
+    if row is None:
+        raise AppError("not_found", "Payslip not found", 404)
+    return row
+
+
+@router.get("", response_model=PayslipListOut)
+def list_payslips(
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYSLIP_VIEW))],
+    employee_id: Annotated[uuid.UUID | None, Query()] = None,
+    pay_period_id: Annotated[uuid.UUID | None, Query()] = None,
+    status: Annotated[str | None, Query()] = "current",
+    limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
+    cursor: Annotated[str | None, Query()] = None,
+) -> PayslipListOut:
+    q = select(Payslip)
+    if status is not None:
+        q = q.where(Payslip.status == status)
+    q = q.where(Payslip.status != "preview")
+    if employee_id is not None:
+        q = q.where(Payslip.employee_id == employee_id)
+    if pay_period_id is not None:
+        q = q.where(Payslip.pay_period_id == pay_period_id)
+    q = apply_scope(q, user, db, model=Payslip)
+    if cursor is not None:
+        q = q.where(Payslip.id > _decode_cursor(cursor))
+    q = q.order_by(Payslip.id.asc()).limit(limit + 1)
+    rows = list(db.scalars(q).all())
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_cursor = _encode_cursor(rows[-1].id)
+    return PayslipListOut(
+        items=[PayslipOut.model_validate(r) for r in rows],
+        next_cursor=next_cursor,
+    )
+
+
+# ---- /me routes — MUST come before /{payslip_id} (FastAPI path order) ----
+
+
+@router.get("/me", response_model=PayslipMeListOut)
+def list_my_payslips(
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.SELF_VIEW))],
+    limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
+    cursor: Annotated[str | None, Query()] = None,
+) -> PayslipMeListOut:
+    _require_non_auditor(user)
+    employee_id = _me_employee_id(user)
+
+    q = (
+        select(Payslip, PayPeriod)
+        .join(PayPeriod, PayPeriod.id == Payslip.pay_period_id)
+        .where(
+            Payslip.employee_id == employee_id,
+            Payslip.status != "preview",
+        )
+    )
+    if cursor is not None:
+        d, i = _decode_me_cursor(cursor)
+        q = q.where(
+            or_(
+                PayPeriod.pay_date < d,
+                (PayPeriod.pay_date == d) & (Payslip.id < i),
+            )
+        )
+    q = q.order_by(PayPeriod.pay_date.desc(), Payslip.id.desc()).limit(limit + 1)
+    rows = list(db.execute(q).all())
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        last_ps, last_pp = rows[-1]
+        next_cursor = _encode_me_cursor(last_pp.pay_date, last_ps.id)
+
+    items = [
+        PayslipMeRow(
+            id=ps.id,
+            pay_period_id=ps.pay_period_id,
+            period_key=pp.period_key,
+            pay_date=pp.pay_date,
+            status=ps.status,
+            gross=ps.gross,
+            net=ps.net,
+            computed_at=ps.computed_at,
+        )
+        for ps, pp in rows
+    ]
+    return PayslipMeListOut(items=items, next_cursor=next_cursor)
+
+
+@router.get("/me/{payslip_id}", response_model=PayslipOut)
+def get_my_payslip(
+    payslip_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.SELF_VIEW))],
+) -> PayslipOut:
+    _require_non_auditor(user)
+    row = _load_my_payslip(db, user, payslip_id)
+    return PayslipOut.model_validate(row)
+
+
+@router.get("/me/{payslip_id}/pdf")
+def get_my_payslip_pdf(
+    payslip_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.SELF_VIEW))],
+) -> Response:
+    _require_non_auditor(user)
+    row = _load_my_payslip(db, user, payslip_id)
+    employee = db.scalar(select(Employee).where(Employee.id == row.employee_id))
+    pay_period = db.scalar(select(PayPeriod).where(PayPeriod.id == row.pay_period_id))
+    if employee is None or pay_period is None:
+        raise AppError("not_found", "Payslip references missing employee or period", 500)
+    pdf_bytes = render_payslip_pdf(row, employee, pay_period)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": 'attachment; filename="payslip.pdf"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+# ---- generic routes ----
+
+
+@router.get("/{payslip_id}", response_model=PayslipOut)
+def get_payslip(
+    payslip_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYSLIP_VIEW))],
+) -> PayslipOut:
+    row = _load_payslip_scoped(db, user, payslip_id)
+    return PayslipOut.model_validate(row)
+
+
+@router.get("/{payslip_id}/explain", response_model=PayslipExplainOut)
+def explain_payslip(
+    payslip_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYSLIP_VIEW))],
+) -> PayslipExplainOut:
+    row = _load_payslip_scoped(db, user, payslip_id)
+    lines = list(db.scalars(
+        select(PayslipLine).where(PayslipLine.payslip_id == row.id)
+        .order_by(PayslipLine.sort_order.asc())
+    ).all())
+    return PayslipExplainOut(
+        payslip=PayslipOut.model_validate(row),
+        lines=[PayslipLineOut.model_validate(l) for l in lines],
+        snapshot=row.snapshot or {},
+        calculation_context=row.calculation_context or {},
+    )
+
+
+@router.get("/{payslip_id}/pdf")
+def get_payslip_pdf(
+    payslip_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYSLIP_VIEW))],
+) -> Response:
+    row = _load_payslip_scoped(db, user, payslip_id)
+    employee = db.scalar(select(Employee).where(Employee.id == row.employee_id))
+    pay_period = db.scalar(select(PayPeriod).where(PayPeriod.id == row.pay_period_id))
+    if employee is None or pay_period is None:
+        raise AppError("not_found", "Payslip references missing employee or period", 500)
+    pdf_bytes = render_payslip_pdf(row, employee, pay_period)
+
+    # Round-2 amendment §14: audit when a non-owner downloads.
+    if getattr(user, "employee_id", None) != row.employee_id:
+        write_audit(
+            db, user,
+            entity_type="payslip",
+            entity_id=row.id,
+            action="payslip.pdf_download_by_other",
+            new_value={
+                "downloaded_by_user_id": str(getattr(user, "id", "")),
+                "employee_id": str(row.employee_id),
+                "pay_period_id": str(row.pay_period_id),
+            },
+        )
+        db.commit()
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": 'attachment; filename="payslip.pdf"',
+            "Cache-Control": "no-store",
+        },
+    )
+=== END FILE: backend/app/api/v1/payroll_payslips.py ===
+
+=== FILE: backend/app/api/v1/payroll_pay_periods_schemas.py ===
+"""Pay period schemas (Chapter 4 + Chapter 4H B-4d + B-3).
+
+B-3 adds PreviewEmployeeOut (single-employee preview detail).
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import date, datetime
+from decimal import Decimal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class PayPeriodIn(BaseModel):
+    period_key: str = Field(..., max_length=40)
+    start_date: date
+    end_date: date
+    pay_date: date
+    cutoff_at: datetime
+
+
+class PayPeriodOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    period_key: str
+    start_date: date
+    end_date: date
+    pay_date: date
+    status: str
+    cutoff_at: datetime
+    row_version: int
+
+
+class PayPeriodListOut(BaseModel):
+    items: list[PayPeriodOut]
+    next_cursor: str | None = None
+
+
+class PreviewSummaryRow(BaseModel):
+    employee_id: uuid.UUID
+    employee_code: str
+    employee_name: str
+    gross: Decimal
+    paye: Decimal
+    net: Decimal
+    warnings: list[str] = Field(default_factory=list)
+
+
+class PreviewOut(BaseModel):
+    run_id: uuid.UUID
+    revision: int
+    status: str
+    unacknowledged_formulas: list[str] = Field(default_factory=list)
+    items: list[PreviewSummaryRow]
+    next_cursor: str | None = None
+
+
+class PayrollRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    pay_period_id: uuid.UUID
+    kind: str
+    revision: int
+    status: str
+    started_at: datetime
+    completed_at: datetime | None = None
+    error_code: str | None = None
+
+
+class ReopenIn(BaseModel):
+    reason: str = Field(..., min_length=1)
+
+
+class ReopenLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    pay_period_id: uuid.UUID
+    reopened_by_user_id: uuid.UUID | None = None
+    reason: str
+    prior_revision: int
+    new_revision: int
+    occurred_at: datetime
+
+
+class FinaliseIn(BaseModel):
+    ack_open_exceptions_reason: str | None = Field(default=None, max_length=500)
+
+
+class PreviewEmployeeLineOut(BaseModel):
+    earning_type_code: str
+    earning_type_name: str
+    rate_source: str | None = None
+    amount: Decimal
+    minutes: int | None = None
+
+
+class PreviewEmployeeDeductionOut(BaseModel):
+    deduction_type_code: str
+    deduction_type_name: str
+    amount: Decimal
+
+
+class PreviewEmployeeOut(BaseModel):
+    employee_id: uuid.UUID
+    employee_code: str
+    employee_name: str
+    pay_period_id: uuid.UUID
+    revision: int
+    status: str
+    gross: Decimal
+    paye: Decimal
+    net: Decimal
+    warnings: list[str] = Field(default_factory=list)
+    lines: list[PreviewEmployeeLineOut] = Field(default_factory=list)
+    deductions: list[PreviewEmployeeDeductionOut] = Field(default_factory=list)
+=== END FILE: backend/app/api/v1/payroll_pay_periods_schemas.py ===
+
+=== FILE: backend/app/api/v1/payroll_pay_periods.py ===
+"""Pay period endpoints (Chapter 4 Bundle 004b-a + Chapter 4H B-4d + B-3).
+
+B-3 adds:
+  GET /payroll/pay-periods/{period_id}/preview/{employee_id}
+    Read-only single-employee preview from the latest persisted run.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import uuid
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
+
+from app.api.deps import TenantDbDep
+from app.api.v1.payroll_pay_periods_schemas import (
+    FinaliseIn,
+    PayPeriodIn,
+    PayPeriodListOut,
+    PayPeriodOut,
+    PayrollRunOut,
+    PreviewEmployeeDeductionOut,
+    PreviewEmployeeLineOut,
+    PreviewEmployeeOut,
+    PreviewOut,
+    PreviewSummaryRow,
+    ReopenIn,
+    ReopenLogOut,
+)
+from app.core.errors import AppError
+from app.core.permissions import Permission, require_permission
+from app.core.scope import ScopeViolation, assert_in_scope
+from app.db.tenant.models.pay import (
+    PayPeriod, PayrollRun, Payslip, PayslipLine, PeriodReopenLog,
+)
+from app.db.tenant.models.people import Employee
+from app.services.payroll_runner import finalise, reopen, run_preview
+
+router = APIRouter(prefix="/payroll/pay-periods", tags=["payroll-pay-periods"])
+
+_DEFAULT_LIMIT = 100
+_MAX_LIMIT = 500
+
+
+def _encode_cursor(uid: uuid.UUID) -> str:
+    raw = json.dumps({"i": str(uid)}, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> uuid.UUID:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        return uuid.UUID(json.loads(raw)["i"])
+    except Exception:
+        raise AppError("invalid_cursor", "The pagination cursor is malformed", 400) from None
+
+
+def _preview_row_from_payslip(payslip: Payslip, employee: Employee) -> PreviewSummaryRow:
+    ctx = payslip.calculation_context or {}
+    warns = ctx.get("attendance_warnings") or []
+    if not isinstance(warns, list):
+        warns = []
+    return PreviewSummaryRow(
+        employee_id=employee.id,
+        employee_code=employee.employee_code,
+        employee_name=f"{employee.first_name} {employee.last_name}".strip(),
+        gross=payslip.gross,
+        paye=payslip.paye,
+        net=payslip.net,
+        warnings=[str(w) for w in warns],
+    )
+
+
+@router.post("", response_model=PayPeriodOut, status_code=201)
+def create_pay_period(
+    body: PayPeriodIn,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_FINALISE))],
+) -> PayPeriodOut:
+    dup = db.scalar(select(PayPeriod).where(PayPeriod.period_key == body.period_key))
+    if dup is not None:
+        raise AppError("period_key_taken", f"period_key {body.period_key!r} already exists", 409)
+    if body.end_date < body.start_date:
+        raise AppError("invalid_range", "end_date must be on or after start_date", 422)
+    if body.pay_date < body.end_date:
+        raise AppError("invalid_pay_date", "pay_date must be on or after end_date", 422)
+    period = PayPeriod(
+        id=uuid.uuid4(),
+        period_key=body.period_key,
+        start_date=body.start_date,
+        end_date=body.end_date,
+        pay_date=body.pay_date,
+        status="open",
+        cutoff_at=body.cutoff_at,
+    )
+    db.add(period)
+    db.commit()
+    return PayPeriodOut.model_validate(period)
+
+
+@router.get("", response_model=PayPeriodListOut)
+def list_pay_periods(
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+    status: str | None = Query(None),
+    limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
+    cursor: str | None = Query(None),
+) -> PayPeriodListOut:
+    q = select(PayPeriod)
+    if status is not None:
+        q = q.where(PayPeriod.status == status)
+    if cursor is not None:
+        q = q.where(PayPeriod.id > _decode_cursor(cursor))
+    q = q.order_by(PayPeriod.id.asc()).limit(limit + 1)
+    rows = list(db.scalars(q).all())
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_cursor = _encode_cursor(rows[-1].id)
+    return PayPeriodListOut(
+        items=[PayPeriodOut.model_validate(r) for r in rows],
+        next_cursor=next_cursor,
+    )
+
+
+@router.get("/{period_id}", response_model=PayPeriodOut)
+def get_pay_period(
+    period_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+) -> PayPeriodOut:
+    row = db.scalar(select(PayPeriod).where(PayPeriod.id == period_id))
+    if row is None:
+        raise AppError("not_found", "Pay period not found", 404)
+    return PayPeriodOut.model_validate(row)
+
+
+@router.post("/{period_id}/preview", response_model=PreviewOut)
+def preview_pay_period(
+    period_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+    limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
+    cursor: str | None = Query(None),
+) -> PreviewOut:
+    period = db.scalar(select(PayPeriod).where(PayPeriod.id == period_id))
+    if period is None:
+        raise AppError("not_found", "Pay period not found", 404)
+
+    run = run_preview(db, user, period)
+    db.commit()
+
+    q = (
+        select(Payslip, Employee)
+        .join(Employee, Employee.id == Payslip.employee_id)
+        .where(Payslip.payroll_run_id == run.id)
+        .order_by(Payslip.id.asc())
+    )
+    if cursor is not None:
+        q = q.where(Payslip.id > _decode_cursor(cursor))
+    q = q.limit(limit + 1)
+    pairs = list(db.execute(q).all())
+    next_cursor = None
+    if len(pairs) > limit:
+        pairs = pairs[:limit]
+        next_cursor = _encode_cursor(pairs[-1][0].id)
+
+    items = [_preview_row_from_payslip(p, e) for p, e in pairs]
+
+    return PreviewOut(
+        run_id=run.id,
+        revision=run.revision,
+        status=run.status,
+        unacknowledged_formulas=run.rules_snapshot.get("unacknowledged_formulas", []),
+        items=items,
+        next_cursor=next_cursor,
+    )
+
+
+@router.get("/{period_id}/preview/{employee_id}", response_model=PreviewEmployeeOut)
+def preview_employee(
+    period_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+) -> PreviewEmployeeOut:
+    period = db.scalar(select(PayPeriod).where(PayPeriod.id == period_id))
+    if period is None:
+        raise AppError("not_found", "Pay period not found", 404)
+
+    try:
+        assert_in_scope(user, employee_id, db)
+    except ScopeViolation:
+        raise AppError("not_found", "Employee not found", 404)
+
+    employee = db.scalar(select(Employee).where(Employee.id == employee_id))
+    if employee is None:
+        raise AppError("not_found", "Employee not found", 404)
+
+    run = db.scalar(
+        select(PayrollRun)
+        .where(PayrollRun.pay_period_id == period.id)
+        .order_by(PayrollRun.revision.desc(), PayrollRun.started_at.desc())
+        .limit(1)
+    )
+    if run is None:
+        raise AppError(
+            "no_preview_run",
+            "No payroll run exists for this period; call POST /preview first",
+            409,
+        )
+
+    ps = db.scalar(
+        select(Payslip).where(
+            Payslip.payroll_run_id == run.id,
+            Payslip.employee_id == employee_id,
+        )
+    )
+    if ps is None:
+        raise AppError(
+            "not_found",
+            "No payslip for this employee in the current run",
+            404,
+        )
+
+    lines_records = list(db.scalars(
+        select(PayslipLine)
+        .where(PayslipLine.payslip_id == ps.id)
+        .order_by(PayslipLine.sort_order.asc())
+    ).all())
+
+    earning_lines = [
+        PreviewEmployeeLineOut(
+            earning_type_code=(l.source_ref or {}).get("earning_type_code", ""),
+            earning_type_name=l.label,
+            rate_source=(l.source_ref or {}).get("rate_source"),
+            amount=l.amount,
+            minutes=(l.source_ref or {}).get("minutes"),
+        )
+        for l in lines_records if l.line_type == "earning"
+    ]
+    deduction_lines = [
+        PreviewEmployeeDeductionOut(
+            deduction_type_code=(l.source_ref or {}).get("deduction_type_code", ""),
+            deduction_type_name=l.label,
+            amount=l.amount,
+        )
+        for l in lines_records
+        if l.line_type == "deduction" and not (l.source_ref or {}).get("deferred")
+    ]
+
+    ctx = ps.calculation_context or {}
+    warns = ctx.get("attendance_warnings") or []
+    if not isinstance(warns, list):
+        warns = []
+
+    return PreviewEmployeeOut(
+        employee_id=employee.id,
+        employee_code=employee.employee_code,
+        employee_name=f"{employee.first_name} {employee.last_name}".strip(),
+        pay_period_id=period.id,
+        revision=run.revision,
+        status=run.status,
+        gross=ps.gross,
+        paye=ps.paye,
+        net=ps.net,
+        warnings=[str(w) for w in warns],
+        lines=earning_lines,
+        deductions=deduction_lines,
+    )
+
+
+@router.post("/{period_id}/finalise", response_model=PayrollRunOut)
+def finalise_pay_period(
+    period_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_FINALISE))],
+    body: FinaliseIn | None = None,
+) -> PayrollRunOut:
+    period = db.scalar(select(PayPeriod).where(PayPeriod.id == period_id))
+    if period is None:
+        raise AppError("not_found", "Pay period not found", 404)
+    ack = body.ack_open_exceptions_reason if body is not None else None
+    run = finalise(db, user, period, ack_open_exceptions_reason=ack)
+    db.commit()
+    return PayrollRunOut.model_validate(run)
+
+
+@router.post("/{period_id}/reopen", response_model=ReopenLogOut)
+def reopen_pay_period(
+    period_id: uuid.UUID,
+    body: ReopenIn,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_REOPEN))],
+) -> ReopenLogOut:
+    period = db.scalar(select(PayPeriod).where(PayPeriod.id == period_id))
+    if period is None:
+        raise AppError("not_found", "Pay period not found", 404)
+    log = reopen(db, user, period, body.reason)
+    db.commit()
+    return ReopenLogOut.model_validate(log)
+
+
+@router.get("/{period_id}/reopen-log", response_model=list[ReopenLogOut])
+def get_reopen_log(
+    period_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+) -> list[ReopenLogOut]:
+    period = db.scalar(select(PayPeriod).where(PayPeriod.id == period_id))
+    if period is None:
+        raise AppError("not_found", "Pay period not found", 404)
+    rows = list(db.scalars(
+        select(PeriodReopenLog).where(PeriodReopenLog.pay_period_id == period_id)
+        .order_by(PeriodReopenLog.occurred_at.asc())
+    ).all())
+    return [ReopenLogOut.model_validate(r) for r in rows]
+=== END FILE: backend/app/api/v1/payroll_pay_periods.py ===
+
+=== FILE: backend/tests/test_payroll_own_payslips.py ===
+"""Chapter 4H B-3: /payroll/payslips/me routes + role matrix."""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from types import SimpleNamespace
+from typing import Iterator
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from app.api.v1.payroll_payslips import (
+    get_my_payslip,
+    get_my_payslip_pdf,
+    list_my_payslips,
+)
+from app.core.errors import AppError
+from app.core.security import hash_password
+from app.db.control.models import Subscriber
+from app.db.control.session import control_session
+from app.db.tenant.models.pay import PayPeriod, PayrollRun, Payslip
+from app.db.tenant.models.people import Employee, User
+from app.services.provisioning import (
+    _drop_tenant_database,
+    _tenant_db_name,
+    provision_tenant,
+)
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    slug = f"ownpay-{uuid.uuid4().hex[:8]}"
+    result = provision_tenant(
+        slug=slug,
+        name="Own Payslips Co",
+        admin_username="admin",
+        admin_password_hash=hash_password("AdminPassword123!"),
+    )
+    try:
+        yield _DisposableTenant(
+            slug=slug,
+            tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        _drop_tenant_database(result.tenant_db_name)
+        with control_session() as s:
+            r = s.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if r is not None:
+                s.delete(r)
+
+
+@pytest.fixture()
+def session(disposable_tenant) -> Iterator[Session]:
+    url = (
+        "postgresql+psycopg://payroll_app:payroll_app_dev_password"
+        f"@localhost:5432/{disposable_tenant.tenant_db_name}"
+    )
+    engine = create_engine(url, future=True)
+    s = Session(bind=engine)
+    try:
+        yield s
+    finally:
+        s.rollback()
+        s.close()
+        engine.dispose()
+
+
+def _mk_employee(session) -> Employee:
+    emp = Employee(
+        employee_code=f"E-{uuid.uuid4().hex[:6]}",
+        first_name="Test",
+        last_name="Emp",
+        hire_date=date(2024, 1, 1),
+        status="active",
+        employee_type="hourly",
+        pay_basis="hourly",
+        pay_frequency="monthly",
+        base_rate=Decimal("100.00"),
+        row_version=1,
+    )
+    session.add(emp)
+    session.flush()
+    return emp
+
+
+def _mk_user(session, *, role: str, employee_id: uuid.UUID | None) -> User:
+    u = User(
+        username=f"{role}-{uuid.uuid4().hex[:6]}",
+        password_hash="x",
+        employee_id=employee_id,
+        role=role,
+        is_active=True,
+        must_change_password=False,
+        failed_attempts=0,
+        row_version=1,
+    )
+    session.add(u)
+    session.flush()
+    return u
+
+
+def _mk_period(session, period_key="2026-01", pay_date=None) -> PayPeriod:
+    p = PayPeriod(
+        id=uuid.uuid4(),
+        period_key=period_key,
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 1, 31),
+        pay_date=pay_date or date(2026, 1, 31),
+        status="locked",
+        cutoff_at=datetime(2026, 1, 31, 23, 59, tzinfo=timezone.utc),
+    )
+    session.add(p)
+    session.flush()
+    return p
+
+
+def _mk_run(session, period) -> PayrollRun:
+    run = PayrollRun(
+        id=uuid.uuid4(),
+        pay_period_id=period.id,
+        kind="final",
+        revision=1,
+        status="completed",
+        rules_snapshot={},
+    )
+    session.add(run)
+    session.flush()
+    return run
+
+
+def _mk_payslip(
+    session, run, period, emp, *, status="current", net="890.00",
+) -> Payslip:
+    ps = Payslip(
+        id=uuid.uuid4(),
+        payroll_run_id=run.id,
+        pay_period_id=period.id,
+        employee_id=emp.id,
+        revision=run.revision,
+        status=status,
+        gross=Decimal("1000.00"),
+        pre_tax_deductions=Decimal("0"),
+        taxable_income=Decimal("1000.00"),
+        paye=Decimal("100.00"),
+        uif_employee=Decimal("10.00"),
+        uif_employer=Decimal("10.00"),
+        sdl=Decimal("10.00"),
+        other_deductions=Decimal("0"),
+        reimbursements=Decimal("0"),
+        net=Decimal(net),
+        employer_costs={},
+        snapshot={},
+        calculation_context={},
+    )
+    session.add(ps)
+    session.flush()
+    return ps
+
+
+def _ctx_one_own_payslip(session):
+    emp = _mk_employee(session)
+    user = _mk_user(session, role="employee", employee_id=emp.id)
+    period = _mk_period(session)
+    run = _mk_run(session, period)
+    ps = _mk_payslip(session, run, period, emp)
+    return emp, user, period, ps
+
+
+def test_me_lists_only_own(session):
+    emp1 = _mk_employee(session)
+    emp2 = _mk_employee(session)
+    user1 = _mk_user(session, role="employee", employee_id=emp1.id)
+
+    p1 = _mk_period(session, period_key="2026-01", pay_date=date(2026, 1, 31))
+    r1 = _mk_run(session, p1)
+    ps1 = _mk_payslip(session, r1, p1, emp1)
+    ps2 = _mk_payslip(session, r1, p1, emp2)
+
+    out = list_my_payslips(session, user1, limit=100, cursor=None)
+    ids = [it.id for it in out.items]
+    assert ps1.id in ids
+    assert ps2.id not in ids
+
+
+def test_me_excludes_preview_status(session):
+    emp = _mk_employee(session)
+    user = _mk_user(session, role="employee", employee_id=emp.id)
+    period = _mk_period(session)
+    run = _mk_run(session, period)
+    _mk_payslip(session, run, period, emp, status="preview")
+    _mk_payslip(session, run, period, emp, status="current")
+
+    out = list_my_payslips(session, user, limit=100, cursor=None)
+    assert all(it.status != "preview" for it in out.items)
+
+
+def test_me_404_when_no_employee_record(session):
+    user = _mk_user(session, role="employee", employee_id=None)
+    with pytest.raises(AppError) as exc:
+        list_my_payslips(session, user, limit=100, cursor=None)
+    assert exc.value.code == "no_employee_record"
+
+
+def test_me_detail_404_for_other_employee_payslip(session):
+    emp1 = _mk_employee(session)
+    emp2 = _mk_employee(session)
+    user1 = _mk_user(session, role="employee", employee_id=emp1.id)
+    period = _mk_period(session)
+    run = _mk_run(session, period)
+    other_ps = _mk_payslip(session, run, period, emp2)
+
+    with pytest.raises(AppError) as exc:
+        get_my_payslip(other_ps.id, session, user1)
+    assert exc.value.code == "not_found"
+
+
+def test_me_pdf_404_for_other_employee_payslip(session):
+    emp1 = _mk_employee(session)
+    emp2 = _mk_employee(session)
+    user1 = _mk_user(session, role="employee", employee_id=emp1.id)
+    period = _mk_period(session)
+    run = _mk_run(session, period)
+    other_ps = _mk_payslip(session, run, period, emp2)
+
+    with pytest.raises(AppError) as exc:
+        get_my_payslip_pdf(other_ps.id, session, user1)
+    assert exc.value.code == "not_found"
+
+
+def test_me_pagination_cursor(session):
+    emp = _mk_employee(session)
+    user = _mk_user(session, role="employee", employee_id=emp.id)
+    for i in range(3):
+        p = _mk_period(
+            session,
+            period_key=f"2026-{i + 1:02d}",
+            pay_date=date(2026, i + 1, 28),
+        )
+        r = _mk_run(session, p)
+        _mk_payslip(session, r, p, emp)
+
+    first = list_my_payslips(session, user, limit=2, cursor=None)
+    assert len(first.items) == 2
+    assert first.next_cursor is not None
+
+    second = list_my_payslips(session, user, limit=2, cursor=first.next_cursor)
+    assert len(second.items) >= 1
+    # Different payslips between pages
+    assert set(it.id for it in first.items) & set(it.id for it in second.items) == set()
+
+
+def test_me_not_parsed_as_id_by_route(session):
+    """Round-2 §12: 'me' must not be consumed by /{payslip_id}.
+
+    FastAPI registration order guarantees /me is matched before
+    /{payslip_id}. This test proves it in two ways: (a) the /me route
+    exists on the router (import-time check), (b) calling list_my_payslips
+    on the current user does not raise 'uuid parse' errors.
+    """
+    from app.api.v1.payroll_payslips import router as payslip_router
+
+    paths = [r.path for r in payslip_router.routes]
+    assert "/payroll/payslips/me" in paths
+    idx_me = paths.index("/payroll/payslips/me")
+    idx_id = paths.index("/payroll/payslips/{payslip_id}")
+    assert idx_me < idx_id, "/me must be registered before /{payslip_id}"
+
+    emp = _mk_employee(session)
+    user = _mk_user(session, role="employee", employee_id=emp.id)
+    out = list_my_payslips(session, user, limit=100, cursor=None)
+    assert out is not None  # no UUID-parse crash
+
+
+def test_me_employee_can_read_own(session):
+    _emp, user, _period, _ps = _ctx_one_own_payslip(session)
+    out = list_my_payslips(session, user, limit=100, cursor=None)
+    assert out is not None
+
+
+def test_me_manager_can_read_own(session):
+    emp, _u, _p, _ps = _ctx_one_own_payslip(session)
+    manager_user = _mk_user(session, role="manager", employee_id=emp.id)
+    out = list_my_payslips(session, manager_user, limit=100, cursor=None)
+    assert out is not None
+
+
+def test_me_hr_can_read_own(session):
+    emp, _u, _p, _ps = _ctx_one_own_payslip(session)
+    hr_user = _mk_user(session, role="hr", employee_id=emp.id)
+    out = list_my_payslips(session, hr_user, limit=100, cursor=None)
+    assert out is not None
+
+
+def test_me_payroll_admin_can_read_own(session):
+    emp, _u, _p, _ps = _ctx_one_own_payslip(session)
+    admin_user = _mk_user(session, role="payroll_admin", employee_id=emp.id)
+    out = list_my_payslips(session, admin_user, limit=100, cursor=None)
+    assert out is not None
+
+
+def test_me_auditor_gets_403(session):
+    emp = _mk_employee(session)
+    auditor_user = _mk_user(session, role="auditor", employee_id=emp.id)
+    with pytest.raises(AppError) as exc:
+        list_my_payslips(session, auditor_user, limit=100, cursor=None)
+    assert exc.value.code == "forbidden"
+    assert (exc.value.details or {}).get("role") == "auditor"
+=== END FILE: backend/tests/test_payroll_own_payslips.py ===
+
+=== FILE: backend/tests/test_payroll_preview_employee.py ===
+"""Chapter 4H B-3.1: single-employee preview endpoint tests."""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Iterator
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from app.api.v1.payroll_pay_periods import preview_employee
+from app.core.errors import AppError
+from app.core.security import hash_password
+from app.db.control.models import Subscriber
+from app.db.control.session import control_session
+from app.db.tenant.models.pay import PayPeriod, PayrollRun, Payslip, PayslipLine
+from app.db.tenant.models.people import Employee, User
+from app.services.provisioning import (
+    _drop_tenant_database,
+    _tenant_db_name,
+    provision_tenant,
+)
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    slug = f"prev1-{uuid.uuid4().hex[:8]}"
+    result = provision_tenant(
+        slug=slug,
+        name="Preview 1 Co",
+        admin_username="admin",
+        admin_password_hash=hash_password("AdminPassword123!"),
+    )
+    try:
+        yield _DisposableTenant(
+            slug=slug,
+            tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        _drop_tenant_database(result.tenant_db_name)
+        with control_session() as s:
+            r = s.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if r is not None:
+                s.delete(r)
+
+
+@pytest.fixture()
+def session(disposable_tenant) -> Iterator[Session]:
+    url = (
+        "postgresql+psycopg://payroll_app:payroll_app_dev_password"
+        f"@localhost:5432/{disposable_tenant.tenant_db_name}"
+    )
+    engine = create_engine(url, future=True)
+    s = Session(bind=engine)
+    try:
+        yield s
+    finally:
+        s.rollback()
+        s.close()
+        engine.dispose()
+
+
+def _admin(session) -> User:
+    admin = session.scalar(select(User).where(User.username == "admin"))
+    assert admin is not None
+    return admin
+
+
+def _mk_employee(session) -> Employee:
+    emp = Employee(
+        employee_code=f"E-{uuid.uuid4().hex[:6]}",
+        first_name="Test",
+        last_name="Emp",
+        hire_date=date(2024, 1, 1),
+        status="active",
+        employee_type="hourly",
+        pay_basis="hourly",
+        pay_frequency="monthly",
+        base_rate=Decimal("100.00"),
+        row_version=1,
+    )
+    session.add(emp)
+    session.flush()
+    return emp
+
+
+def _mk_period(session) -> PayPeriod:
+    p = PayPeriod(
+        id=uuid.uuid4(),
+        period_key=f"P-{uuid.uuid4().hex[:6]}",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 1, 31),
+        pay_date=date(2026, 1, 31),
+        status="open",
+        cutoff_at=datetime(2026, 1, 31, 23, 59, tzinfo=timezone.utc),
+    )
+    session.add(p)
+    session.flush()
+    return p
+
+
+def _mk_run(session, period) -> PayrollRun:
+    run = PayrollRun(
+        id=uuid.uuid4(),
+        pay_period_id=period.id,
+        kind="preview",
+        revision=1,
+        status="completed",
+        rules_snapshot={},
+    )
+    session.add(run)
+    session.flush()
+    return run
+
+
+def _mk_payslip(session, run, period, emp) -> Payslip:
+    ps = Payslip(
+        id=uuid.uuid4(),
+        payroll_run_id=run.id,
+        pay_period_id=period.id,
+        employee_id=emp.id,
+        revision=1,
+        status="preview",
+        gross=Decimal("800.00"),
+        pre_tax_deductions=Decimal("0"),
+        taxable_income=Decimal("800.00"),
+        paye=Decimal("60.00"),
+        uif_employee=Decimal("8.00"),
+        uif_employer=Decimal("8.00"),
+        sdl=Decimal("8.00"),
+        other_deductions=Decimal("0"),
+        reimbursements=Decimal("0"),
+        net=Decimal("732.00"),
+        employer_costs={},
+        snapshot={},
+        calculation_context={
+            "attendance_warnings": ["test-warn-1"],
+        },
+    )
+    session.add(ps)
+    session.flush()
+    # Two earning lines and one deduction to prove line surfacing
+    session.add(PayslipLine(
+        id=uuid.uuid4(), payslip_id=ps.id,
+        line_type="earning", step="gross", sort_order=0,
+        label="Normal Hours (480 min)", amount=Decimal("800.00"),
+        source_ref={
+            "attendance_derived": True,
+            "earning_type_code": "hourly_normal",
+            "rate_source": "attendance",
+            "minutes": 480,
+            "amount": "800.00",
+        },
+    ))
+    session.add(PayslipLine(
+        id=uuid.uuid4(), payslip_id=ps.id,
+        line_type="deduction", step="statutory", sort_order=300,
+        label="UIF (employee)", amount=Decimal("8.00"),
+        source_ref={"statutory": "uif", "amount": "8.00"},
+    ))
+    session.flush()
+    return ps
+
+
+def test_preview_employee_returns_single_row(session):
+    admin = _admin(session)
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    run = _mk_run(session, period)
+    _mk_payslip(session, run, period, emp)
+    session.commit()
+
+    out = preview_employee(period.id, emp.id, session, admin)
+    assert out.employee_id == emp.id
+    assert out.employee_code == emp.employee_code
+    assert out.gross == Decimal("800.00")
+    assert out.net == Decimal("732.00")
+    assert out.warnings == ["test-warn-1"]
+    assert len(out.lines) == 1
+    assert out.lines[0].earning_type_code == "hourly_normal"
+    assert out.lines[0].minutes == 480
+    assert out.lines[0].amount == Decimal("800.00")
+    # UIF deduction surfaced
+    uif = [d for d in out.deductions if d.deduction_type_name == "UIF (employee)"]
+    assert len(uif) == 1
+    assert uif[0].amount == Decimal("8.00")
+
+
+def test_preview_employee_404_for_unknown_employee(session):
+    admin = _admin(session)
+    _mk_period(session)
+    session.commit()
+    period = session.scalar(select(PayPeriod))
+    bogus = uuid.uuid4()
+    with pytest.raises(AppError) as exc:
+        preview_employee(period.id, bogus, session, admin)
+    assert exc.value.code == "not_found"
+
+
+def test_preview_employee_404_for_unknown_period(session):
+    admin = _admin(session)
+    emp = _mk_employee(session)
+    session.commit()
+    with pytest.raises(AppError) as exc:
+        preview_employee(uuid.uuid4(), emp.id, session, admin)
+    assert exc.value.code == "not_found"
+
+
+def test_preview_employee_409_when_no_run(session):
+    admin = _admin(session)
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    session.commit()
+
+    with pytest.raises(AppError) as exc:
+        preview_employee(period.id, emp.id, session, admin)
+    assert exc.value.code == "no_preview_run"
+
+
+def test_preview_employee_matches_expected_shape(session):
+    admin = _admin(session)
+    emp = _mk_employee(session)
+    period = _mk_period(session)
+    run = _mk_run(session, period)
+    _mk_payslip(session, run, period, emp)
+    session.commit()
+
+    out = preview_employee(period.id, emp.id, session, admin)
+    assert out.pay_period_id == period.id
+    assert out.revision == 1
+    assert out.status == "completed"
+    assert isinstance(out.lines, list)
+    assert isinstance(out.deductions, list)
+=== END FILE: backend/tests/test_payroll_preview_employee.py ===
+
+=== FILE: backend/tests/test_payroll_pdf_headers_audit.py ===
+"""Chapter 4H B-3 amendment §14: PDF Cache-Control, generic filename, audit."""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Iterator
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from app.api.v1.payroll_payslips import get_payslip_pdf
+from app.core.security import hash_password
+from app.db.control.models import Subscriber
+from app.db.control.session import control_session
+from app.db.tenant.models.pay import PayPeriod, PayrollRun, Payslip
+from app.db.tenant.models.people import Employee, User
+from app.db.tenant.models.platform import AuditLog
+from app.services.provisioning import (
+    _drop_tenant_database,
+    _tenant_db_name,
+    provision_tenant,
+)
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    slug = f"pdfau-{uuid.uuid4().hex[:8]}"
+    result = provision_tenant(
+        slug=slug,
+        name="PDF Audit Co",
+        admin_username="admin",
+        admin_password_hash=hash_password("AdminPassword123!"),
+    )
+    try:
+        yield _DisposableTenant(
+            slug=slug,
+            tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        _drop_tenant_database(result.tenant_db_name)
+        with control_session() as s:
+            r = s.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if r is not None:
+                s.delete(r)
+
+
+@pytest.fixture()
+def session(disposable_tenant) -> Iterator[Session]:
+    url = (
+        "postgresql+psycopg://payroll_app:payroll_app_dev_password"
+        f"@localhost:5432/{disposable_tenant.tenant_db_name}"
+    )
+    engine = create_engine(url, future=True)
+    s = Session(bind=engine)
+    try:
+        yield s
+    finally:
+        s.rollback()
+        s.close()
+        engine.dispose()
+
+
+def _mk_employee(session) -> Employee:
+    emp = Employee(
+        employee_code=f"E-{uuid.uuid4().hex[:6]}",
+        first_name="Ada",
+        last_name="Mokoena",
+        hire_date=date(2024, 1, 1),
+        status="active",
+        employee_type="hourly",
+        pay_basis="hourly",
+        pay_frequency="monthly",
+        base_rate=Decimal("100.00"),
+        row_version=1,
+    )
+    session.add(emp)
+    session.flush()
+    return emp
+
+
+def _mk_user(session, *, role: str, employee_id: uuid.UUID | None) -> User:
+    u = User(
+        username=f"{role}-{uuid.uuid4().hex[:6]}",
+        password_hash="x",
+        employee_id=employee_id,
+        role=role,
+        is_active=True,
+        must_change_password=False,
+        failed_attempts=0,
+        row_version=1,
+    )
+    session.add(u)
+    session.flush()
+    return u
+
+
+def _mk_payslip(session, emp) -> Payslip:
+    period = PayPeriod(
+        id=uuid.uuid4(),
+        period_key=f"P-{uuid.uuid4().hex[:6]}",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 1, 31),
+        pay_date=date(2026, 1, 31),
+        status="locked",
+        cutoff_at=datetime(2026, 1, 31, 23, 59, tzinfo=timezone.utc),
+    )
+    session.add(period)
+    session.flush()
+    run = PayrollRun(
+        id=uuid.uuid4(),
+        pay_period_id=period.id,
+        kind="final",
+        revision=1,
+        status="completed",
+        rules_snapshot={},
+    )
+    session.add(run)
+    session.flush()
+    ps = Payslip(
+        id=uuid.uuid4(),
+        payroll_run_id=run.id,
+        pay_period_id=period.id,
+        employee_id=emp.id,
+        revision=1,
+        status="current",
+        gross=Decimal("1000.00"),
+        pre_tax_deductions=Decimal("0"),
+        taxable_income=Decimal("1000.00"),
+        paye=Decimal("100.00"),
+        uif_employee=Decimal("10.00"),
+        uif_employer=Decimal("10.00"),
+        sdl=Decimal("10.00"),
+        other_deductions=Decimal("0"),
+        reimbursements=Decimal("0"),
+        net=Decimal("890.00"),
+        employer_costs={},
+        snapshot={},
+        calculation_context={},
+    )
+    session.add(ps)
+    session.flush()
+    return ps
+
+
+def test_pdf_has_cache_control_no_store(session):
+    emp = _mk_employee(session)
+    admin = _mk_user(session, role="payroll_admin", employee_id=None)
+    ps = _mk_payslip(session, emp)
+    session.commit()
+
+    resp = get_payslip_pdf(ps.id, session, admin)
+    assert resp.headers["Cache-Control"] == "no-store"
+    assert "Content-Disposition" in resp.headers
+
+
+def test_pdf_uses_generic_filename(session):
+    emp = _mk_employee(session)
+    admin = _mk_user(session, role="payroll_admin", employee_id=None)
+    ps = _mk_payslip(session, emp)
+    session.commit()
+
+    resp = get_payslip_pdf(ps.id, session, admin)
+    cd = resp.headers["Content-Disposition"]
+    assert 'filename="payslip.pdf"' in cd
+    assert emp.employee_code not in cd
+
+
+def test_pdf_writes_audit_when_downloaded_by_other(session):
+    emp = _mk_employee(session)
+    admin = _mk_user(session, role="payroll_admin", employee_id=None)
+    ps = _mk_payslip(session, emp)
+    session.commit()
+
+    before = session.scalar(select(AuditLog).where(
+        AuditLog.action == "payslip.pdf_download_by_other"
+    ))
+    assert before is None
+
+    get_payslip_pdf(ps.id, session, admin)
+
+    rows = list(session.scalars(select(AuditLog).where(
+        AuditLog.action == "payslip.pdf_download_by_other"
+    )).all())
+    assert len(rows) == 1
+    assert rows[0].entity_id == str(ps.id)
+
+
+def test_pdf_no_audit_when_owner_downloads(session):
+    emp = _mk_employee(session)
+    owner = _mk_user(session, role="employee", employee_id=emp.id)
+    ps = _mk_payslip(session, emp)
+    session.commit()
+
+    get_payslip_pdf(ps.id, session, owner)
+
+    rows = list(session.scalars(select(AuditLog).where(
+        AuditLog.action == "payslip.pdf_download_by_other"
+    )).all())
+    assert rows == []
+=== END FILE: backend/tests/test_payroll_pdf_headers_audit.py ===
+
+=== FILE: docs/STATE.md ===
+# Backend state
+
+## Payroll settings approval flow (gap)
+Money-affecting payroll settings (`sdl_applies`, `net_pay_floor`, and the
+Chapter 4H closing fields added by `ten_0021`) are changed via direct
+`PATCH /payroll/settings` by a user holding `PAYROLL_FINALISE`. There is no
+separate approval workflow. Before/after values are audited.
+
+## System earning types auto-seed
+**Closed in B4-02f.** `provision_tenant` seeds 13 system earning types at
+provisioning time.
+
+## Chapter 4H B-4 progress — core complete
+- **B4-01** (committed): migration `ten_0021`, `PayrollSettings` extension.
+- **B4-02a** (committed): demo seed pay setup.
+- **B4-02b** (committed): 13 system earning types.
+- **B4-02c.1** (committed): attendance-to-earnings integration in
+  `payroll_runner`.
+- **B4-02c.2** (committed): demo seed `ShiftRateRule` rows + 16 tests.
+- **B4-02d.1** (committed): finalise open-exceptions ack.
+- **B4-02e** (committed): demo PDF watermark.
+- **B4-02f** (committed): provision auto-seeds 13 system types.
+- **B4-02d.2** (committed): end-to-end demo preview + non-demo 409.
+
+## Chapter 4H B-3 — committed in this bundle
+- **B-3.1** `GET /payroll/pay-periods/{period_id}/preview/{employee_id}`
+  (single-employee preview detail; `PAYROLL_PREVIEW`).
+- **B-3.2** `GET /payroll/payslips/me`, `/me/{id}`, `/me/{id}/pdf`
+  (`SELF_VIEW`, self-service, own payslips only, finalised only).
+  - Registered BEFORE `/{payslip_id}` so `me` is not parsed as a UUID
+    (round-2 §12, tested in `test_me_not_parsed_as_id_by_route`).
+  - Auditor role refused with 403 (round-2 §13, tested per-role).
+  - `no_employee_record` (404) for users without `employee_id`.
+- **B-3.3** 4G-b paylip endpoints unchanged (already implemented,
+  verified by content).
+- **B-3.4** PDF responses add `Cache-Control: no-store` and generic
+  `filename="payslip.pdf"`; the generic `/{payslip_id}/pdf` audits when
+  the caller is not the payslip's employee (round-2 §14).
+- `payroll_runner._write_payslip` now persists one `PayslipLine` per
+  earning/deduction so the new detail endpoint can surface line breakdown
+  without recomputation.
+
+## Chapter 4H remaining
+- **B4-03 (4G-c)**: golden payslip-case framework — deferred.
+- **B-6**: multi-value type filter on `GET /attendance/exceptions` —
+  pending.
+- **14 seed tests**: session-scoped seed-once fixture — pending.
+=== END FILE: docs/STATE.md ===

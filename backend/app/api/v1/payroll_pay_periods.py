@@ -1,12 +1,8 @@
-"""Pay period endpoints (Chapter 4 Bundle 004b-a + Chapter 4H B-4d).
+"""Pay period endpoints (Chapter 4 Bundle 004b-a + Chapter 4H B-4d + B-3).
 
-B-4d adds:
-  - POST .../finalise accepts an optional body (FinaliseIn) to acknowledge
-    open exceptions in the period (round-2 §1). No body / blank reason =
-    no acknowledgement; finalise refuses with 409 open_exceptions_in_period
-    when open exceptions exist.
-  - POST .../preview surfaces per-employee attendance_warnings from
-    Payslip.calculation_context (round-1 §3 UI surfacing).
+B-3 adds:
+  GET /payroll/pay-periods/{period_id}/preview/{employee_id}
+    Read-only single-employee preview from the latest persisted run.
 """
 from __future__ import annotations
 
@@ -25,6 +21,9 @@ from app.api.v1.payroll_pay_periods_schemas import (
     PayPeriodListOut,
     PayPeriodOut,
     PayrollRunOut,
+    PreviewEmployeeDeductionOut,
+    PreviewEmployeeLineOut,
+    PreviewEmployeeOut,
     PreviewOut,
     PreviewSummaryRow,
     ReopenIn,
@@ -32,7 +31,10 @@ from app.api.v1.payroll_pay_periods_schemas import (
 )
 from app.core.errors import AppError
 from app.core.permissions import Permission, require_permission
-from app.db.tenant.models.pay import PayPeriod, PayrollRun, Payslip, PeriodReopenLog
+from app.core.scope import ScopeViolation, assert_in_scope
+from app.db.tenant.models.pay import (
+    PayPeriod, PayrollRun, Payslip, PayslipLine, PeriodReopenLog,
+)
 from app.db.tenant.models.people import Employee
 from app.services.payroll_runner import finalise, reopen, run_preview
 
@@ -57,13 +59,6 @@ def _decode_cursor(cursor: str) -> uuid.UUID:
 
 
 def _preview_row_from_payslip(payslip: Payslip, employee: Employee) -> PreviewSummaryRow:
-    """Round-1 §3: surface attendance_warnings from the payslip context.
-
-    Payslips written by the runner carry `calculation_context` as a dict
-    with at minimum `attendance_warnings` (may be empty) and
-    `attendance_inputs`. A payslip from an older run may not carry it —
-    treat missing key as empty list.
-    """
     ctx = payslip.calculation_context or {}
     warns = ctx.get("attendance_warnings") or []
     if not isinstance(warns, list):
@@ -182,6 +177,99 @@ def preview_pay_period(
         unacknowledged_formulas=run.rules_snapshot.get("unacknowledged_formulas", []),
         items=items,
         next_cursor=next_cursor,
+    )
+
+
+@router.get("/{period_id}/preview/{employee_id}", response_model=PreviewEmployeeOut)
+def preview_employee(
+    period_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+) -> PreviewEmployeeOut:
+    period = db.scalar(select(PayPeriod).where(PayPeriod.id == period_id))
+    if period is None:
+        raise AppError("not_found", "Pay period not found", 404)
+
+    try:
+        assert_in_scope(user, employee_id, db)
+    except ScopeViolation:
+        raise AppError("not_found", "Employee not found", 404)
+
+    employee = db.scalar(select(Employee).where(Employee.id == employee_id))
+    if employee is None:
+        raise AppError("not_found", "Employee not found", 404)
+
+    run = db.scalar(
+        select(PayrollRun)
+        .where(PayrollRun.pay_period_id == period.id)
+        .order_by(PayrollRun.revision.desc(), PayrollRun.started_at.desc())
+        .limit(1)
+    )
+    if run is None:
+        raise AppError(
+            "no_preview_run",
+            "No payroll run exists for this period; call POST /preview first",
+            409,
+        )
+
+    ps = db.scalar(
+        select(Payslip).where(
+            Payslip.payroll_run_id == run.id,
+            Payslip.employee_id == employee_id,
+        )
+    )
+    if ps is None:
+        raise AppError(
+            "not_found",
+            "No payslip for this employee in the current run",
+            404,
+        )
+
+    lines_records = list(db.scalars(
+        select(PayslipLine)
+        .where(PayslipLine.payslip_id == ps.id)
+        .order_by(PayslipLine.sort_order.asc())
+    ).all())
+
+    earning_lines = [
+        PreviewEmployeeLineOut(
+            earning_type_code=(l.source_ref or {}).get("earning_type_code", ""),
+            earning_type_name=l.label,
+            rate_source=(l.source_ref or {}).get("rate_source"),
+            amount=l.amount,
+            minutes=(l.source_ref or {}).get("minutes"),
+        )
+        for l in lines_records if l.line_type == "earning"
+    ]
+    deduction_lines = [
+        PreviewEmployeeDeductionOut(
+            deduction_type_code=(l.source_ref or {}).get("deduction_type_code", ""),
+            deduction_type_name=l.label,
+            amount=l.amount,
+        )
+        for l in lines_records
+        if l.line_type == "deduction" and not (l.source_ref or {}).get("deferred")
+    ]
+
+    ctx = ps.calculation_context or {}
+    warns = ctx.get("attendance_warnings") or []
+    if not isinstance(warns, list):
+        warns = []
+
+    return PreviewEmployeeOut(
+        employee_id=employee.id,
+        employee_code=employee.employee_code,
+        employee_name=f"{employee.first_name} {employee.last_name}".strip(),
+        pay_period_id=period.id,
+        revision=run.revision,
+        status=run.status,
+        gross=ps.gross,
+        paye=ps.paye,
+        net=ps.net,
+        warnings=[str(w) for w in warns],
+        lines=earning_lines,
+        deductions=deduction_lines,
     )
 
 
