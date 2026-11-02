@@ -553,6 +553,7 @@ def _backfill_exceptions(
     types_missing = [
         "missing_in", "low_confidence", "overtime_unapproved",
         "duplicate", "device_clock_gap", "employee_query",
+        "absent_expected", "too_long",
     ]
     idx = 0
     for t in types_missing:
@@ -575,7 +576,7 @@ def _backfill_exceptions(
 def _seed_adjustments(db, employees: list[Employee], admin: User | None, start_date: date) -> None:
     adj_admin_id = getattr(admin, "id", None)
     for i, emp in enumerate(employees[:2]):
-        d = start_date + timedelta(days=i)
+        d = start_date + timedelta(days=15 + i)
         try:
             _persist_adjustment(
                 db,
