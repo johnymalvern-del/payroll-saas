@@ -18,7 +18,7 @@ import {
   type AdjustmentOutcome,
 } from "../../api/adjustments";
 import { fetchReasonCodes } from "../../api/reasonCodes";
-import { DEFAULT_SITE_TZ } from "../../lib/config";
+import { getSiteTz } from "../../lib/config";
 import { strings } from "../../lib/strings";
 
 dayjs.extend(utc);
@@ -42,7 +42,7 @@ type Props = {
 
 function toTimeInput(value: string | null | undefined): string {
   if (!value) return "";
-  const d = dayjs(value).tz(DEFAULT_SITE_TZ);
+  const d = dayjs(value).tz(getSiteTz());
   return d.isValid() ? d.format("HH:mm") : "";
 }
 
@@ -102,8 +102,8 @@ export function AdjustmentForm({
     let timeInIso: string | null = null;
     let timeOutIso: string | null = null;
     if (requiresTimes && timeIn && timeOut) {
-      const tin = dayjs.tz(`${workDate}T${timeIn}:00`, DEFAULT_SITE_TZ);
-      const toutBase = dayjs.tz(`${workDate}T${timeOut}:00`, DEFAULT_SITE_TZ);
+      const tin = dayjs.tz(`${workDate}T${timeIn}:00`, getSiteTz());
+      const toutBase = dayjs.tz(`${workDate}T${timeOut}:00`, getSiteTz());
       if (!tin.isValid() || !toutBase.isValid()) {
         setError(strings.adjustments.timesRequired);
         return;

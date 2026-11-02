@@ -30,7 +30,7 @@ import {
 } from "../api/adjustments";
 import { fetchReasonCodes } from "../api/reasonCodes";
 import { mapErrorCode } from "../api/errors";
-import { DEFAULT_SITE_TZ } from "../lib/config";
+import { getSiteTz } from "../lib/config";
 import { strings } from "../lib/strings";
 
 dayjs.extend(utc);
@@ -77,8 +77,8 @@ function buildItem(
   note: string,
 ): BulkAdjustItemIn {
   if (outcome === "worked" && timeIn && timeOut) {
-    const tin = dayjs.tz(`${dateStr}T${timeIn}:00`, DEFAULT_SITE_TZ);
-    let tout = dayjs.tz(`${dateStr}T${timeOut}:00`, DEFAULT_SITE_TZ);
+    const tin = dayjs.tz(`${dateStr}T${timeIn}:00`, getSiteTz());
+    let tout = dayjs.tz(`${dateStr}T${timeOut}:00`, getSiteTz());
     if (!tout.isAfter(tin)) tout = tout.add(1, "day");
     return {
       employee_id: employeeId,
