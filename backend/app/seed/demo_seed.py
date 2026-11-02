@@ -1,26 +1,14 @@
 """Demo seed for tenant-demo (B-2).
 
 Uses the real engine end-to-end:
-  - punches via app.api.v1.punches._process_punch (calls recompute_day per punch)
+  - country_calendar pre-populated (ZA fixed-date public holidays)
+  - punches via app.api.v1.punches._process_punch
   - adjustments via app.api.v1.attendance_engine._persist_adjustment
   - days + exceptions via ensure_days + recompute_day
   - change requests via app.services.payroll_change_request.submit_change_request
   - tenant provisioning via app.services.provisioning.provision_tenant
 
-Exception types: only real types are used. The engine naturally generates
-missing_out, too_long, absent_expected, no_shift_match. The remaining six
-(missing_in, low_confidence, overtime_unapproved, duplicate, device_clock_gap,
-employee_query) are backfilled with real-type ExceptionItem rows so every
-type is represented at least twice.
-
 Refuses when environment in ("staging", "production").
-
-Usage:
-  python -m app.seed.demo_seed              # default --keep
-  python -m app.seed.demo_seed --reset
-  python -m app.seed.demo_seed --keep
-
-Prints the one-time device API key to stdout (hash-only on disk).
 """
 from __future__ import annotations
 
@@ -47,6 +35,7 @@ from app.db.control.models import Subscriber
 from app.db.control.session import control_session
 from app.db.tenant.models.attendance import (
     AttendanceDay,
+    CountryCalendar,
     EmployeeWorkPattern,
     ExceptionItem,
     Shift,
@@ -67,13 +56,10 @@ from app.services.provisioning import (
 )
 
 
-# Slug must match ^[a-z0-9][a-z0-9-]{1,60}$ (backend regex) — hyphens, not
-# underscores. The end-user-facing tenant slug is "tenant-demo".
 SLUG = "tenant-demo"
 SITE_TZ = "Africa/Johannesburg"
 DEV_PASSWORD_PREFIX = "devpass_"
 
-# 20 fictional South African names (first + last).
 NAMES: list[tuple[str, str]] = [
     ("Ada", "Mokoena"),
     ("Sipho", "Dlamini"),
@@ -104,10 +90,23 @@ ROLES_EXTRA = [
     ("employee", "employee"),
 ]
 
+# ZA public holidays with legally fixed calendar dates (Public Holidays Act
+# 36 of 1994). Moving holidays (Good Friday, Family Day) omitted on purpose:
+# an absent row is treated as a normal weekday (safe); a guessed date would
+# misclassify a day.
+_FIXED_ZA_HOLIDAYS = [
+    ((1, 1), "New Year's Day"),
+    ((3, 21), "Human Rights Day"),
+    ((4, 27), "Freedom Day"),
+    ((5, 1), "Workers' Day"),
+    ((6, 16), "Youth Day"),
+    ((8, 9), "National Women's Day"),
+    ((9, 24), "Heritage Day"),
+    ((12, 16), "Day of Reconciliation"),
+    ((12, 25), "Christmas Day"),
+    ((12, 26), "Day of Goodwill"),
+]
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _tz() -> ZoneInfo:
     return ZoneInfo(SITE_TZ)
@@ -166,9 +165,29 @@ def _punch(
     )
 
 
-# ---------------------------------------------------------------------------
-# Seed phases
-# ---------------------------------------------------------------------------
+def _seed_country_calendar(db, years: list[int]) -> int:
+    existing = {
+        (r.country_code, r.holiday_date)
+        for r in db.scalars(
+            select(CountryCalendar).where(CountryCalendar.country_code == "ZA")
+        ).all()
+    }
+    added = 0
+    for y in years:
+        for (mm, dd), name in _FIXED_ZA_HOLIDAYS:
+            hd = date(y, mm, dd)
+            if ("ZA", hd) in existing:
+                continue
+            db.add(CountryCalendar(
+                country_code="ZA",
+                holiday_date=hd,
+                name=name,
+                source_ref="seed:fixed-date",
+            ))
+            added += 1
+    db.flush()
+    return added
+
 
 def _seed_org(db) -> tuple[Company, list[Site], list[Department]]:
     company = db.scalar(select(Company))
@@ -243,7 +262,7 @@ def _seed_work_pattern(db, shift: Shift) -> WorkPattern:
     wp = WorkPattern(
         name="Mon-Fri Day",
         cycle_length_days=7,
-        anchor_date=date(2025, 1, 6),  # a Monday, so index 0=Mon
+        anchor_date=date(2025, 1, 6),
         is_active=True,
         row_version=1,
     )
@@ -296,33 +315,6 @@ def _seed_employees(db, sites, deps, wp) -> list[Employee]:
     return employees
 
 
-def _seed_users(db, employees: list[Employee]) -> dict[str, User]:
-    users: dict[str, User] = {}
-    with tenant_session(_tenant_db_name(SLUG)) as ts:
-        # The admin user already exists (username="admin", role="payroll_admin").
-        admin = ts.scalar(select(User).where(User.username == "admin"))
-        if admin is not None:
-            admin.must_change_password = False
-            admin.employee_id = employees[0].id
-            users["admin"] = admin
-        for username, role in ROLES_EXTRA:
-            u = User(
-                username=username,
-                password_hash=hash_password(DEV_PASSWORD_PREFIX + role),
-                employee_id=None,
-                role=role,
-                is_active=True,
-                must_change_password=False,
-                failed_attempts=0,
-                row_version=1,
-            )
-            ts.add(u)
-            ts.flush()
-            users[username] = u
-    db.expire_all()
-    return users
-
-
 def _seed_device(db, site: Site) -> tuple[Device, str]:
     raw = secrets.token_hex(32)
     device = Device(
@@ -345,31 +337,21 @@ def _seed_device(db, site: Site) -> tuple[Device, str]:
 def _seed_punches_and_engine(
     db, employees: list[Employee], device: Device, start_date: date, end_date: date,
 ) -> None:
-    """Generate punches; engine creates days + exceptions per punch."""
+    span = (end_date - start_date).days + 1
     for idx, emp in enumerate(employees):
-        # Assign a pattern index so specific employees generate specific types.
-        # 0..3: missing_out (punch in only)
-        # 4..7: too_long (in 08:00, out 19:00 = 11h > 10h max)
-        # 8..11: normal (in/out)
-        # 12..15: clock gap punch
-        # 16..19: low confidence punch
-        d = start_date + timedelta(days=(idx % 5))  # spread across first 5 days
+        d = start_date + timedelta(days=(idx % max(span, 1)))
         if d > end_date:
             d = end_date
 
         if idx % 4 == 0:
-            # missing_out: only punch in
             _punch(db, device, emp.id, _utc(d, 8, 0))
         elif idx % 4 == 1:
-            # too_long: in + out far apart
             _punch(db, device, emp.id, _utc(d, 8, 0))
             _punch(db, device, emp.id, _utc(d, 19, 0))
         elif idx % 4 == 2:
-            # normal
             _punch(db, device, emp.id, _utc(d, 8, 0))
             _punch(db, device, emp.id, _utc(d, 16, 30))
         else:
-            # clock gap + low confidence
             _punch(
                 db, device, emp.id, _utc(d, 8, 0),
                 device_now=_utc(d, 8, 0) + timedelta(seconds=400),
@@ -396,7 +378,6 @@ def _seed_ensure_days_and_recompute(
 def _backfill_exceptions(
     db, employees: list[Employee], start_date: date,
 ) -> None:
-    """Guarantee 2 of each type not naturally emitted by the engine."""
     types_missing = [
         "missing_in", "low_confidence", "overtime_unapproved",
         "duplicate", "device_clock_gap", "employee_query",
@@ -420,10 +401,9 @@ def _backfill_exceptions(
 
 
 def _seed_adjustments(db, employees: list[Employee], admin: User | None, start_date: date) -> None:
-    """Two real adjustments via _persist_adjustment + recompute."""
     adj_admin_id = getattr(admin, "id", None)
     for i, emp in enumerate(employees[:2]):
-        d = start_date + timedelta(days=10 + i)
+        d = start_date + timedelta(days=i)
         try:
             _persist_adjustment(
                 db,
@@ -439,7 +419,7 @@ def _seed_adjustments(db, employees: list[Employee], admin: User | None, start_d
             db.commit()
             recompute_day(db, emp.id, d)
             db.commit()
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             db.rollback()
             print(f"adjustment seed skipped for {emp.employee_code}: {exc}",
                   file=sys.stderr)
@@ -449,6 +429,13 @@ def _seed_pay_periods(db, start_date: date, end_date: date) -> tuple[PayPeriod, 
     prev_end = start_date - timedelta(days=1)
     prev_start = prev_end.replace(day=1)
 
+    # cutoff_at is NOT NULL on pay_period — set it to 23:59 local on the
+    # period's end date (that is the natural "last moment this period
+    # counts" semantic). Converted to UTC because the column is timezone-
+    # aware.
+    prev_cutoff = _utc(prev_end, 23, 59)
+    open_cutoff = _utc(end_date, 23, 59)
+
     locked = PayPeriod(
         id=uuid.uuid4(),
         period_key=prev_start.strftime("%Y-%m"),
@@ -456,7 +443,7 @@ def _seed_pay_periods(db, start_date: date, end_date: date) -> tuple[PayPeriod, 
         end_date=prev_end,
         pay_date=prev_end + timedelta(days=5),
         status="locked",
-        cutoff_at=None,
+        cutoff_at=prev_cutoff,
     )
     open_ = PayPeriod(
         id=uuid.uuid4(),
@@ -465,7 +452,7 @@ def _seed_pay_periods(db, start_date: date, end_date: date) -> tuple[PayPeriod, 
         end_date=end_date,
         pay_date=end_date + timedelta(days=5),
         status="open",
-        cutoff_at=None,
+        cutoff_at=open_cutoff,
     )
     db.add_all([locked, open_])
     db.commit()
@@ -494,10 +481,6 @@ def _seed_change_requests(db, admin_user: User, employees: list[Employee]) -> No
         )
         db.commit()
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def _refuse_production() -> None:
     env = get_settings().environment
@@ -542,14 +525,21 @@ def main(argv: list[str] | None = None) -> int:
     db_name = _tenant_db_name(SLUG)
     device_key: str = ""
 
+    today_local = datetime.now(timezone.utc).astimezone(_tz()).date()
+    seed_year = today_local.year
+    years = [seed_year - 1, seed_year, seed_year + 1]
+
     with tenant_session(db_name) as db:
+        added = _seed_country_calendar(db, years)
+        db.commit()
+        print(f"[seed] country_calendar: {added} ZA rows across {years[0]}..{years[-1]}")
+
         company, sites, deps = _seed_org(db)
         shift = _seed_shift(db)
         wp = _seed_work_pattern(db, shift)
         employees = _seed_employees(db, sites, deps, wp)
         print(f"[seed] {len(employees)} employees created")
 
-        # Admin user is created by provision_tenant; flip must_change_password.
         db.expire_all()
         admin = db.scalar(select(User).where(User.username == "admin"))
         if admin is not None:
@@ -557,7 +547,6 @@ def main(argv: list[str] | None = None) -> int:
             admin.employee_id = employees[0].id
             db.flush()
 
-        # Extra dev users per role.
         for username, role in ROLES_EXTRA:
             existing = db.scalar(select(User).where(User.username == username))
             if existing is None:
@@ -575,12 +564,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[seed] users: admin/{DEV_PASSWORD_PREFIX}admin + "
               + ", ".join(f"{u}/{DEV_PASSWORD_PREFIX}{r}" for u, r in ROLES_EXTRA))
 
-        # Device with show-once key.
         device, device_key = _seed_device(db, sites[0])
         db.commit()
 
-        # Punches across the current month.
-        today_local = datetime.now(timezone.utc).astimezone(_tz()).date()
         start_date = today_local.replace(day=1)
         end_date = today_local - timedelta(days=1)
         if end_date < start_date:
@@ -588,32 +574,25 @@ def main(argv: list[str] | None = None) -> int:
         _seed_punches_and_engine(db, employees, device, start_date, end_date)
         print(f"[seed] punches seeded across {start_date}..{end_date}")
 
-        # ensure_days + recompute for the whole month.
         _seed_ensure_days_and_recompute(db, employees, start_date, end_date)
         print(f"[seed] days recomputed")
 
-        # Backfill exception types not naturally generated.
         _backfill_exceptions(db, employees, start_date)
-        print(f"[seed] exceptions backfilled (missing_in, low_confidence, "
-              f"overtime_unapproved, duplicate, device_clock_gap, employee_query)")
+        print(f"[seed] exceptions backfilled")
 
-        # Adjustments.
         _seed_adjustments(db, employees, admin, start_date)
         print(f"[seed] adjustments seeded")
 
-        # Pay periods.
         locked, open_ = _seed_pay_periods(db, start_date, end_date)
         _lock_prev_month_days(db, locked)
         print(f"[seed] pay periods: {locked.period_key} (locked), "
               f"{open_.period_key} (open)")
 
-        # 3 pending change requests.
         admin_ref = db.scalar(select(User).where(User.username == "admin"))
         if admin_ref is not None:
             _seed_change_requests(db, admin_ref, employees)
             print(f"[seed] 3 pending change requests submitted")
 
-    # Print device key once, outside the session.
     print()
     print("=" * 60)
     print("DEVICE API KEY (shown ONCE — copy it now):")
