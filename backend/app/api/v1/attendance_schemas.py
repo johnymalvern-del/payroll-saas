@@ -1,4 +1,9 @@
-"""Attendance read and recompute schemas (Chapter 2B)."""
+"""Attendance read and recompute schemas (Chapter 2B).
+
+B-5/B-11: DayOut carries `site_timezone` so the day list and day detail
+both surface the employee's site timezone (falling back to the company
+default). DayDetailOut inherits the field from DayOut.
+"""
 from __future__ import annotations
 import uuid
 from datetime import date, datetime
@@ -39,6 +44,8 @@ class DayOut(BaseModel):
     locked: bool
     row_version: int
     computed_at: datetime
+    # B-5/B-11: employee's site timezone, falling back to company default.
+    site_timezone: str | None = None
 
 
 class DayDetailOut(DayOut):
@@ -76,5 +83,3 @@ class RecomputeOut(BaseModel):
     employee_count: int
     from_date: date
     to_date: date
-
-# END OF FILE

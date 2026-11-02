@@ -9,6 +9,9 @@ C2 compliance: no field in any response identifies a day as adjusted.
 Adjustments are visible only through the audit log.
 
 C9 limits: sheet page size default 50, max 200; date range max 31 days.
+
+B-5/B-11: each row carries `site_timezone` resolved once per request via
+app.services.site_timezone.site_timezone_map.
 """
 from __future__ import annotations
 
@@ -38,6 +41,7 @@ from app.core.scope import apply_scope
 from app.db.tenant.models.attendance import AttendanceDay, ExceptionItem
 from app.db.tenant.models.people import Employee
 from app.db.tenant.models.platform import AuditLog
+from app.services.site_timezone import site_timezone_map
 
 router = APIRouter(prefix="/attendance", tags=["attendance-sheet"])
 
@@ -157,6 +161,7 @@ def get_sheet(
     emp_ids = [e.id for e in emps]
     days_map = _days_by_emp(db, emp_ids, from_date, to_date)
     exc_map = _open_exception_counts(db, emp_ids, from_date, to_date)
+    tz_map = site_timezone_map(db, emp_ids)
 
     items = []
     num_days = (to_date - from_date).days + 1
@@ -183,6 +188,7 @@ def get_sheet(
             site_id=emp.site_id,
             department_id=emp.department_id,
             days=cells,
+            site_timezone=tz_map.get(emp.id),
         ))
 
     total: int | None = None
@@ -229,6 +235,7 @@ def get_daily(
     emp_ids = [e.id for e in emps]
     days_map = _days_by_emp(db, emp_ids, target_date, target_date)
     exc_map = _open_exception_counts(db, emp_ids, target_date, target_date)
+    tz_map = site_timezone_map(db, emp_ids)
 
     items = []
     for emp in emps:
@@ -251,6 +258,7 @@ def get_daily(
             open_exception_count=exc_map.get((emp.id, target_date), 0),
             locked=day.locked if day is not None else False,
             reviewed=(day.reviewed_at is not None) if day is not None else False,
+            site_timezone=tz_map.get(emp.id),
         ))
 
     total: int | None = None
@@ -350,5 +358,3 @@ def mark_reviewed(
         refused=len(refused_days),
         refused_days=refused_days,
     )
-
-# END OF FILE

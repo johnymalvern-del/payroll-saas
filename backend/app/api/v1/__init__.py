@@ -33,6 +33,7 @@ from app.api.v1.attendance import router as attendance_router
 from app.api.v1.exceptions import router as exceptions_router
 from app.api.v1.adjustments import router as adjustments_router
 from app.api.v1.sheet import router as sheet_router
+from app.api.v1.reason_codes import router as reason_codes_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(register_router)
@@ -58,6 +59,7 @@ api_router.include_router(attendance_router)
 api_router.include_router(exceptions_router)
 api_router.include_router(adjustments_router)
 api_router.include_router(sheet_router)
+api_router.include_router(reason_codes_router)
 api_router.include_router(payroll_settings_router)
 api_router.include_router(payroll_types_router)
 api_router.include_router(payroll_employees_router)

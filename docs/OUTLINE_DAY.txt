@@ -1,0 +1,50 @@
+### backend/app/api/v1/attendance_schemas.py
+  class SegmentOut(BaseModel)
+    id: uuid.UUID
+    attendance_day_id: uuid.UUID
+    local_date: date
+    day_type: str
+    kind: str
+    tier: int
+    minutes: int
+    rate_method: str
+    rate_value: Decimal
+    overtime_status: str | None = None
+    source_refs: list[Any] = Field(default_factory=list)
+  class DayOut(BaseModel)
+    id: uuid.UUID
+    employee_id: uuid.UUID
+    work_date: date
+    status: str
+    first_in: datetime | None = None
+    last_out: datetime | None = None
+    worked_minutes: int
+    normal_minutes: int
+    overtime_minutes: int
+    raw_minutes: int
+    shift_id: uuid.UUID | None = None
+    flags: list[str] = Field(default_factory=list)
+    source_version: int
+    locked: bool
+    row_version: int
+    computed_at: datetime
+  class DayDetailOut(DayOut)
+    segments: list[SegmentOut] = Field(default_factory=list)
+  class DayListOut(BaseModel)
+    items: list[DayOut]
+    next_cursor: str | None = None
+    total: int | None = None
+  class RecomputeIn(BaseModel)
+    employee_id: uuid.UUID | None = None
+    site_id: uuid.UUID | None = None
+    department_id: uuid.UUID | None = None
+    from_date: date
+    to_date: date
+    @model_validator(mode='after')
+    def _v_one_target(self)
+  class RecomputeOut(BaseModel)
+    recomputed: int
+    skipped_locked: int
+    employee_count: int
+    from_date: date
+    to_date: date

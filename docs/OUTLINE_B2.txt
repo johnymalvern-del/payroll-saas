@@ -1,0 +1,263 @@
+### backend/app/api/v1/attendance_engine.py
+  class ShiftCandidate()
+    @dataclass
+    id: uuid.UUID
+    start_time: time
+  class PunchEvent()
+    @dataclass
+    id: uuid.UUID
+    effective_time: datetime
+    status: str = 'accepted'
+    shift_id: uuid.UUID | None = None
+    outside_tolerance: bool = False
+  class Session()
+    @dataclass
+    start: datetime
+    end: datetime | None
+    shift_id: uuid.UUID | None
+    source_punch_ids: list[uuid.UUID] = field(default_factory=list)
+    open: bool = True
+    flags: list[str] = field(default_factory=list)
+  class BuiltSegment()
+    @dataclass
+    local_date: date
+    day_type: str
+    kind: str
+    tier: int
+    minutes: int
+    rate_method: str
+    rate_value: Decimal
+    source_punch_ids: list[uuid.UUID] = field(default_factory=list)
+    overtime_status: str | None = None
+  class DayBuildResult()
+    @dataclass
+    work_date: date
+    status: str
+    first_in: datetime | None = None
+    last_out: datetime | None = None
+    worked_minutes: int = 0
+    normal_minutes: int = 0
+    overtime_minutes: int = 0
+    raw_minutes: int = 0
+    shift_id: uuid.UUID | None = None
+    flags: list[str] = field(default_factory=list)
+    segments: list[BuiltSegment] = field(default_factory=list)
+  _VALID_ROUNDING_MODES = ('nearest', 'up', 'down')
+  _VALID_GRACE_MODES = ('threshold', 'allowance')
+  def round_clock_time(dt: datetime, rounding_minutes: int, rounding_mode: str) -> datetime
+  def apply_grace_arrival(actual: datetime, scheduled: datetime, grace_minutes: int, mode: str) -> datetime
+  def apply_grace_departure(actual: datetime, scheduled: datetime, grace_minutes: int, mode: str) -> datetime
+  def build_sessions(punches: list[PunchEvent], max_minutes_fn: Callable[[uuid.UUID | None], int]) -> tuple[list[Session], list[str]]
+  def _is_afternoon_or_later(t: time) -> bool
+  def _candidate_base_dates(punch_date: date, start_time: time) -> list[date]
+  def detect_shift(punch_local: datetime, candidates: list[ShiftCandidate], tolerance_minutes: int, default_shift_id: uuid.UUID | None=None, expected_shift_id: uuid.UUID | None=None) -> tuple[uuid.UUID | None, bool]
+  def determine_day_type(local_date: date, holiday_set: set[date]) -> str
+  def split_at_midnight(start_utc: datetime, end_utc: datetime | None, site_tz) -> list[tuple[date, datetime, datetime, int]]
+  def apply_overtime_tiers(total_minutes: int, rules: list) -> list[tuple[int, int, object]]
+  def build_day(*, work_date: date, session: Session, shift, holiday_set: set[date], site_tz, rules_by_key: dict, adjustment=None) -> DayBuildResult
+  def _tenant_local_today(db)
+  def _load_holiday_set(db, country_code, from_date, to_date)
+  def _holiday_set_for(db, country_code, from_date, to_date, employee)
+  def _employee_expected(db, employee, work_date)
+  def _has_punches_on(db, employee_id, work_date, tz)
+  def _pattern_length_minutes(db, employee, work_date)
+  def _new_day(employee_id, work_date, status, *, flags=None, worked=0, normal=0, overtime=0, raw=0, shift_id=None)
+  def ensure_days(db, employee_ids, from_date, to_date, *, absent_grace_days=1)
+  def _load_shift_candidates(db)
+  def _load_rate_rules(db, shift_id, on_date)
+  def _segments_differ(db, existing, new_segments)
+  def _persist_day(db, employee_id, work_date, *, status, first_in, last_out, normal, overtime, worked, raw, shift_id, flags, segments, existing)
+  def _no_punch_day(db, employee, work_date, holidays, expected, today_local, existing, extra_flags=None, status_override=None)
+  def _advisory_lock_key(employee_id, work_date)
+  def recompute_day(db, employee_id, work_date)
+  def _load_adjustments(db, employee_id, work_date)
+  def _day_snapshot(day)
+  def _persist_adjustment(db, *, employee_id, work_date, outcome, time_in, time_out, reason_code, note, created_by, batch_id=None)
+  def _build_day_from_adjustment_only(db, employee, work_date, holidays, today_local, adj, default_shift_id, expected_shift_id, tz, existing)
+  _EXCEPTION_TYPES_FROM_FLAGS = ('missing_out', 'too_long')
+  _EXCEPTION_TYPES_FROM_STATUS = {'absent': 'absent_expected', 'no_shift_match': 'no_shift_match'}
+  def _expected_exception_types(db, employee_id, work_date, day)
+  def _suggested_fix(exception_type)
+  def _create_exception(db, employee_id, work_date, exception_type, day)
+  def _sync_exceptions(db, employee_id, work_date, day)
+### backend/app/api/v1/punch_service.py
+  def canonical_payload_hash(punch: dict[str, Any]) -> str
+  def compute_timing_and_offset(device_time: datetime, device_now_at_send: datetime | None, server_received_at: datetime) -> tuple[datetime, int]
+  def decode_and_validate_photo(photo_base64: str | None, max_bytes: int) -> bytes | None
+  _TEMPLATE_KEYS = frozenset({'template', 'fingerprint_template', 'face_template', 'embedding'})
+  def validate_raw_payload(raw_payload: dict[str, Any], max_bytes: int) -> None
+  def is_future_time(effective_time: datetime, server_received_at: datetime, tolerance_seconds: int=300) -> bool
+  def is_clock_gap(offset_ms: int, threshold_seconds: int) -> bool
+  def classify_match(match_score, liveness_passed, confidence_threshold: float) -> list[str]
+### backend/app/scripts/tenant_ops.py
+  BACKUP_DIR = Path(os.environ.get('TENANT_BACKUP_DIR', '/app/backups'))
+  TENANT_MODEL_ORDER = ['Company', 'Branch', 'Site', 'Department', 'Employee', 'User', 'UserScope', 'EmployeePayHistory', 'Biometr...
+  class _ConnParts()
+    @dataclass
+    host: str
+    port: int
+    user: str
+    password: str
+    dbname: str
+  def _conn_parts(url: str) -> _ConnParts
+  def _subscriber_or_fail(slug: str) -> Subscriber
+  def _audit(actor: str, action: str, entity_id: str, detail: dict) -> None
+  def _pg_env(parts: _ConnParts) -> dict[str, str]
+  def cmd_backup(slug: str) -> int
+  def cmd_restore(slug: str, file: Path, confirm: str) -> int
+  def _json_default(obj: object) -> object
+  def _row_dict(instance: object) -> dict[str, object]
+  def cmd_export(slug: str) -> int
+  def cmd_delete(slug: str, confirm: str) -> int
+  def main(argv: list[str] | None=None) -> int
+### backend/app/services/payroll_runner.py
+  _COUNTRY_CODE = 'ZA'
+  _PERIODS_PER_YEAR = {'monthly': 12, 'weekly': 52, 'fortnightly': 26}
+  def _load_settings(db: Session) -> PayrollSettings
+  def _load_control_table(table_type: str, on_date: date) -> list[dict]
+  def _resolve_age(employee: Employee, on_date: date, age_ref: str) -> int
+  def build_pipeline_config(db: Session, employee: Employee, pay_date: date) -> P.PipelineConfig
+  def _build_earnings(db: Session, employee: Employee, on_date: date) -> list[P.EarningLine]
+  def _build_deductions(db: Session, employee: Employee, on_date: date) -> list[P.DeductionLine]
+  def _write_payslip(db: Session, run: PayrollRun, pay_period: PayPeriod, employee: Employee, draft: P.PayslipDraft, *, status: str, prior: Payslip | None) -> Payslip
+  def _purge_preview(db: Session, pay_period_id: uuid.UUID) -> None
+  def _in_scope_employees(db: Session) -> list[Employee]
+  def _formula_warnings(db: Session) -> list[str]
+  def run_preview(db: Session, user, pay_period: PayPeriod) -> PayrollRun
+  def finalise(db: Session, user, pay_period: PayPeriod) -> PayrollRun
+  def reopen(db: Session, user, pay_period: PayPeriod, reason: str) -> PeriodReopenLog
+### backend/app/services/provisioning.py
+  class ProvisioningError(Exception)
+  class ProvisioningResult()
+    @dataclass(frozen=True)
+    subscriber_id: uuid.UUID
+    slug: str
+    tenant_db_name: str
+    schema_version: str
+  _SLUG_RE = re.compile('^[a-z0-9][a-z0-9-]{1,60}$')
+  _RESERVED_SLUGS: frozenset[str] = frozenset({'www', 'api', 'admin', 'app', 'static', 'platform', 'control', 'payroll', 'mail', 'ftp'})
+  def _validate_slug(slug: str) -> None
+  def _tenant_db_name(slug: str) -> str
+  def _admin_url(db_name: str='postgres') -> str
+  def _control_admin_url(db_name: str='postgres') -> str
+  def _run_tenant_migrations(db_name: str) -> str
+  def _seed_tenant_defaults(db_name: str, company_name: str) -> None
+  def _create_first_admin(db_name: str, username: str, password_hash: str) -> None
+  def _drop_tenant_database(db_name: str) -> None
+  def provision_tenant(*, slug: str, name: str, admin_username: str, admin_password_hash: str) -> ProvisioningResult
+  _TEST_TEMPLATE_ENABLED = False
+  _TEMPLATE_NAME_CACHE = None
+  _TEMPLATE_VERSION_CACHE = None
+  def _4a_get_template_name()
+  def _4a_bootstrap_template_db()
+  def _4a_run_migrations_from_template(db_name)
+### backend/tests/tenancy/test_provisioning.py
+  def _db_exists(db_name: str) -> bool
+  def _subscriber_by_slug(slug: str) -> Subscriber | None
+  def test_register_endpoint_creates_working_tenant(api_client: TestClient) -> None
+  def test_register_rejects_duplicate_slug(api_client: TestClient, disposable_tenant) -> None
+  def test_register_rejects_invalid_slug(api_client: TestClient) -> None
+  def test_register_rejects_reserved_slug(api_client: TestClient) -> None
+  def test_rollback_drops_database_when_provisioning_fails(monkeypatch) -> None
+  def test_password_policy_enforced(api_client: TestClient) -> None
+### backend/tests/test_attendance_engine_db.py
+  SA = ZoneInfo('Africa/Johannesburg')
+  class _DisposableTenant()
+    @dataclass
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+  @pytest.fixture()
+  def disposable_tenant() -> Iterator[_DisposableTenant]
+  @pytest.fixture()
+  def db(disposable_tenant)
+  def _mk_emp(session, code, *, hire=None, clocks=True, wp_id=None, dflt_shift=None)
+  def _mk_shift(session, *, name=None, start=time(8, 0), length=480, brk=60, grace_late=0, grace_early=0, grace_mode='threshold', min_ot=0, ot_approval=False, early_pay=False, max_min=720)
+  def _mk_rule(session, shift_id, day_type, kind, *, tier=1, up_to=None, value='1.0')
+  def _mk_calendar(session, year, dates)
+  def _mk_punch(session, employee_id, ts_utc)
+  def _sa_utc(y, mo, d, h, mi)
+  def _today_sa()
+  def test_holiday_calendar_missing_raises(db)
+  def test_ensure_days_skips_future(db)
+  def test_ensure_days_creates_missing_punch_within_grace(db)
+  def test_recompute_day_normal_weekday(db)
+  def test_recompute_day_missing_out(db)
+  def test_recompute_day_idempotent(db)
+  def test_recompute_day_locked_skipped(db)
+### backend/tests/test_attendance_engine_pure.py
+  SA = ZoneInfo('Africa/Johannesburg')
+  NY = timezone(timedelta(hours=-5))
+  UTC = timezone.utc
+  def sa_utc(y, mo, d, h, mi)
+  def mk_shift(start=time(8, 0), length=480, brk=60, grace_late=0, grace_early=0, grace_mode='threshold', rounding=0, rounding_mode='nearest', min_ot=0, ot_approval=True, early_pay=False, max_min=720)
+  def mk_rule(tier, up_to, value='1.0', method='multiplier')
+  def weekday_rules(ot_t1=30, ot_t2=None)
+  def build(sh, start_utc, end_utc, work_date, rules, holidays=None, adjustment=None)
+  @pytest.mark.parametrize('start_min,mode,expected_min', [(7, 'nearest', 5), (7, 'up', 10), (7, 'down', 5), (3, 'nearest', 5), (3, 'up', 5), (3, 'down', 0), (2, 'nearest', 0), (2, 'up', 5), (2, 'down', 0), (5, 'nearest', 5), (5, 'up', 5), (5, 'down', 5)])
+  def test_round_clock_time(start_min, mode, expected_min)
+  def test_round_clock_time_disabled()
+  @pytest.mark.parametrize('actual_m,mode,exp_m', [(10, 'threshold', 0), (20, 'threshold', 20), (20, 'allowance', 15)])
+  def test_grace_arrival(actual_m, mode, exp_m)
+  def test_grace_arrival_before_scheduled_unchanged()
+  @pytest.mark.parametrize('h,m,mode,eh,em', [(16, 50, 'threshold', 17, 0), (16, 40, 'threshold', 16, 40), (16, 40, 'allowance', 16, 45)])
+  def test_grace_departure(h, m, mode, eh, em)
+  def test_build_sessions_closed_pair()
+  def test_build_sessions_missing_out_at_end()
+  def test_build_sessions_too_long_opens_new()
+  def test_build_sessions_duplicate_cannot_open()
+  def test_detect_shift_nearest()
+  def test_detect_shift_no_match()
+  def test_detect_shift_preferred_outside_tolerance()
+  def test_detect_shift_overnight()
+  def test_detect_shift_tiebreak_lowest_id()
+  @pytest.mark.parametrize('d,holidays,expected', [(date(2024, 5, 1), {date(2024, 5, 1)}, 'public_holiday'), (date(2024, 5, 4), set(), 'saturday'), (date(2024, 5, 5), set(), 'sunday'), (date(2024, 5, 6), set(), 'weekday'), (date(2024, 5, 4), {date(2024, 5, 4)}, 'public_holiday')])
+  def test_determine_day_type(d, holidays, expected)
+  def test_split_sa_night()
+  def test_split_ny_night()
+  def test_overtime_tiers_single()
+  def test_overtime_tiers_two()
+  def test_overtime_tiers_below_first_cap()
+  def test_overtime_tiers_empty()
+  def test_build_day_normal_weekday()
+  def test_build_day_grace_arrival_threshold()
+  def test_build_day_grace_arrival_allowance()
+  def test_build_day_grace_departure_threshold()
+  def test_build_day_grace_departure_allowance()
+  def test_build_day_early_ignored()
+  def test_build_day_early_paid()
+  def test_build_day_tier_split()
+  def test_build_day_setup_error_no_rule()
+  def test_build_day_night_shift_split()
+  def test_minutes_invariant()
+  def _adj(outcome, time_in=None, time_out=None)
+  def test_build_day_with_worked_adjustment_overrides_punches()
+  def test_build_day_with_leave_adjustment()
+  def test_build_day_with_revert_adjustment_uses_punches()
+### backend/tests/test_punch_service.py
+  _JPEG = bytes.fromhex('ffd8ff') + b'fake-jpeg-content'
+  _PNG = bytes.fromhex('89504e470d0a1a0a') + b'fake-png-content'
+  def _punch(**kw)
+  def test_hash_is_stable()
+  def test_hash_changes_on_different_employee()
+  def test_hash_changes_on_different_time()
+  def test_hash_ignores_client_punch_id_photo_raw_payload()
+  def test_timing_live_punch()
+  def test_timing_batch_punch_offline()
+  def test_timing_batch_punch_fast_clock()
+  def test_photo_none_returns_none()
+  def test_photo_valid_jpeg()
+  def test_photo_valid_png()
+  def test_photo_invalid_base64()
+  def test_photo_wrong_magic()
+  def test_photo_oversize()
+  def test_raw_payload_ok()
+  def test_raw_payload_template_key_rejected()
+  def test_raw_payload_template_key_case_insensitive()
+  def test_raw_payload_oversize()
+  def test_future_time_flag()
+  def test_clock_gap_flag()
+  def test_classify_match_ok()
+  def test_classify_match_low_confidence()
+  def test_classify_match_liveness_failed()
+  def test_classify_match_both()

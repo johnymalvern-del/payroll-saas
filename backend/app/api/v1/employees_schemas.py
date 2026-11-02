@@ -1,21 +1,10 @@
-"""Employee endpoint schemas (1C.8).
-
-Read shape returns masked versions of the encrypted fields for callers with
-EMPLOYEE_CRUD. The full values are returned only by GET /api/v1/employees/me
-for the data subject themselves.
-
-Write shape (create) accepts national_id and bank_account_number in plain
-form; the router encrypts them via TenantCrypto. Neither field is accepted
-on PATCH; changes to those go through the request/approve flow in a later
-phase (per 1C.8 decisions 2A and the national_id parity rule).
-
-PATCH requires row_version; stale values return 409 record_changed.
-"""
+"""Employee request/response schemas (1C.8)."""
 from __future__ import annotations
 
 import uuid
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -24,16 +13,13 @@ _ALLOWED_STATUS = ("active", "on_leave", "suspended", "terminated")
 _ALLOWED_EMPLOYEE_TYPE = ("hourly", "salaried", "casual", "contract")
 _ALLOWED_PAY_BASIS = ("hourly", "daily", "monthly")
 _ALLOWED_PAY_FREQUENCY = ("weekly", "fortnightly", "monthly")
-_PATCH_FORBIDDEN_FIELDS = frozenset({"national_id", "bank_account_number", "base_rate"})
+_PATCH_FORBIDDEN_FIELDS = frozenset(
+    {"national_id", "bank_account_number", "base_rate"}
+)
 
 
 def _clean_code(v: str) -> str:
-    if v is None:
-        return v
-    trimmed = v.strip()
-    if not trimmed:
-        raise ValueError("employee_code must not be empty")
-    return trimmed
+    return v.strip()
 
 
 class EmployeeOut(BaseModel):
@@ -71,11 +57,11 @@ class EmployeeOut(BaseModel):
     uif_exempt: bool
     notes: str | None = None
     row_version: int
+    # B-5/B-11: employee's site timezone, falling back to company default.
+    site_timezone: str | None = None
 
 
 class EmployeeMeOut(EmployeeOut):
-    """Same shape as EmployeeOut, but the masked fields are decrypted."""
-
     national_id: str | None = None
     bank_account_number: str | None = None
 
@@ -117,7 +103,10 @@ class EmployeeCreateIn(BaseModel):
     @field_validator("employee_code")
     @classmethod
     def _validate_code(cls, v: str) -> str:
-        return _clean_code(v)
+        v = _clean_code(v)
+        if not v:
+            raise ValueError("employee_code must not be blank")
+        return v
 
     @field_validator("status")
     @classmethod
@@ -190,7 +179,10 @@ class EmployeePatchIn(BaseModel):
     def _validate_code(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        return _clean_code(v)
+        v = _clean_code(v)
+        if not v:
+            raise ValueError("employee_code must not be blank")
+        return v
 
     @field_validator("status")
     @classmethod
@@ -240,5 +232,3 @@ class EmployeeListOut(BaseModel):
 
 
 PATCH_FORBIDDEN_FIELDS = _PATCH_FORBIDDEN_FIELDS
-
-# END OF FILE

@@ -11,18 +11,21 @@ Permissions:
   recompute                 ATTENDANCE_ADJUST (manager, hr, payroll_admin)
 
 Scope:
-  list uses apply_scope(model=AttendanceDay) — filters by employee_id set
-  detail uses assert_in_scope — out-of-scope returns 404 record_not_found
+  list uses apply_scope(model=AttendanceDay) - filters by employee_id set
+  detail uses assert_in_scope - out-of-scope returns 404 record_not_found
   recompute applies apply_scope(model=Employee) to the target employee set
   before iterating. A manager cannot recompute outside their scope (B12).
 
 B12 for recompute: run ensure_days first (creates rows for dates with no
-punches: absent / missing_punch / public_holiday_unworked / clocks=false
+punches: absent / missing_out / public_holiday_unworked / clocks=false
 synthetic), then recompute_day for each (employee, date). Locked days are
 skipped and reported in skipped_locked.
 
 B2: work_date is the local date the shift STARTS. Segments carry local_date
 (the real calendar date of the segment) which may differ on a night shift.
+
+B-5/B-11: DayOut carries `site_timezone`, resolved once per request via
+app.services.site_timezone.site_timezone_map.
 """
 from __future__ import annotations
 
@@ -50,6 +53,7 @@ from app.core.permissions import Permission, require_permission
 from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
 from app.db.tenant.models.attendance import AttendanceDay, AttendanceSegment
 from app.db.tenant.models.people import Employee
+from app.services.site_timezone import site_timezone_map
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
 
@@ -57,7 +61,11 @@ _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 500
 
 
-def _to_out(d: AttendanceDay) -> DayOut:
+def _to_out(
+    d: AttendanceDay,
+    *,
+    site_timezone: str | None = None,
+) -> DayOut:
     return DayOut(
         id=d.id,
         employee_id=d.employee_id,
@@ -75,6 +83,7 @@ def _to_out(d: AttendanceDay) -> DayOut:
         locked=d.locked,
         row_version=d.row_version,
         computed_at=d.computed_at,
+        site_timezone=site_timezone,
     )
 
 
@@ -211,8 +220,13 @@ def list_days(
         tq = apply_scope(tq, user, db, model=AttendanceDay)
         total = int(db.scalar(tq) or 0)
 
+    tz_map = site_timezone_map(db, [r.employee_id for r in rows])
+
     return DayListOut(
-        items=[_to_out(r) for r in rows],
+        items=[
+            _to_out(r, site_timezone=tz_map.get(r.employee_id))
+            for r in rows
+        ],
         next_cursor=next_cursor,
         total=total,
     )
@@ -248,7 +262,8 @@ def get_day(
             AttendanceSegment.tier,
         )
     ).all()
-    base = _to_out(day)
+    tz = site_timezone_map(db, [employee_id]).get(employee_id)
+    base = _to_out(day, site_timezone=tz)
     return DayDetailOut(
         **base.model_dump(),
         segments=[_seg_to_out(s) for s in segs],
@@ -313,5 +328,3 @@ def recompute(
         from_date=payload.from_date,
         to_date=payload.to_date,
     )
-
-# END OF FILE

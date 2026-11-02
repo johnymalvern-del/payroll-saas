@@ -17,6 +17,9 @@ and writes use assert_in_scope(user, employee_id, db). GET /me skips the
 scope check because it is the caller's own row. Out-of-scope returns 404
 record_not_found, not 403, so an out-of-scope record is indistinguishable
 from a missing one (IDOR mitigation).
+
+B-5/B-11: every EmployeeOut/EmployeeMeOut carries `site_timezone`, resolved
+once per request via app.services.site_timezone.site_timezone_map.
 """
 from __future__ import annotations
 
@@ -46,6 +49,7 @@ from app.db.tenant.models.organisation import Branch, Department, Site
 from app.db.tenant.models.people import Employee
 from app.db.tenant.models.platform import AuditLog
 from app.services.audit_redact import redact_for_audit
+from app.services.site_timezone import site_timezone_map
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
@@ -54,7 +58,9 @@ _MAX_LIMIT = 500
 
 
 def _not_found() -> AppError:
-    return AppError("record_not_found", "Employee not found", status.HTTP_404_NOT_FOUND)
+    return AppError(
+        "record_not_found", "Employee not found", status.HTTP_404_NOT_FOUND
+    )
 
 
 def _mask_national_id(plain: str | None) -> str | None:
@@ -71,17 +77,29 @@ def _mask_bank_account_number(plain: str | None) -> str | None:
     return f"****{tail}"
 
 
-def _to_out(employee: Employee, *, crypto: TenantCrypto, decrypt: bool) -> EmployeeOut:
+def _to_out(
+    employee: Employee,
+    *,
+    crypto: TenantCrypto,
+    decrypt: bool,
+    site_timezone: str | None = None,
+) -> EmployeeOut:
     national_plain = None
     bank_plain = None
     if decrypt:
         if employee.national_id_encrypted:
             national_plain = crypto.decrypt(employee.national_id_encrypted)
         if employee.bank_account_number_encrypted:
-            bank_plain = crypto.decrypt(employee.bank_account_number_encrypted)
+            bank_plain = crypto.decrypt(
+                employee.bank_account_number_encrypted
+            )
 
-    national_masked = _mask_national_id(national_plain) if national_plain else None
-    bank_masked = _mask_bank_account_number(bank_plain) if bank_plain else None
+    national_masked = (
+        _mask_national_id(national_plain) if national_plain else None
+    )
+    bank_masked = (
+        _mask_bank_account_number(bank_plain) if bank_plain else None
+    )
 
     return EmployeeOut(
         id=employee.id,
@@ -118,10 +136,16 @@ def _to_out(employee: Employee, *, crypto: TenantCrypto, decrypt: bool) -> Emplo
         uif_exempt=employee.uif_exempt,
         notes=employee.notes,
         row_version=employee.row_version,
+        site_timezone=site_timezone,
     )
 
 
-def _to_me(employee: Employee, *, crypto: TenantCrypto) -> EmployeeMeOut:
+def _to_me(
+    employee: Employee,
+    *,
+    crypto: TenantCrypto,
+    site_timezone: str | None = None,
+) -> EmployeeMeOut:
     national_plain = None
     bank_plain = None
     if employee.national_id_encrypted:
@@ -166,6 +190,7 @@ def _to_me(employee: Employee, *, crypto: TenantCrypto) -> EmployeeMeOut:
         row_version=employee.row_version,
         national_id=national_plain,
         bank_account_number=bank_plain,
+        site_timezone=site_timezone,
     )
 
 
@@ -355,7 +380,9 @@ def list_employees(
             )
         if last_name is not None:
             tq = tq.where(
-                func.lower(Employee.last_name).like(f"%{last_name.strip().lower()}%")
+                func.lower(Employee.last_name).like(
+                    f"%{last_name.strip().lower()}%"
+                )
             )
         if branch_id is not None:
             tq = tq.where(Employee.branch_id == branch_id)
@@ -382,8 +409,18 @@ def list_employees(
         tq = apply_scope(tq, user, db)
         total = int(db.scalar(tq) or 0)
 
+    tz_map = site_timezone_map(db, [r.id for r in rows])
+
     return EmployeeListOut(
-        items=[_to_out(r, crypto=crypto, decrypt=True) for r in rows],
+        items=[
+            _to_out(
+                r,
+                crypto=crypto,
+                decrypt=True,
+                site_timezone=tz_map.get(r.id),
+            )
+            for r in rows
+        ],
         next_cursor=next_cursor,
         total=total,
     )
@@ -410,7 +447,8 @@ def get_me(
             "This user has no employee record",
             status.HTTP_404_NOT_FOUND,
         )
-    return _to_me(employee, crypto=crypto)
+    tz = site_timezone_map(db, [employee.id]).get(employee.id)
+    return _to_me(employee, crypto=crypto, site_timezone=tz)
 
 
 @router.post("", response_model=EmployeeOut, status_code=status.HTTP_201_CREATED)
@@ -492,7 +530,9 @@ def create_employee(
     db.add(employee)
     db.flush()
 
-    new_snapshot = _to_out(employee, crypto=crypto, decrypt=False).model_dump(mode="json")
+    new_snapshot = _to_out(
+        employee, crypto=crypto, decrypt=False
+    ).model_dump(mode="json")
     db.add(
         AuditLog(
             id=uuid.uuid4(),
@@ -507,7 +547,8 @@ def create_employee(
     )
     db.commit()
     db.refresh(employee)
-    return _to_out(employee, crypto=crypto, decrypt=True)
+    tz = site_timezone_map(db, [employee.id]).get(employee.id)
+    return _to_out(employee, crypto=crypto, decrypt=True, site_timezone=tz)
 
 
 @router.get("/{employee_id}", response_model=EmployeeOut)
@@ -525,7 +566,8 @@ def get_employee(
     employee = db.get(Employee, employee_id)
     if employee is None:
         raise _not_found()
-    return _to_out(employee, crypto=crypto, decrypt=True)
+    tz = site_timezone_map(db, [employee.id]).get(employee.id)
+    return _to_out(employee, crypto=crypto, decrypt=True, site_timezone=tz)
 
 
 @router.patch("/{employee_id}", response_model=EmployeeOut)
@@ -632,9 +674,12 @@ def patch_employee(
             update_fields[simple_key] = supplied[simple_key]
 
     if not update_fields:
-        return _to_out(current, crypto=crypto, decrypt=True)
+        tz = site_timezone_map(db, [current.id]).get(current.id)
+        return _to_out(current, crypto=crypto, decrypt=True, site_timezone=tz)
 
-    old_snapshot = _to_out(current, crypto=crypto, decrypt=False).model_dump(mode="json")
+    old_snapshot = _to_out(
+        current, crypto=crypto, decrypt=False
+    ).model_dump(mode="json")
     new_version = current.row_version + 1
 
     stmt = (
@@ -658,7 +703,9 @@ def patch_employee(
     db.flush()
     refreshed = db.scalar(select(Employee).where(Employee.id == current.id))
     assert refreshed is not None
-    new_snapshot = _to_out(refreshed, crypto=crypto, decrypt=False).model_dump(mode="json")
+    new_snapshot = _to_out(
+        refreshed, crypto=crypto, decrypt=False
+    ).model_dump(mode="json")
 
     db.add(
         AuditLog(
@@ -674,7 +721,8 @@ def patch_employee(
     )
     db.commit()
     db.refresh(refreshed)
-    return _to_out(refreshed, crypto=crypto, decrypt=True)
+    tz = site_timezone_map(db, [refreshed.id]).get(refreshed.id)
+    return _to_out(refreshed, crypto=crypto, decrypt=True, site_timezone=tz)
 
 
 @router.delete(
@@ -693,5 +741,3 @@ def delete_employee(
         "Employees cannot be deleted; terminate via PATCH status='terminated'",
         status.HTTP_405_METHOD_NOT_ALLOWED,
     )
-
-# END OF FILE

@@ -1,0 +1,847 @@
+### backend/app/api/v1/adjustments_schemas.py
+  _OUTCOMES = ('worked', 'leave', 'sick', 'absent', 'day_off', 'revert')
+  def _validate_common(outcome: str, time_in, time_out, reason_code: str, note: str | None) -> None
+  class AdjustmentOut(BaseModel)
+    id: uuid.UUID
+    employee_id: uuid.UUID
+    work_date: date
+    outcome: str
+    time_in: datetime | None = None
+    time_out: datetime | None = None
+    minutes: int | None = None
+    reason_code: str
+    note: str | None = None
+    batch_id: uuid.UUID | None = None
+    created_by: uuid.UUID | None = None
+    period_id: uuid.UUID | None = None
+    created_at: datetime
+  class AdjustmentResultOut(BaseModel)
+    adjustment: AdjustmentOut
+    day_status: str | None = None
+    day_worked_minutes: int | None = None
+    day_normal_minutes: int | None = None
+    day_overtime_minutes: int | None = None
+  class AdjustmentCreateIn(BaseModel)
+    employee_id: uuid.UUID
+    work_date: date
+    outcome: str
+    time_in: datetime | None = None
+    time_out: datetime | None = None
+    reason_code: str = Field(..., min_length=1, max_length=40)
+    note: str | None = None
+    @model_validator(mode='after')
+    def _v(self)
+  class BulkAdjustItemIn(BaseModel)
+    employee_id: uuid.UUID
+    work_date: date
+    outcome: str
+    time_in: datetime | None = None
+    time_out: datetime | None = None
+    reason_code: str = Field(..., min_length=1, max_length=40)
+    note: str | None = None
+    @model_validator(mode='after')
+    def _v(self)
+  class BulkAdjustIn(BaseModel)
+    items: list[BulkAdjustItemIn] = Field(..., min_length=1, max_length=200)
+    token: str | None = None
+  class BulkAdjustItemOut(BaseModel)
+    index: int
+    employee_id: uuid.UUID
+    work_date: date
+    ok: bool
+    error_code: str | None = None
+    error_message: str | None = None
+    adjustment_id: uuid.UUID | None = None
+  class BulkAdjustOut(BaseModel)
+    results: list[BulkAdjustItemOut]
+    applied: int
+    dry_run: bool
+    token: str
+### backend/app/api/v1/auth/me.py
+  router = APIRouter(prefix='/auth/me', tags=['auth'])
+  class UserMeOut(BaseModel)
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    username: str
+    role: str
+    employee_id: uuid.UUID | None
+    permissions: list[str]
+    must_change_password: bool
+  def _must_change_password(user: Any) -> bool
+  @router.get('', response_model=UserMeOut)
+  def get_me(user: Annotated[Any, Depends(get_current_user)]) -> UserMeOut
+### backend/app/api/v1/auth/router.py
+  router = APIRouter(prefix='/auth', tags=['auth'])
+  _REFRESH_COOKIE = 'refresh_token'
+  _CSRF_COOKIE = 'csrf_token'
+  _REFRESH_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+  def _is_production_mode() -> bool
+  def _client_ip(request: Request) -> str | None
+  def _issue_cookies(response: Response, refresh_token: str, csrf_token: str) -> None
+  def _clear_cookies(response: Response) -> None
+  def _pair_response(result: auth_service.LoginResult) -> TokenPairOut
+  @router.post('/login', response_model=TokenPairOut)
+  def login(payload: LoginIn, request: Request, response: Response, db: TenantDbDep, tenant: TenantDep) -> TokenPairOut
+  @router.post('/refresh', response_model=TokenPairOut, dependencies=[Depends(csrf_protection)])
+  def refresh(payload: RefreshIn, request: Request, response: Response, db: TenantDbDep, tenant: TenantDep) -> TokenPairOut
+  @router.post('/logout', status_code=status.HTTP_200_OK, dependencies=[Depends(csrf_protection)])
+  async def logout(request: Request, response: Response, db: TenantDbDep, tenant: TenantDep) -> dict[str, str]
+  @router.post('/change-password', status_code=status.HTTP_200_OK)
+  def change_password_endpoint(payload: ChangePasswordIn, request: Request, db: TenantDbDep, user: Annotated[Any, Depends(get_current_user)]) -> dict[str, str]
+### backend/app/api/v1/auth/schemas.py
+  class LoginIn(BaseModel)
+    identifier: str = Field(..., min_length=1, max_length=255)
+    password: str = Field(..., min_length=1, max_length=200)
+    company_code: str | None = Field(default=None, max_length=60, description='Required only when no tenant subdomain / header is present.')
+  class TokenPairOut(BaseModel)
+    access_token: str
+    refresh_token: str
+    token_type: str = 'bearer'
+    expires_in: int
+  class RefreshIn(BaseModel)
+    refresh_token: str | None = Field(default=None, max_length=4096)
+  class ChangePasswordIn(BaseModel)
+    current_password: str = Field(..., min_length=1, max_length=200)
+    new_password: str = Field(..., min_length=12, max_length=200)
+  class MeOut(BaseModel)
+    user_id: str
+    username: str
+    role: str
+    email: EmailStr | None = None
+    must_change_password: bool
+### backend/app/api/v1/company/router.py
+  router = APIRouter(prefix='/company', tags=['company'])
+  def _to_out(c: Company) -> CompanyOut
+  @router.get('', response_model=CompanyOut)
+  def get_company(db: TenantDbDep, _user: Annotated[Any, Depends(require_permission(Permission.SELF_VIEW))]) -> CompanyOut
+  @router.patch('', response_model=CompanyOut)
+  def patch_company(payload: CompanyPatchIn, db: TenantDbDep, user: Annotated[Any, Depends(require_permission(Permission.SELF_VIEW))]) -> CompanyOut
+### backend/app/api/v1/company/schemas.py
+  class CompanyOut(BaseModel)
+    id: uuid.UUID
+    legal_name: str
+    trading_name: str | None = None
+    registration_number: str | None = None
+    tax_number: str | None = None
+    paye_reference: str | None = None
+    uif_reference: str | None = None
+    sdl_reference: str | None = None
+    coida_reference: str | None = None
+    address: str | None = None
+    country_code: str
+    currency: str
+    default_timezone: str
+    settings: dict[str, Any]
+    row_version: int
+  class CompanyPatchIn(BaseModel)
+    row_version: int = Field(..., ge=1)
+    legal_name: str | None = Field(default=None, max_length=200)
+    trading_name: str | None = Field(default=None, max_length=200)
+    registration_number: str | None = Field(default=None, max_length=60)
+    address: str | None = None
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    default_timezone: str | None = Field(default=None, max_length=64)
+    settings: dict[str, Any] | None = None
+    tax_number: str | None = Field(default=None, max_length=60)
+    paye_reference: str | None = Field(default=None, max_length=60)
+    uif_reference: str | None = Field(default=None, max_length=60)
+    sdl_reference: str | None = Field(default=None, max_length=60)
+    coida_reference: str | None = Field(default=None, max_length=60)
+  PAYROLL_ADMIN_ONLY_FIELDS = frozenset({'tax_number', 'paye_reference', 'uif_reference', 'sdl_reference', 'coida_reference'})
+### backend/app/api/v1/employees_schemas.py
+  _ALLOWED_STATUS = ('active', 'on_leave', 'suspended', 'terminated')
+  _ALLOWED_EMPLOYEE_TYPE = ('hourly', 'salaried', 'casual', 'contract')
+  _ALLOWED_PAY_BASIS = ('hourly', 'daily', 'monthly')
+  _ALLOWED_PAY_FREQUENCY = ('weekly', 'fortnightly', 'monthly')
+  _PATCH_FORBIDDEN_FIELDS = frozenset({'national_id', 'bank_account_number', 'base_rate'})
+  def _clean_code(v: str) -> str
+  class EmployeeOut(BaseModel)
+    id: uuid.UUID
+    employee_code: str
+    first_name: str
+    last_name: str
+    national_id_masked: str | None = None
+    email: str | None = None
+    mobile: str | None = None
+    date_of_birth: date | None = None
+    hire_date: date
+    termination_date: date | None = None
+    status: str
+    job_title: str | None = None
+    branch_id: uuid.UUID | None = None
+    site_id: uuid.UUID | None = None
+    department_id: uuid.UUID | None = None
+    manager_id: uuid.UUID | None = None
+    employee_type: str
+    pay_basis: str
+    pay_frequency: str
+    base_rate: Decimal | None = None
+    overtime_eligible: bool
+    clocks: bool
+    work_pattern_id: uuid.UUID | None = None
+    default_shift_id: uuid.UUID | None = None
+    bank_name: str | None = None
+    bank_account_number_masked: str | None = None
+    bank_branch_code: str | None = None
+    account_type: str | None = None
+    tax_number: str | None = None
+    medical_aid_dependants: int
+    retirement_fund_flags: str | None = None
+    uif_exempt: bool
+    notes: str | None = None
+    row_version: int
+  class EmployeeMeOut(EmployeeOut)
+    national_id: str | None = None
+    bank_account_number: str | None = None
+  class EmployeeCreateIn(BaseModel)
+    employee_code: str = Field(..., min_length=1, max_length=40)
+    first_name: str = Field(..., min_length=1, max_length=120)
+    last_name: str = Field(..., min_length=1, max_length=120)
+    national_id: str | None = None
+    email: str | None = Field(default=None, max_length=255)
+    mobile: str | None = Field(default=None, max_length=40)
+    date_of_birth: date | None = None
+    hire_date: date
+    termination_date: date | None = None
+    status: str = Field(default='active')
+    job_title: str | None = Field(default=None, max_length=120)
+    branch_id: uuid.UUID | None = None
+    site_id: uuid.UUID | None = None
+    department_id: uuid.UUID | None = None
+    manager_id: uuid.UUID | None = None
+    employee_type: str = Field(default='hourly')
+    pay_basis: str = Field(default='hourly')
+    pay_frequency: str = Field(default='monthly')
+    base_rate: Decimal | None = None
+    overtime_eligible: bool = True
+    clocks: bool = True
+    work_pattern_id: uuid.UUID | None = None
+    default_shift_id: uuid.UUID | None = None
+    bank_name: str | None = Field(default=None, max_length=120)
+    bank_account_number: str | None = None
+    bank_branch_code: str | None = Field(default=None, max_length=20)
+    account_type: str | None = Field(default=None, max_length=40)
+    tax_number: str | None = Field(default=None, max_length=40)
+    medical_aid_dependants: int = Field(default=0, ge=0)
+    retirement_fund_flags: str | None = Field(default=None, max_length=120)
+    uif_exempt: bool = False
+    notes: str | None = None
+    @field_validator('employee_code')
+    @classmethod
+    def _validate_code(cls, v: str) -> str
+    @field_validator('status')
+    @classmethod
+    def _validate_status(cls, v: str) -> str
+    @field_validator('employee_type')
+    @classmethod
+    def _validate_type(cls, v: str) -> str
+    @field_validator('pay_basis')
+    @classmethod
+    def _validate_basis(cls, v: str) -> str
+    @field_validator('pay_frequency')
+    @classmethod
+    def _validate_frequency(cls, v: str) -> str
+  class EmployeePatchIn(BaseModel)
+    row_version: int = Field(..., ge=1)
+    employee_code: str | None = Field(default=None, min_length=1, max_length=40)
+    first_name: str | None = Field(default=None, min_length=1, max_length=120)
+    last_name: str | None = Field(default=None, min_length=1, max_length=120)
+    email: str | None = Field(default=None, max_length=255)
+    mobile: str | None = Field(default=None, max_length=40)
+    date_of_birth: date | None = None
+    hire_date: date | None = None
+    termination_date: date | None = None
+    status: str | None = None
+    job_title: str | None = Field(default=None, max_length=120)
+    branch_id: uuid.UUID | None = None
+    site_id: uuid.UUID | None = None
+    department_id: uuid.UUID | None = None
+    manager_id: uuid.UUID | None = None
+    employee_type: str | None = None
+    pay_basis: str | None = None
+    pay_frequency: str | None = None
+    base_rate: Decimal | None = None
+    overtime_eligible: bool | None = None
+    clocks: bool | None = None
+    work_pattern_id: uuid.UUID | None = None
+    default_shift_id: uuid.UUID | None = None
+    bank_name: str | None = Field(default=None, max_length=120)
+    bank_branch_code: str | None = Field(default=None, max_length=20)
+    account_type: str | None = Field(default=None, max_length=40)
+    tax_number: str | None = Field(default=None, max_length=40)
+    medical_aid_dependants: int | None = Field(default=None, ge=0)
+    retirement_fund_flags: str | None = Field(default=None, max_length=120)
+    uif_exempt: bool | None = None
+    notes: str | None = None
+    @field_validator('employee_code')
+    @classmethod
+    def _validate_code(cls, v: str | None) -> str | None
+    @field_validator('status')
+    @classmethod
+    def _validate_status(cls, v: str | None) -> str | None
+    @field_validator('employee_type')
+    @classmethod
+    def _validate_type(cls, v: str | None) -> str | None
+    @field_validator('pay_basis')
+    @classmethod
+    def _validate_basis(cls, v: str | None) -> str | None
+    @field_validator('pay_frequency')
+    @classmethod
+    def _validate_frequency(cls, v: str | None) -> str | None
+  class EmployeeListOut(BaseModel)
+    items: list[EmployeeOut]
+    next_cursor: str | None = None
+    total: int | None = None
+  PATCH_FORBIDDEN_FIELDS = _PATCH_FORBIDDEN_FIELDS
+### backend/app/api/v1/exceptions_schemas.py
+  _ALLOWED_ACTIONS = ('apply_suggestion', 'custom', 'dismiss')
+  class ExceptionOut(BaseModel)
+    id: uuid.UUID
+    employee_id: uuid.UUID
+    work_date: date
+    type: str
+    source_ref: dict[str, Any] = Field(default_factory=dict)
+    suggested_fix: dict[str, Any] = Field(default_factory=dict)
+    status: str
+    assigned_to: uuid.UUID | None = None
+    resolved_by: uuid.UUID | None = None
+    resolved_at: datetime | None = None
+    resolution: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime
+  class ExceptionListOut(BaseModel)
+    items: list[ExceptionOut]
+    next_cursor: str | None = None
+    total: int | None = None
+  class CustomAdjustmentIn(BaseModel)
+    outcome: str
+    time_in: datetime | None = None
+    time_out: datetime | None = None
+    reason_code: str = Field(..., min_length=1, max_length=40)
+    note: str | None = None
+    @model_validator(mode='after')
+    def _v(self)
+  class ResolveIn(BaseModel)
+    action: Literal['apply_suggestion', 'custom', 'dismiss']
+    custom_adjustment: CustomAdjustmentIn | None = None
+    note: str | None = None
+    @model_validator(mode='after')
+    def _v(self)
+  class ResolveOut(BaseModel)
+    exception: ExceptionOut
+    adjustment_id: uuid.UUID | None = None
+    day_status: str | None = None
+  class BulkResolveItemIn(BaseModel)
+    exception_id: uuid.UUID
+    action: Literal['apply_suggestion', 'custom', 'dismiss']
+    custom_adjustment: CustomAdjustmentIn | None = None
+    note: str | None = None
+  class BulkResolveIn(BaseModel)
+    items: list[BulkResolveItemIn] = Field(..., min_length=1, max_length=200)
+    token: str | None = None
+    @model_validator(mode='after')
+    def _v(self)
+  class BulkResolveItemOut(BaseModel)
+    index: int
+    exception_id: uuid.UUID
+    ok: bool
+    error_code: str | None = None
+    error_message: str | None = None
+    adjustment_id: uuid.UUID | None = None
+  class BulkResolveOut(BaseModel)
+    results: list[BulkResolveItemOut]
+    applied: int
+    dry_run: bool
+    token: str
+### backend/app/api/v1/payroll_employees_schemas.py
+  class EmployeeEarningOut(BaseModel)
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    employee_id: uuid.UUID
+    earning_type_id: uuid.UUID
+    amount: Decimal | None = None
+    rate: Decimal | None = None
+    effective_from: date
+    effective_to: date | None = None
+    is_active: bool
+    row_version: int
+  class EmployeeEarningIn(BaseModel)
+    earning_type_id: uuid.UUID
+    amount: Decimal | None = Field(None, ge=0)
+    rate: Decimal | None = Field(None, ge=0)
+    effective_from: date
+    effective_to: date | None = None
+  class EmployeeEarningPatch(BaseModel)
+    amount: Decimal | None = Field(None, ge=0)
+    rate: Decimal | None = Field(None, ge=0)
+    effective_from: date | None = None
+    effective_to: date | None = None
+    is_active: bool | None = None
+    row_version: int
+  class EmployeeEarningListOut(BaseModel)
+    items: list[EmployeeEarningOut]
+    next_cursor: str | None = None
+  class EmployeeDeductionOut(BaseModel)
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    employee_id: uuid.UUID
+    deduction_type_id: uuid.UUID
+    amount: Decimal
+    balance: Decimal
+    effective_from: date
+    effective_to: date | None = None
+    is_active: bool
+    row_version: int
+  class EmployeeDeductionIn(BaseModel)
+    deduction_type_id: uuid.UUID
+    amount: Decimal = Field(..., ge=0)
+    effective_from: date
+    effective_to: date | None = None
+  class EmployeeDeductionPatch(BaseModel)
+    amount: Decimal | None = Field(None, ge=0)
+    effective_from: date | None = None
+    effective_to: date | None = None
+    is_active: bool | None = None
+    row_version: int
+  class EmployeeDeductionListOut(BaseModel)
+    items: list[EmployeeDeductionOut]
+    next_cursor: str | None = None
+### backend/app/api/v1/sheet_schemas.py
+  class SheetCellOut(BaseModel)
+    work_date: date
+    status: str | None = None
+    worked_minutes: int | None = None
+    normal_minutes: int | None = None
+    overtime_minutes: int | None = None
+    flags: list[str] = Field(default_factory=list)
+    open_exception_count: int = 0
+    locked: bool = False
+    reviewed: bool = False
+  class SheetEmployeeOut(BaseModel)
+    employee_id: uuid.UUID
+    employee_code: str
+    employee_name: str
+    site_id: uuid.UUID | None = None
+    department_id: uuid.UUID | None = None
+    days: list[SheetCellOut]
+  class SheetOut(BaseModel)
+    items: list[SheetEmployeeOut]
+    next_cursor: str | None = None
+    total: int | None = None
+  class DailyRowOut(BaseModel)
+    employee_id: uuid.UUID
+    employee_code: str
+    employee_name: str
+    site_id: uuid.UUID | None = None
+    department_id: uuid.UUID | None = None
+    work_date: date
+    status: str | None = None
+    first_in: datetime | None = None
+    last_out: datetime | None = None
+    shift_id: uuid.UUID | None = None
+    worked_minutes: int | None = None
+    normal_minutes: int | None = None
+    overtime_minutes: int | None = None
+    flags: list[str] = Field(default_factory=list)
+    open_exception_count: int = 0
+    locked: bool = False
+    reviewed: bool = False
+  class DailyOut(BaseModel)
+    items: list[DailyRowOut]
+    next_cursor: str | None = None
+    total: int | None = None
+  class MarkReviewedIn(BaseModel)
+    employee_ids: list[uuid.UUID] | None = None
+    site_id: uuid.UUID | None = None
+    department_id: uuid.UUID | None = None
+    from_date: date
+    to_date: date
+    @model_validator(mode='after')
+    def _v(self)
+  class MarkReviewedRefusedOut(BaseModel)
+    employee_id: uuid.UUID
+    work_date: date
+    reason: str
+  class MarkReviewedOut(BaseModel)
+    marked: int
+    refused: int
+    refused_days: list[MarkReviewedRefusedOut]
+### backend/app/api/v1/sites_schemas.py
+  _SITE_TYPES = ('site', 'store', 'office')
+  def _clean_code(v: str) -> str
+  class SiteOut(BaseModel)
+    id: uuid.UUID
+    branch_id: uuid.UUID
+    name: str
+    code: str
+    site_type: str
+    address: str | None = None
+    timezone: str
+    latitude: float | None = None
+    longitude: float | None = None
+    geofence_radius_m: int | None = None
+    is_active: bool
+    row_version: int
+  class SiteCreateIn(BaseModel)
+    branch_id: uuid.UUID
+    name: str = Field(..., min_length=1, max_length=200)
+    code: str = Field(..., min_length=1, max_length=40)
+    site_type: str = Field(default='site')
+    address: str | None = None
+    timezone: str = Field(default='Africa/Johannesburg', max_length=64)
+    latitude: float | None = None
+    longitude: float | None = None
+    geofence_radius_m: int | None = None
+    @field_validator('code')
+    @classmethod
+    def _validate_code(cls, v: str) -> str
+    @field_validator('site_type')
+    @classmethod
+    def _validate_site_type(cls, v: str) -> str
+  class SitePatchIn(BaseModel)
+    row_version: int = Field(..., ge=1)
+    branch_id: uuid.UUID | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    code: str | None = Field(default=None, min_length=1, max_length=40)
+    site_type: str | None = None
+    address: str | None = None
+    timezone: str | None = Field(default=None, max_length=64)
+    latitude: float | None = None
+    longitude: float | None = None
+    geofence_radius_m: int | None = None
+    is_active: bool | None = None
+    @field_validator('code')
+    @classmethod
+    def _validate_code(cls, v: str | None) -> str | None
+    @field_validator('site_type')
+    @classmethod
+    def _validate_site_type(cls, v: str | None) -> str | None
+  class SiteListOut(BaseModel)
+    items: list[SiteOut]
+    next_cursor: str | None = None
+    total: int | None = None
+### backend/app/core/config.py
+  _REPO_ROOT = Path(__file__).resolve().parents[3]
+  _ENV_FILE = _REPO_ROOT / '.env'
+  class Settings(BaseSettings)
+    model_config = SettingsConfigDict(env_file=str(_ENV_FILE), env_file_encoding='utf-8', case_sensitive=False, extra='ignore')
+    environment: Literal['development', 'test', 'staging', 'production'] = 'development'
+    secret_key: str = Field(..., min_length=32)
+    master_encryption_key: str
+    database_url_control: str
+    database_url_control_admin: str
+    database_url_tenant_template: str
+    database_url_tenant_admin_template: str
+    database_url_superuser: str
+    redis_url: str
+    s3_endpoint: str
+    s3_access_key: str
+    s3_secret_key: str
+    s3_bucket: str
+    s3_region: str = 'us-east-1'
+    clamav_host: str = 'clamav'
+    clamav_port: int = 3310
+    cors_origins: str = ''
+    log_level: str = 'INFO'
+    allow_tenant_header_fallback: bool = False
+    access_token_ttl_minutes: int = 15
+    refresh_token_ttl_days: int = 30
+    login_max_failures: int = 5
+    login_lockout_minutes: int = 15
+    login_rate_limit_per_minute: int = 20
+    refresh_reuse_leeway_seconds: int = 10
+    refresh_token_retention_days: int = 30
+    workers_count: int = 1
+    @property
+    def cors_origins_list(self) -> list[str]
+    @property
+    def tenant_header_fallback_active(self) -> bool
+    @model_validator(mode='after')
+    def _validate_invariants(self) -> 'Settings'
+    @model_validator(mode='after')
+    def _validate_production_defaults(self) -> 'Settings'
+    @model_validator(mode='after')
+    def _validate_worker_safety(self) -> 'Settings'
+  @lru_cache
+  def get_settings() -> Settings
+### backend/app/core/permissions.py
+  class Permission(str, Enum)
+    SELF_VIEW = 'self_view'
+    SELF_SUBMIT = 'self_submit'
+    PAYSLIP_VIEW = 'payslip_view'
+    LEAVE_APPROVE = 'leave_approve'
+    SICK_NOTE_VIEW = 'sick_note_view'
+    ATTENDANCE_ADJUST = 'attendance_adjust'
+    OVERTIME_APPROVE = 'overtime_approve'
+    EXCEPTION_RESOLVE = 'exception_resolve'
+    ADVANCE_DECIDE = 'advance_decide'
+    GRIEVANCE_HANDLE = 'grievance_handle'
+    PAY_RATE_REQUEST = 'pay_rate_request'
+    PAY_RATE_APPROVE = 'pay_rate_approve'
+    PAY_RATE_VIEW = 'pay_rate_view'
+    BANK_DETAIL_REQUEST = 'bank_detail_request'
+    BANK_DETAIL_APPROVE = 'bank_detail_approve'
+    SHIFT_CONFIGURE = 'shift_configure'
+    PAYROLL_PREVIEW = 'payroll_preview'
+    PAYROLL_FINALISE = 'payroll_finalise'
+    PAYROLL_REOPEN = 'payroll_reopen'
+    AUDIT_VIEW = 'audit_view'
+    USER_MANAGE = 'user_manage'
+    EMPLOYEE_CRUD = 'employee_crud'
+    ORG_VIEW = 'org_view'
+    ORG_MANAGE = 'org_manage'
+    ATTENDANCE_VIEW = 'attendance_view'
+  ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {'employee': frozenset({Permission.SELF_VIEW, Permission.SELF_SUBMIT, Permission.PAYSLIP_VIEW, Permission.O...
+  class PermissionDenied(HTTPException)
+    def __init__(self, permission: Permission) -> None
+  def check_permission(user: Any, permission: Permission) -> bool
+  def require_permission(permission: Permission)
+### backend/app/db/tenant/models/attendance.py
+  class Shift(Base, TimestampMixin)
+    __tablename__ = 'shift'
+    id: Mapped[uuid.UUID] = uuid_pk()
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    start_time: Mapped[time] = mapped_column(Time(), nullable=False)
+    length_minutes: Mapped[int] = mapped_column(Integer(), nullable=False)
+    unpaid_break_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default='0')
+    paid_break_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default='0')
+    grace_late_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default='0')
+    grace_early_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default='0')
+    rounding_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default='0')
+    rounding_mode: Mapped[str] = mapped_column(String(10), nullable=False, default='nearest', server_default='nearest')
+    min_overtime_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default='0')
+    overtime_requires_approval: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True, server_default=true())
+    max_shift_minutes: Mapped[int] = mapped_column(Integer(), nullable=False)
+    match_tolerance_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=60, server_default='60')
+    salaried_premium_mode: Mapped[str] = mapped_column(String(20), nullable=False, default='full', server_default='full')
+    grace_mode: Mapped[str] = mapped_column(String(20), nullable=False, default='threshold', server_default='threshold')
+    pay_early_arrival: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default='false')
+    is_active: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True, server_default=true())
+    row_version: Mapped[int] = mapped_column(Integer(), nullable=False, default=1, server_default='1')
+  class ShiftRateRule(Base, TimestampMixin)
+    __tablename__ = 'shift_rate_rule'
+    __table_args__ = (UniqueConstraint('shift_id', 'day_type', 'kind', 'tier', 'effective_from', name='uq_srr_key'),)
+    id: Mapped[uuid.UUID] = uuid_pk()
+    shift_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('shift.id', ondelete='CASCADE'), nullable=False)
+    day_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    tier: Mapped[int] = mapped_column(Integer(), nullable=False)
+    tier_up_to_minutes: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    method: Mapped[str] = mapped_column(String(20), nullable=False)
+    value: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    flat_unit: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    effective_from: Mapped[date] = mapped_column(Date(), nullable=False)
+    effective_to: Mapped[date | None] = mapped_column(Date(), nullable=True)
+  class WorkPattern(Base, TimestampMixin)
+    __tablename__ = 'work_pattern'
+    __table_args__ = (UniqueConstraint('name', name='uq_work_pattern_name'),)
+    id: Mapped[uuid.UUID] = uuid_pk()
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    cycle_length_days: Mapped[int] = mapped_column(Integer(), nullable=False)
+    anchor_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True, server_default=true())
+    row_version: Mapped[int] = mapped_column(Integer(), nullable=False, default=1, server_default='1')
+    days: Mapped[list['WorkPatternDay']] = relationship('WorkPatternDay', cascade='all, delete-orphan', order_by='WorkPatternDay.day_index')
+  class WorkPatternDay(Base, TimestampMixin)
+    __tablename__ = 'work_pattern_day'
+    __table_args__ = (UniqueConstraint('work_pattern_id', 'day_index', name='uq_wpd_pattern_day'),)
+    id: Mapped[uuid.UUID] = uuid_pk()
+    work_pattern_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('work_pattern.id', ondelete='CASCADE'), nullable=False)
+    day_index: Mapped[int] = mapped_column(Integer(), nullable=False)
+    is_expected: Mapped[bool] = mapped_column(Boolean(), nullable=False)
+    expected_shift_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('shift.id', ondelete='SET NULL'), nullable=True)
+  class PublicHolidayTenant(Base, TimestampMixin)
+    __tablename__ = 'public_holiday_tenant'
+    id: Mapped[uuid.UUID] = uuid_pk()
+    holiday_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    site_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('site.id', ondelete='CASCADE'), nullable=True)
+    department_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('department.id', ondelete='CASCADE'), nullable=True)
+    is_working_day_override: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default='false')
+    is_active: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True, server_default=true())
+    row_version: Mapped[int] = mapped_column(Integer(), nullable=False, default=1, server_default='1')
+  class Punch(Base)
+    __tablename__ = 'punch'
+    __table_args__ = (UniqueConstraint('device_id', 'client_punch_id', name='uq_punch_device_client'),)
+    id: Mapped[uuid.UUID] = uuid_pk()
+    client_punch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    employee_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('employee.id', ondelete='RESTRICT'), nullable=False)
+    device_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('device.id', ondelete='RESTRICT'), nullable=True)
+    site_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('site.id', ondelete='RESTRICT'), nullable=True)
+    server_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    device_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    device_now_at_send: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    effective_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    offset_ms: Mapped[int] = mapped_column(Integer(), nullable=False)
+    method: Mapped[str] = mapped_column(String(20), nullable=False)
+    match_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    liveness_passed: Mapped[bool | None] = mapped_column(Boolean(), nullable=True)
+    photo_object_key: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6), nullable=True)
+    longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    flags: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    raw_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+  class EmployeeWorkPattern(Base, TimestampMixin)
+    __tablename__ = 'employee_work_pattern'
+    id: Mapped[uuid.UUID] = uuid_pk()
+    employee_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('employee.id', ondelete='CASCADE'), nullable=False)
+    work_pattern_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('work_pattern.id', ondelete='RESTRICT'), nullable=False)
+    effective_from: Mapped[date] = mapped_column(Date(), nullable=False)
+    effective_to: Mapped[date | None] = mapped_column(Date(), nullable=True)
+  class AttendanceDay(Base, TimestampMixin)
+    __tablename__ = 'attendance_day'
+    __table_args__ = (UniqueConstraint('employee_id', 'work_date', name='uq_attendance_day_emp_date'),)
+    id: Mapped[uuid.UUID] = uuid_pk()
+    employee_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('employee.id', ondelete='RESTRICT'), nullable=False)
+    work_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    first_in: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_out: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    worked_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default='0')
+    normal_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default='0')
+    overtime_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default='0')
+    raw_minutes: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default='0')
+    shift_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('shift.id', ondelete='RESTRICT'), nullable=True)
+    flags: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    source_version: Mapped[int] = mapped_column(Integer(), nullable=False, default=0, server_default='0')
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    locked: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False, server_default='false')
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('user.id', ondelete='SET NULL'), nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer(), nullable=False, default=1, server_default='1')
+    segments: Mapped[list['AttendanceSegment']] = relationship('AttendanceSegment', cascade='all, delete-orphan', order_by='AttendanceSegment.local_date, Att...
+  class AttendanceSegment(Base, TimestampMixin)
+    __tablename__ = 'attendance_segment'
+    id: Mapped[uuid.UUID] = uuid_pk()
+    attendance_day_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('attendance_day.id', ondelete='CASCADE'), nullable=False)
+    local_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    day_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    tier: Mapped[int] = mapped_column(Integer(), nullable=False)
+    minutes: Mapped[int] = mapped_column(Integer(), nullable=False)
+    rate_method: Mapped[str] = mapped_column(String(20), nullable=False)
+    rate_value: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    overtime_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    source_refs: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+  class CountryCalendar(Base, TimestampMixin)
+    __tablename__ = 'country_calendar'
+    __table_args__ = (UniqueConstraint('country_code', 'holiday_date', name='uq_country_calendar_code_date'),)
+    id: Mapped[uuid.UUID] = uuid_pk()
+    country_code: Mapped[str] = mapped_column(String(2), nullable=False)
+    holiday_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    source_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    loaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+  class ExceptionItem(Base, TimestampMixin)
+    __tablename__ = 'exception_item'
+    id: Mapped[uuid.UUID] = uuid_pk()
+    employee_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('employee.id', ondelete='RESTRICT'), nullable=False)
+    work_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    type: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_ref: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    suggested_fix: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default='open', server_default='open')
+    assigned_to: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('user.id', ondelete='SET NULL'), nullable=True)
+    resolved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('user.id', ondelete='SET NULL'), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+  class Adjustment(Base)
+    __tablename__ = 'adjustment'
+    id: Mapped[uuid.UUID] = uuid_pk()
+    employee_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('employee.id', ondelete='RESTRICT'), nullable=False)
+    work_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    time_in: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    time_out: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    minutes: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    reason_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('user.id', ondelete='SET NULL'), nullable=True)
+    old_value: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    new_value: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    period_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+### backend/app/db/tenant/models/organisation.py
+  class Company(Base, TimestampMixin)
+    __tablename__ = 'company'
+    id: Mapped[uuid.UUID] = uuid_pk()
+    legal_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    trading_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    registration_number: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    tax_number: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    paye_reference: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    uif_reference: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    sdl_reference: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    coida_reference: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    country_code: Mapped[str] = mapped_column(String(2), nullable=False, default='ZA')
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default='ZAR')
+    default_timezone: Mapped[str] = mapped_column(String(64), nullable=False, default='Africa/Johannesburg')
+    settings: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+  class Branch(Base, TimestampMixin)
+    __tablename__ = 'branch'
+    __table_args__ = (UniqueConstraint('code', name='uq_branch_code'),)
+    id: Mapped[uuid.UUID] = uuid_pk()
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    code: Mapped[str] = mapped_column(String(40), nullable=False)
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
+    row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+  class Site(Base, TimestampMixin)
+    __tablename__ = 'site'
+    __table_args__ = (UniqueConstraint('code', name='uq_site_code'),)
+    id: Mapped[uuid.UUID] = uuid_pk()
+    branch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('branch.id', ondelete='RESTRICT'), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    code: Mapped[str] = mapped_column(String(40), nullable=False)
+    site_type: Mapped[str] = mapped_column(String(20), nullable=False, default='site')
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default='Africa/Johannesburg')
+    latitude: Mapped[float | None] = mapped_column(Numeric(9, 6), nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Numeric(9, 6), nullable=True)
+    geofence_radius_m: Mapped[int | None] = mapped_column(nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
+    row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    branch: Mapped[Branch] = relationship(Branch, lazy='joined')
+  class Department(Base, TimestampMixin)
+    __tablename__ = 'department'
+    __table_args__ = (UniqueConstraint('code', name='uq_department_code'),)
+    id: Mapped[uuid.UUID] = uuid_pk()
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    code: Mapped[str] = mapped_column(String(40), nullable=False)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('department.id', ondelete='SET NULL'), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
+    row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+### backend/app/services/auth_service.py
+  _DUMMY_HASH = hash_password('dummy-password-for-constant-time-auth')
+  class AuthError(Exception)
+  class AuthLockedError(AuthError)
+  class AuthRefreshReuseError(AuthError)
+  class AuthRetryableRefreshError(AuthError)
+  class LoginResult()
+    @dataclass(frozen=True)
+    access_token: str
+    refresh_token: str
+    expires_in: int
+    must_change_password: bool
+    user_id: str
+  def _sha256_hex(s: str) -> str
+  def _now() -> datetime
+  def authenticate(session: Session, *, identifier: str, password: str, ip_address: str | None, user_agent: str | None, request_id: str | None) -> User
+  def issue_token_pair(session: Session, *, user: User, tenant: str, ip_address: str | None, user_agent: str | None) -> LoginResult
+  def rotate_refresh_token(session: Session, *, refresh_token: str, tenant: str, ip_address: str | None, user_agent: str | None, request_id: str | None) -> LoginResult
+  def revoke_family(session: Session, *, refresh_token: str, tenant: str, reason: str, ip_address: str | None, user_agent: str | None, request_id: str | None) -> None
+  def change_password(session: Session, *, user: User, current_password: str, new_password: str, ip_address: str | None, request_id: str | None) -> None
+### backend/tests/test_auth_service.py
+  @pytest.fixture()
+  def tenant_session()
+  def _admin_user(session: Session) -> User
+  def test_constant_time_login(tenant_session) -> None
+  def test_reuse_within_leeway_does_not_revoke(tenant_session, monkeypatch) -> None
+  def test_reuse_outside_leeway_revokes_family(tenant_session, monkeypatch) -> None
+  def test_change_password_sets_timestamp_and_revokes_families(tenant_session) -> None

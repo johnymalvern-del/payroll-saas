@@ -7,6 +7,10 @@ employee_id, and permissions from the live ROLE_PERMISSIONS matrix
 must_change_password is read from the User.must_change_password column
 (explicit flag the app uses to gate the UI). Fallback: if a migration ever
 drops that column, the endpoint falls back to `password_changed_at is None`.
+
+default_timezone (B-1) is exposed so the frontend can render site-tz
+timestamps without calling /company on every page. Nullable so a seed
+race or unprovisioned tenant does not fail the login-gated /auth/me call.
 """
 from __future__ import annotations
 
@@ -15,9 +19,12 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import select
 
+from app.api.deps import TenantDbDep
 from app.core.auth_deps import get_current_user
 from app.core.permissions import ROLE_PERMISSIONS
+from app.db.tenant.models.organisation import Company
 
 router = APIRouter(prefix="/auth/me", tags=["auth"])
 
@@ -31,6 +38,7 @@ class UserMeOut(BaseModel):
     employee_id: uuid.UUID | None
     permissions: list[str]
     must_change_password: bool
+    default_timezone: str | None = None
 
 
 def _must_change_password(user: Any) -> bool:
@@ -44,12 +52,15 @@ def _must_change_password(user: Any) -> bool:
 
 @router.get("", response_model=UserMeOut)
 def get_me(
+    db: TenantDbDep,
     user: Annotated[Any, Depends(get_current_user)],
 ) -> UserMeOut:
     role = getattr(user, "role", None) or "unknown"
     permissions = sorted(
         p.value for p in ROLE_PERMISSIONS.get(role, frozenset())
     )
+    company = db.scalar(select(Company))
+    default_tz = company.default_timezone if company is not None else None
     return UserMeOut(
         id=user.id,
         username=user.username,
@@ -57,4 +68,5 @@ def get_me(
         employee_id=getattr(user, "employee_id", None),
         permissions=permissions,
         must_change_password=_must_change_password(user),
+        default_timezone=default_tz,
     )
