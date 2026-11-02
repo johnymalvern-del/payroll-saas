@@ -1,29 +1,11 @@
-"""Payroll runner (Chapter 4 Bundle 004b-a + Chapter 4H B-4c).
+"""Payroll runner (Chapter 4 Bundle 004b-a + Chapter 4H B-4c/d).
 
-Orchestration layer between HTTP endpoints and the pure pipeline.
-
-Chapter 4H B-4c adds attendance-to-earnings integration:
-  - `_build_attendance_earnings` reads attendance_day + attendance_segment
-    rows for the period and produces EarningLines per attendance_earning_map.
-  - Locked days are INCLUDED (round-2 §1) — a closed period must not lose
-    its own data on re-preview.
-  - Unapproved overtime segments produce a warning and no earning (round-2 §6).
-  - Unpaid days and unpaid public holidays produce NEGATIVE earning lines so
-    they reduce gross BEFORE PAYE/UIF/SDL (round-2 §3). The amount is
-    computed by the accountant-acknowledged `unpaid_day_formula_code`, never
-    an invented divisor.
-  - Monthly staff hourly rates are derived via
-    `monthly_hourly_derivation_formula_code` when they have overtime or
-    allowance segments (round-2 §4).
-  - Rate in force uses `EmployeePayHistory` (effective-dated) for the
-    segment's `local_date`, not the current `employee.base_rate`
-    (round-2 §5). A missing history row falls back to `employee.base_rate`
-    with a warning, never silently.
-  - Leave source restricted to 'adjustment' (round-2 §9): any other value
-    raises 422 `leave_source_not_available`.
-  - The attendance inputs (grouped minutes, mapping used, settings read,
-    rate sources) are stored on `draft.calculation_context["attendance_inputs"]`
-    so explain/PDF can reproduce what the run used (round-2 §10).
+Chapter 4H B-4c: attendance-to-earnings integration (see bundle B4-02c.1).
+Chapter 4H B-4d: finalise now refuses when open exceptions exist in the
+period unless the caller passes an explicit ack reason (audited). This
+preserves the "closed period re-previews unchanged" guarantee — a
+finalised period is locked and should not silently contain unaddressed
+exceptions.
 """
 from __future__ import annotations
 
@@ -38,6 +20,7 @@ from app.core.errors import AppError
 from app.db.tenant.models.attendance import (
     AttendanceDay,
     AttendanceSegment,
+    ExceptionItem,
     Shift,
 )
 from app.db.tenant.models.pay import (
@@ -68,9 +51,6 @@ from app.services.statutory_loader import (
 _COUNTRY_CODE = "ZA"
 _PERIODS_PER_YEAR = {"monthly": 12, "weekly": 52, "fortnightly": 26}
 
-# Formulas the runner can actually invoke for unpaid_day_formula_code.
-# The PATCH validator accepts any FORMULA_REGISTRY code, but only these three
-# have the (daily_rate, unpaid_days) signature the runner expects.
 _UNPAID_DAY_FORMULAS = {
     "gen_unpaid_absence": gen_unpaid_absence,
 }
@@ -200,13 +180,6 @@ def _rate_in_force_for(
     settings: PayrollSettings,
     warnings: list[str],
 ) -> Decimal:
-    """Pay rate in force on `on_date`.
-
-    - hourly: newest approved pay history row with effective_from <= on_date,
-      else employee.base_rate with a warning.
-    - monthly: hourly equivalent derived via
-      settings.monthly_hourly_derivation_formula_code. Unset -> 409.
-    """
     if employee.pay_basis == "hourly" or employee.pay_basis == "daily":
         ph = db.scalar(
             select(EmployeePayHistory).where(
@@ -234,7 +207,6 @@ def _rate_in_force_for(
             409,
         )
 
-    # monthly
     code = settings.monthly_hourly_derivation_formula_code
     if code is None:
         raise AppError(
@@ -301,14 +273,6 @@ def _daily_rate_for_employee_on_date(
     settings: PayrollSettings,
     warnings: list[str],
 ) -> Decimal:
-    """Daily rate for unpaid-day / leave-pay / public-holiday computations.
-
-    rate = hourly_rate_in_force * (hours_in_standard_day)
-    hours_in_standard_day = default_shift.length_minutes / 60
-                             OR contracted_weekly_hours / 5
-    Never invents an 8-hour divisor — the shift or the contracted hours are
-    real employee data.
-    """
     rate = _rate_in_force_for(db, employee, on_date, settings, warnings)
     if employee.default_shift_id is not None:
         shift = db.get(Shift, employee.default_shift_id)
@@ -329,15 +293,7 @@ def _group_key_for_segment(seg: AttendanceSegment) -> str:
     return f"{seg.kind}|{seg.day_type}|{tier_part}"
 
 
-def _segment_amount(
-    seg: AttendanceSegment,
-    rate: Decimal,
-) -> Decimal:
-    """Amount for a single multiplier segment.
-
-    round-2 §7: Decimal throughout; per-segment quantisation to 4 dp, then
-    the final aggregated line is quantised to 2 dp by the pipeline.
-    """
+def _segment_amount(seg: AttendanceSegment, rate: Decimal) -> Decimal:
     if seg.rate_method == "multiplier":
         per_hour = rate * Decimal(seg.rate_value)
         return (Decimal(seg.minutes) / Decimal(60) * per_hour).quantize(
@@ -366,11 +322,6 @@ def _build_attendance_earnings(
     employee: Employee,
     pay_period: PayPeriod,
 ) -> tuple[list[P.EarningLine], list[str], dict]:
-    """Attendance-derived EarningLines for the period.
-
-    Returns (lines, warnings, snapshot). Lines may include NEGATIVE entries
-    (unpaid days / unpaid public holidays) which reduce gross before tax.
-    """
     settings = _load_settings(db)
     warnings: list[str] = []
     snapshot: dict = {
@@ -390,7 +341,6 @@ def _build_attendance_earnings(
     }
     lines: list[P.EarningLine] = []
 
-    # Leave source gate (round-2 §9): only 'adjustment' supported.
     if settings.leave_authoritative_source in ("leave_request", "both"):
         raise AppError(
             "leave_source_not_available",
@@ -418,7 +368,6 @@ def _build_attendance_earnings(
         )
     ).all())
 
-    # 1. Group minutes by (kind, day_type, tier).
     grouped: dict[str, int] = {}
     for seg in segments:
         if seg.minutes <= 0:
@@ -427,7 +376,6 @@ def _build_attendance_earnings(
         grouped[key] = grouped.get(key, 0) + int(seg.minutes)
     snapshot["grouped_minutes"] = dict(grouped)
 
-    # 2. Resolve mapping.
     mapping = settings.attendance_earning_map or {}
     missing_keys = [k for k in grouped.keys() if k not in mapping]
     if missing_keys:
@@ -440,7 +388,6 @@ def _build_attendance_earnings(
         )
     snapshot["mapping_used"] = {k: mapping[k] for k in grouped.keys()}
 
-    # 3. Load earning types referenced.
     type_codes = {mapping[k] for k in grouped.keys()}
     types_by_code = {t.code: t for t in db.scalars(
         select(EarningType).where(EarningType.code.in_(type_codes))
@@ -455,7 +402,6 @@ def _build_attendance_earnings(
             {"missing_types": sorted(missing_types)},
         )
 
-    # 4. Per-segment rate & amount -> aggregate by earning_type code.
     agg: dict[str, dict] = {}
     for seg in segments:
         if seg.minutes <= 0:
@@ -463,8 +409,6 @@ def _build_attendance_earnings(
         day = day_by_id.get(seg.attendance_day_id)
         if day is None:
             continue
-        # Normal segments for monthly staff are already covered by
-        # BASE_MONTHLY — do not double-pay them.
         if employee.pay_basis == "monthly" and seg.kind == "normal":
             continue
 
@@ -472,7 +416,6 @@ def _build_attendance_earnings(
         code = mapping[key]
         et = types_by_code[code]
 
-        # Overtime approval gate (round-2 §6).
         if seg.kind == "overtime":
             shift = db.get(Shift, day.shift_id) if day.shift_id else None
             requires_approval = bool(shift and shift.overtime_requires_approval)
@@ -483,7 +426,6 @@ def _build_attendance_earnings(
                 )
                 continue
 
-        # Rate in force on segment local_date (round-2 §5).
         rate = _rate_in_force_for(db, employee, seg.local_date, settings, warnings)
         snapshot["rates_by_date"][seg.local_date.isoformat()] = str(rate)
 
@@ -518,7 +460,6 @@ def _build_attendance_earnings(
             },
         ))
 
-    # 5. Unpaid days (round-2 §3): monthly staff only, negative earning.
     absent_days = [
         d for d in days
         if d.status == "absent" and (d.worked_minutes or 0) == 0
@@ -535,7 +476,6 @@ def _build_attendance_earnings(
             pass
         elif settings.unpaid_day_behaviour == "deduct_daily":
             if employee.pay_basis != "monthly":
-                # Hourly staff lose pay by not working; no negative needed.
                 warnings.append(
                     f"unpaid_day_hourly_not_deducted:{employee.employee_code}:"
                     f"{len(absent_days)}day(s)"
@@ -567,7 +507,7 @@ def _build_attendance_earnings(
                 )
                 lines.append(P.EarningLine(
                     label=f"Unpaid absence ({len(absent_days)} day(s))",
-                    amount=-positive,  # NEGATIVE reduces gross
+                    amount=-positive,
                     frequency="regular",
                     is_taxable=True,
                     counts_for_uif=True,
@@ -593,7 +533,6 @@ def _build_attendance_earnings(
                 409,
             )
 
-    # 6. Unworked public holidays (round-2 §3).
     unworked_ph = [d for d in days if d.status == "public_holiday_unworked"]
     if unworked_ph:
         beh = settings.public_holiday_unworked_monthly
@@ -614,9 +553,6 @@ def _build_attendance_earnings(
                 )
             beh = "paid" if settings.public_holiday_paid else "unpaid"
         if beh == "paid":
-            # Monthly salary covers it; hourly staff get nothing extra (no
-            # hours worked). Both are consistent with "paid holiday" for
-            # salaried and "no hours" for hourly.
             pass
         elif beh == "unpaid":
             if employee.pay_basis != "monthly":
@@ -669,7 +605,6 @@ def _build_attendance_earnings(
                 409,
             )
 
-    # 7. Leave (adjustment source only).
     leave_days = [d for d in days if d.status == "leave"]
     if leave_days:
         if settings.leave_authoritative_source is None:
@@ -679,9 +614,8 @@ def _build_attendance_earnings(
                 f"{len(leave_days)} leave day(s) exist in the period",
                 409,
             )
-        # Already asserted only 'adjustment' accepted above.
         if employee.pay_basis == "monthly" and not bool(settings.leave_earning_for_monthly):
-            pass  # salary covers it
+            pass
         else:
             daily_rate = _daily_rate_for_employee_on_date(
                 db, employee, pay_period.pay_date, settings, warnings,
@@ -844,6 +778,34 @@ def _formula_warnings(db: Session) -> list[str]:
     return [code for code in FORMULA_REGISTRY if code not in acks]
 
 
+def _count_open_exceptions_in_period(
+    db: Session, pay_period: PayPeriod,
+) -> tuple[int, list[dict]]:
+    """Count open ExceptionItem rows whose work_date is in the period.
+
+    Round-2 §1: closed periods must not contain unaddressed exceptions.
+    Returns (count, sample) where sample is at most 5 items for the 409
+    details.
+    """
+    rows = db.execute(
+        select(
+            ExceptionItem.employee_id,
+            ExceptionItem.work_date,
+            ExceptionItem.type,
+        ).where(
+            ExceptionItem.work_date >= pay_period.start_date,
+            ExceptionItem.work_date <= pay_period.end_date,
+            ExceptionItem.status == "open",
+        ).limit(1000)
+    ).all()
+    count = len(rows)
+    sample = [
+        {"employee_id": str(r[0]), "work_date": r[1].isoformat(), "type": r[2]}
+        for r in rows[:5]
+    ]
+    return count, sample
+
+
 def run_preview(db: Session, user, pay_period: PayPeriod) -> PayrollRun:
     if pay_period.status == "locked":
         raise AppError("period_locked", "Cannot preview a finalised period; reopen it first", 409)
@@ -905,7 +867,10 @@ def run_preview(db: Session, user, pay_period: PayPeriod) -> PayrollRun:
     return run
 
 
-def finalise(db: Session, user, pay_period: PayPeriod) -> PayrollRun:
+def finalise(
+    db: Session, user, pay_period: PayPeriod,
+    *, ack_open_exceptions_reason: str | None = None,
+) -> PayrollRun:
     if pay_period.status == "locked":
         raise AppError("period_locked", "Period is already finalised", 409)
 
@@ -916,6 +881,20 @@ def finalise(db: Session, user, pay_period: PayPeriod) -> PayrollRun:
             f"cannot finalise until all formulas are acknowledged; missing: {warnings}",
             409,
         )
+
+    # Round-2 §1: refuse on open exceptions in period unless ack reason given.
+    open_count, open_sample = _count_open_exceptions_in_period(db, pay_period)
+    ack_used = False
+    if open_count > 0:
+        if not ack_open_exceptions_reason or not ack_open_exceptions_reason.strip():
+            raise AppError(
+                "open_exceptions_in_period",
+                f"{open_count} open exception(s) exist in this period; pass "
+                f"ack_open_exceptions_reason to acknowledge and proceed",
+                409,
+                {"count": open_count, "sample": open_sample},
+            )
+        ack_used = True
 
     _purge_preview(db, pay_period.id)
     ensure_system_earning_types(db)
@@ -973,8 +952,13 @@ def finalise(db: Session, user, pay_period: PayPeriod) -> PayrollRun:
     write_audit(
         db, user,
         entity_type="payroll_run", entity_id=run.id, action="finalise",
-        new_value={"pay_period_id": str(pay_period.id), "revision": rev,
-                   "employee_count": run.rules_snapshot["employee_count"]},
+        new_value={
+            "pay_period_id": str(pay_period.id),
+            "revision": rev,
+            "employee_count": run.rules_snapshot["employee_count"],
+            "open_exception_count_at_finalise": open_count,
+            "ack_open_exceptions_reason": ack_open_exceptions_reason if ack_used else None,
+        },
     )
     return run
 

@@ -1,3 +1,8 @@
+"""Pay period schemas (Chapter 4 + Chapter 4H B-4d).
+
+B-4d adds FinaliseIn: optional body for POST .../finalise to pass an
+explicit acknowledgement of open exceptions in the period.
+"""
 from __future__ import annotations
 
 import uuid
@@ -17,7 +22,6 @@ class PayPeriodIn(BaseModel):
 
 class PayPeriodOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-
     id: uuid.UUID
     period_key: str
     start_date: date
@@ -40,21 +44,20 @@ class PreviewSummaryRow(BaseModel):
     gross: Decimal
     paye: Decimal
     net: Decimal
-    warnings: list[str] = []
+    warnings: list[str] = Field(default_factory=list)
 
 
 class PreviewOut(BaseModel):
     run_id: uuid.UUID
     revision: int
     status: str
-    unacknowledged_formulas: list[str] = []
+    unacknowledged_formulas: list[str] = Field(default_factory=list)
     items: list[PreviewSummaryRow]
     next_cursor: str | None = None
 
 
 class PayrollRunOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-
     id: uuid.UUID
     pay_period_id: uuid.UUID
     kind: str
@@ -71,7 +74,6 @@ class ReopenIn(BaseModel):
 
 class ReopenLogOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-
     id: uuid.UUID
     pay_period_id: uuid.UUID
     reopened_by_user_id: uuid.UUID | None = None
@@ -80,4 +82,13 @@ class ReopenLogOut(BaseModel):
     new_revision: int
     occurred_at: datetime
 
-# END OF FILE
+
+class FinaliseIn(BaseModel):
+    """Optional body for POST /payroll/pay-periods/{id}/finalise.
+
+    Round-2 amendment §1: a payroll_admin can acknowledge open exceptions
+    in the period with a reason. The reason is recorded in the audit log;
+    a blank/None reason means "no acknowledgement" and finalise refuses
+    with 409 open_exceptions_in_period when open exceptions exist.
+    """
+    ack_open_exceptions_reason: str | None = Field(default=None, max_length=500)

@@ -1,13 +1,12 @@
-"""Pay period endpoints (Chapter 4, Bundle 004b-a).
+"""Pay period endpoints (Chapter 4 Bundle 004b-a + Chapter 4H B-4d).
 
-6 endpoints:
-  POST   /payroll/pay-periods                          PAYROLL_FINALISE
-  GET    /payroll/pay-periods                          PAYROLL_PREVIEW
-  GET    /payroll/pay-periods/{id}                     PAYROLL_PREVIEW
-  POST   /payroll/pay-periods/{id}/preview             PAYROLL_PREVIEW  (persisted per F4)
-  POST   /payroll/pay-periods/{id}/finalise            PAYROLL_FINALISE
-  POST   /payroll/pay-periods/{id}/reopen              PAYROLL_REOPEN
-  GET    /payroll/pay-periods/{id}/reopen-log          PAYROLL_PREVIEW
+B-4d adds:
+  - POST .../finalise accepts an optional body (FinaliseIn) to acknowledge
+    open exceptions in the period (round-2 §1). No body / blank reason =
+    no acknowledgement; finalise refuses with 409 open_exceptions_in_period
+    when open exceptions exist.
+  - POST .../preview surfaces per-employee attendance_warnings from
+    Payslip.calculation_context (round-1 §3 UI surfacing).
 """
 from __future__ import annotations
 
@@ -21,6 +20,7 @@ from sqlalchemy import select
 
 from app.api.deps import TenantDbDep
 from app.api.v1.payroll_pay_periods_schemas import (
+    FinaliseIn,
     PayPeriodIn,
     PayPeriodListOut,
     PayPeriodOut,
@@ -54,6 +54,29 @@ def _decode_cursor(cursor: str) -> uuid.UUID:
         return uuid.UUID(json.loads(raw)["i"])
     except Exception:
         raise AppError("invalid_cursor", "The pagination cursor is malformed", 400) from None
+
+
+def _preview_row_from_payslip(payslip: Payslip, employee: Employee) -> PreviewSummaryRow:
+    """Round-1 §3: surface attendance_warnings from the payslip context.
+
+    Payslips written by the runner carry `calculation_context` as a dict
+    with at minimum `attendance_warnings` (may be empty) and
+    `attendance_inputs`. A payslip from an older run may not carry it —
+    treat missing key as empty list.
+    """
+    ctx = payslip.calculation_context or {}
+    warns = ctx.get("attendance_warnings") or []
+    if not isinstance(warns, list):
+        warns = []
+    return PreviewSummaryRow(
+        employee_id=employee.id,
+        employee_code=employee.employee_code,
+        employee_name=f"{employee.first_name} {employee.last_name}".strip(),
+        gross=payslip.gross,
+        paye=payslip.paye,
+        net=payslip.net,
+        warnings=[str(w) for w in warns],
+    )
 
 
 @router.post("", response_model=PayPeriodOut, status_code=201)
@@ -150,15 +173,7 @@ def preview_pay_period(
         pairs = pairs[:limit]
         next_cursor = _encode_cursor(pairs[-1][0].id)
 
-    items = [
-        PreviewSummaryRow(
-            employee_id=e.id,
-            employee_code=e.employee_code,
-            employee_name=f"{e.first_name} {e.last_name}".strip(),
-            gross=p.gross, paye=p.paye, net=p.net, warnings=[],
-        )
-        for p, e in pairs
-    ]
+    items = [_preview_row_from_payslip(p, e) for p, e in pairs]
 
     return PreviewOut(
         run_id=run.id,
@@ -175,11 +190,13 @@ def finalise_pay_period(
     period_id: uuid.UUID,
     db: TenantDbDep,
     user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_FINALISE))],
+    body: FinaliseIn | None = None,
 ) -> PayrollRunOut:
     period = db.scalar(select(PayPeriod).where(PayPeriod.id == period_id))
     if period is None:
         raise AppError("not_found", "Pay period not found", 404)
-    run = finalise(db, user, period)
+    ack = body.ack_open_exceptions_reason if body is not None else None
+    run = finalise(db, user, period, ack_open_exceptions_reason=ack)
     db.commit()
     return PayrollRunOut.model_validate(run)
 
@@ -213,5 +230,3 @@ def get_reopen_log(
         .order_by(PeriodReopenLog.occurred_at.asc())
     ).all())
     return [ReopenLogOut.model_validate(r) for r in rows]
-
-# END OF FILE

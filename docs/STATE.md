@@ -19,10 +19,8 @@ both proposes and commits.
 `EarningType` rows until the user calls
 `POST /payroll/earning-types/ensure-system`, or until the first
 `run_preview`/`finalise` (which calls it internally).
-- **Impact**: limited — runner self-heals on first preview, but
-  `GET /payroll/earning-types` returns empty until then.
 - **To close**: import `ensure_system_earning_types` in
-  `provisioning.py::_seed_tenant_defaults`; needs `provisioning.py` source.
+  `provisioning.py::_seed_tenant_defaults`. Needs `provisioning.py` source.
   Recorded for a future bundle.
 
 ## Chapter 4H B-4 progress
@@ -31,25 +29,24 @@ both proposes and commits.
 - **B4-02a** (committed): demo seed pay setup.
 - **B4-02b** (committed): 13 system earning types + demo
   `attendance_earning_map`.
-- **B4-02c.1** (this bundle): attendance-to-earnings integration in
-  `payroll_runner`. `_build_attendance_earnings` reads
-  attendance_day+attendance_segment for the period, groups by
-  `attendance_earning_map`, resolves rate-in-force via
-  `EmployeePayHistory`, negates unpaid-day / unpaid-PH amounts (round-2
-  §3), skips unapproved overtime with a warning (round-2 §6), requires
-  `monthly_hourly_derivation_formula_code` for monthly staff OT/premium
-  (round-2 §4), rejects `leave_authoritative_source` other than
-  `'adjustment'` (round-2 §9). Snapshot stored on
-  `draft.calculation_context["attendance_inputs"]` (round-2 §10).
-  `FORMULA_REGISTRY` unchanged at 6 (derivation formulas live in
-  `DERIVATION_FORMULAS`); `_validate_formula_code` in
-  `payroll_settings.py` accepts either set.
-- **B4-02c.2** (pending): demo seed `ShiftRateRule` rows + SEED.md
-  update + `tests/test_payroll_attendance_earnings.py`.
-- **B4-02d** (pending): finalise open-exceptions acknowledgement +
-  `PreviewOut.warnings` surfaced from
-  `Payslip.calculation_context["attendance_warnings"]` + end-to-end
-  gross→PAYE→UIF→net test with fake control tables.
+- **B4-02c.1** (committed): attendance-to-earnings integration in
+  `payroll_runner`; `FORMULA_REGISTRY` unchanged at 6;
+  `DERIVATION_FORMULAS` accepted by PATCH validation.
+- **B4-02c.2** (committed): demo seed `ShiftRateRule` rows + 16
+  attendance-earnings tests.
+- **B4-02d1** (this bundle): finalise open-exceptions ack (round-2 §1) +
+  preview surfaces per-employee `attendance_warnings` from
+  `Payslip.calculation_context` (round-1 §3 UI surfacing).
+  - `finalise(db, user, pay_period, *, ack_open_exceptions_reason=None)`.
+  - 409 `open_exceptions_in_period` with `{count, sample}` unless ack
+    reason is non-blank.
+  - Audit records `open_exception_count_at_finalise` and
+    `ack_open_exceptions_reason` (only when ack was used).
+  - `_preview_row_from_payslip` helper surfaces warnings from
+    `calculation_context["attendance_warnings"]`; empty when context
+    missing.
+- **B4-02d2** (pending): demo-tenant preview e2e + non-demo unset 409
+  (needs control-table fixtures in test).
 - **B4-02e** (pending): demo PDF watermark via
   `payroll_pdf.render_payslip_pdf` when `PayrollSettings.demo_values`.
 - **B4-02f** (pending): `provisioning.py` auto-seed hook.
