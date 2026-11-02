@@ -14,30 +14,33 @@ both proposes and commits.
   mirroring `payroll_change_request`.
 
 ## System earning types auto-seed
-**Closed in B4-02f.** `provision_tenant::_seed_tenant_defaults` now calls
-`ensure_system_earning_types` in the same provisioning transaction as the
-company row insert. A freshly provisioned real tenant has 13
-`EarningType` rows before the first request lands, so `GET
-/payroll/earning-types` returns a populated list without requiring a
-manual `POST /payroll/earning-types/ensure-system` call.
+**Closed in B4-02f.** `provision_tenant::_seed_tenant_defaults` calls
+`ensure_system_earning_types` in the same provisioning flow as the company
+row insert. A fresh real tenant has 13 `EarningType` rows before the first
+request lands.
 
 ## Chapter 4H B-4 progress
 - **B4-01** (committed): migration `ten_0021`, `PayrollSettings`
-  model/schema extension, PATCH validation + audit.
+  extension, PATCH validation + audit.
 - **B4-02a** (committed): demo seed pay setup.
-- **B4-02b** (committed): 13 system earning types + demo
-  `attendance_earning_map`.
+- **B4-02b** (committed — 13 system earning types + demo
+  `attendance_earning_map`).
 - **B4-02c.1** (committed): attendance-to-earnings integration in
   `payroll_runner`.
 - **B4-02c.2** (committed): demo seed `ShiftRateRule` rows + 16
   attendance-earnings tests.
 - **B4-02d.1** (committed): finalise open-exceptions ack + preview
   surfaces per-employee `attendance_warnings`.
-- **B4-02e** (committed): demo PDF watermark via `payroll_pdf`.
-- **B4-02f** (this bundle): `provision_tenant` auto-seeds the 13 system
-  earning types. Closes the "System earning types auto-seed" gap above.
-- **B4-02d.2** (pending): demo-tenant preview e2e + non-demo unset 409
-  (needs control-table fixtures in test).
+- **B4-02e** (committed): demo PDF watermark.
+- **B4-02f** (committed): provision auto-seeds 13 system types.
+- **B4-02d.2** (this bundle): end-to-end demo-tenant preview test
+  (`run_preview` → `Payslip` → `render_payslip_pdf` with DEMO watermark)
+  + non-demo fail-closed test (unset `unpaid_day_behaviour` → 409).
+
+**B-4 core work is complete.** Remaining sub-bundles within Chapter 4H are
+B-3 (single-employee preview + own payslips + 4G-b confirmation), 4G-c
+(golden payslip case framework), B-6 (multi-value type filter on
+exceptions), and the 14 seed tests.
 
 ## Payroll golden cases (Chapter 4H, 4G-c)
 - Framework: not yet delivered (Bundle B4-03).
