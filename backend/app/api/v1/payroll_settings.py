@@ -1,14 +1,14 @@
-"""Payroll settings (Chapter 4 Bundle 003b + Chapter 4H B-4 foundation).
+"""Payroll settings (Chapter 4 Bundle 003b + Chapter 4H B-4).
 
 GET requires PAYROLL_PREVIEW. PATCH requires PAYROLL_FINALISE.
 
 Chapter 4H additions:
   - Validate `attendance_earning_map` keys are `<kind>|<day_type>|<tier_or_any>`
     (422 `invalid_attendance_earning_map` otherwise).
-  - Validate `unpaid_day_formula_code` and `monthly_hourly_derivation_formula_code`
-    are registered in `app.services.payroll_formulas.FORMULA_REGISTRY`
-    (422 `unknown_formula` otherwise) — the ack gate is enforced by the
-    run itself, this only ensures the name resolves.
+  - Validate formula codes (unpaid_day_formula_code,
+    monthly_hourly_derivation_formula_code) against the union of
+    FORMULA_REGISTRY and DERIVATION_FORMULAS (422 `unknown_formula`).
+    The ack gate (FORMULA_REGISTRY only) is enforced at run time.
   - Audit old/new via `write_audit` (action `payroll_settings.update`).
 """
 from __future__ import annotations
@@ -29,13 +29,15 @@ from app.core.errors import AppError
 from app.core.permissions import Permission, require_permission
 from app.db.tenant.models.payroll_settings import PayrollSettings
 from app.services.payroll_audit import write_audit
-from app.services.payroll_formulas import FORMULA_REGISTRY
+from app.services.payroll_formulas import DERIVATION_FORMULAS, FORMULA_REGISTRY
 
 router = APIRouter(prefix="/payroll/settings", tags=["payroll-settings"])
 
 _DEFAULT_NET_PAY_FLOOR = Decimal("0.00")
 
 _ALLOWED_KINDS = ("normal", "overtime", "allowance")
+
+_ALLOWED_FORMULA_CODES = frozenset(FORMULA_REGISTRY) | frozenset(DERIVATION_FORMULAS)
 
 
 def _to_out(row: PayrollSettings | None) -> PayrollSettingsOut:
@@ -101,10 +103,11 @@ def _validate_attendance_map(m: dict[str, str]) -> None:
 def _validate_formula_code(field: str, code: str | None) -> None:
     if code is None:
         return
-    if code not in FORMULA_REGISTRY:
+    if code not in _ALLOWED_FORMULA_CODES:
         raise AppError(
             "unknown_formula",
-            f"{field}={code!r} is not in FORMULA_REGISTRY",
+            f"{field}={code!r} is not a registered formula or derivation "
+            f"(accepted: {sorted(_ALLOWED_FORMULA_CODES)})",
             422,
             {"field": field, "code": code},
         )

@@ -1,0 +1,248 @@
+### backend/alembic/tenant/versions/0010_pay_history.py
+  def upgrade() -> None
+  def downgrade() -> None
+### backend/alembic/tenant/versions/0011_pay_history_source.py
+  def upgrade() -> None
+  def downgrade() -> None
+### backend/app/api/v1/pay_history.py
+  router = APIRouter(prefix='/employees', tags=['pay-history'])
+  _DEFAULT_LIMIT = 100
+  _MAX_LIMIT = 500
+  def _not_found() -> AppError
+  def _employee_not_found() -> AppError
+  def _to_out(ph: EmployeePayHistory) -> PayHistoryOut
+  def _encode_cursor(created_at: datetime, ph_id: uuid.UUID) -> str
+  def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]
+  def _fetch_employee(db: Any, employee_id: uuid.UUID) -> Employee
+  def _fetch_pay_history(db: Any, employee_id: uuid.UUID, change_id: uuid.UUID) -> EmployeePayHistory
+  def _require_view_or_self(user: Any, employee_id: uuid.UUID) -> None
+  def _overlap_exists(db: Any, employee_id: uuid.UUID, effective_from: date) -> bool
+  @router.get('/{employee_id}/pay-rate-changes', response_model=PayHistoryListOut)
+  def list_pay_rate_changes(employee_id: uuid.UUID, db: TenantDbDep, user: Annotated[Any, Depends(get_current_user)], limit: int=Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT), cursor: str | None=Query(None), include_total: bool=Query(False), status_filter: str | None=Query(None, alias='status'), effective_from_gte: date | None=Query(None), effective_from_lte: date | None=Query(None)) -> PayHistoryListOut
+  @router.post('/{employee_id}/pay-rate-changes', response_model=PayHistoryOut, status_code=status.HTTP_201_CREATED)
+  def create_pay_rate_change(employee_id: uuid.UUID, payload: PayHistoryCreateIn, db: TenantDbDep, user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_REQUEST))]) -> PayHistoryOut
+  def _currently_effective_rate(db: Any, employee_id: uuid.UUID, as_of: date) -> EmployeePayHistory | None
+  @router.post('/{employee_id}/pay-rate-changes/{change_id}/approve', response_model=PayHistoryOut)
+  def approve_pay_rate_change(employee_id: uuid.UUID, change_id: uuid.UUID, db: TenantDbDep, user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_APPROVE))]) -> PayHistoryOut
+  @router.post('/{employee_id}/pay-rate-changes/{change_id}/reject', response_model=PayHistoryOut)
+  def reject_pay_rate_change(employee_id: uuid.UUID, change_id: uuid.UUID, payload: PayHistoryRejectIn, db: TenantDbDep, user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_APPROVE))]) -> PayHistoryOut
+### backend/app/api/v1/pay_history_schemas.py
+  _ALLOWED_STATUSES = ('pending', 'approved', 'rejected', 'cancelled')
+  class PayHistoryOut(BaseModel)
+    id: uuid.UUID
+    employee_id: uuid.UUID
+    base_rate: Decimal
+    effective_from: date
+    changed_by: uuid.UUID | None = None
+    approved_by: uuid.UUID | None = None
+    decided_by: uuid.UUID | None = None
+    decided_at: datetime | None = None
+    decision_reason: str | None = None
+    note: str | None = None
+    source: str | None = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+  class PayHistoryCreateIn(BaseModel)
+    base_rate: Decimal = Field(..., ge=0)
+    effective_from: date
+    note: str | None = Field(default=None, max_length=2000)
+  class PayHistoryRejectIn(BaseModel)
+    reason: str = Field(..., min_length=1, max_length=2000)
+  class PayHistoryListOut(BaseModel)
+    items: list[PayHistoryOut]
+    next_cursor: str | None = None
+    total: int | None = None
+  ALLOWED_STATUSES = _ALLOWED_STATUSES
+### backend/app/api/v1/payroll_formulas.py
+  router = APIRouter(prefix='/payroll-formulas', tags=['payroll-formulas'])
+  @router.get('/readiness', response_model=ReadinessOut)
+  def get_readiness(db: TenantDbDep, user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))]) -> ReadinessOut
+  @router.post('/{code}/acknowledge', response_model=AcknowledgeOut)
+  def acknowledge_formula(code: str, db: TenantDbDep, user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_FINALISE))]) -> AcknowledgeOut
+### backend/app/api/v1/payroll_formulas_schemas.py
+  class FormulaInfo(BaseModel)
+    code: str
+    description: str
+    verified: bool
+    acknowledged_at: datetime | None = None
+    acknowledged_by: str | None = None
+  class ReadinessOut(BaseModel)
+    items: list[FormulaInfo]
+    all_acknowledged: bool
+  class AcknowledgeOut(BaseModel)
+    code: str
+    acknowledged: bool
+    acknowledged_at: datetime
+### backend/app/services/payroll_formulas.py
+  VALID_PREMIUM_MODES = ('full', 'none', 'hourly_equivalent')
+  FORMULA_REGISTRY: dict[str, str] = {'gen_base_salary': 'Full-period base monthly salary', 'gen_part_period_joiner_leaver': 'Prorated base sala...
+  def _q(amount: Decimal) -> Decimal
+  def gen_base_salary(*, monthly_amount: Decimal) -> Decimal
+  def gen_part_period_joiner_leaver(*, monthly_amount: Decimal, hired_on: date | None, terminated_on: date | None, period_start: date, period_end: date) -> Decimal
+  def gen_unpaid_absence(*, daily_rate: Decimal, unpaid_days: Decimal) -> Decimal
+  def gen_salaried_premiums(*, salaried_premium_mode: str, hourly_rate: Decimal, premium_hours: Decimal, premium_multiplier: Decimal | None=None) -> Decimal
+  def gen_paid_leave(*, daily_rate: Decimal, paid_leave_days: Decimal) -> Decimal
+  def gen_public_holiday_unworked(*, daily_rate: Decimal, holiday_days: Decimal, public_holiday_pay_multiplier: Decimal | None=None) -> Decimal
+  def hourly_rate_from_monthly(*, monthly_salary: Decimal, contracted_weekly_hours: Decimal) -> Decimal
+### backend/app/services/payroll_pipeline.py
+  ONCE_OFF_FREQUENCIES = frozenset({'once_off', 'irregular'})
+  LEGAL_ORDER_CATEGORIES = frozenset({'garnishee'})
+  class EarningLine()
+    @dataclass
+    label: str
+    amount: Decimal
+    frequency: str = 'regular'
+    is_taxable: bool = True
+    counts_for_uif: bool = True
+    counts_for_sdl: bool = True
+    source_ref: dict = field(default_factory=dict)
+  class DeductionLine()
+    @dataclass
+    label: str
+    amount: Decimal
+    category: str = 'other'
+    is_pre_tax: bool = False
+    priority: int = 100
+    source_ref: dict = field(default_factory=dict)
+  class ReimbursementLine()
+    @dataclass
+    label: str
+    amount: Decimal
+    source_ref: dict = field(default_factory=dict)
+  class PipelineConfig()
+    @dataclass
+    tax_engine: T.TaxEngine
+    tax_tables: T.TaxTables
+    uif_rows: list[dict]
+    sdl_rows: list[dict]
+    retirement_rows: list[dict]
+    periods_per_year: int
+    employee_age: int
+    medical_members: int
+    uif_exempt: bool
+    sdl_applies: bool | None
+    net_pay_floor: Decimal
+  class PayslipDraft()
+    @dataclass
+    gross: Decimal = Decimal('0.00')
+    pre_tax_deductions: Decimal = Decimal('0.00')
+    taxable_income: Decimal = Decimal('0.00')
+    paye: Decimal = Decimal('0.00')
+    uif_employee: Decimal = Decimal('0.00')
+    uif_employer: Decimal = Decimal('0.00')
+    sdl: Decimal = Decimal('0.00')
+    other_deductions: Decimal = Decimal('0.00')
+    reimbursements: Decimal = Decimal('0.00')
+    net: Decimal = Decimal('0.00')
+    retirement_excess: Decimal = Decimal('0.00')
+    floor_applied: bool = False
+    deferred_deductions: list[dict] = field(default_factory=list)
+    tax_trace: list[dict] = field(default_factory=list)
+    calculation_context: dict = field(default_factory=dict)
+    refusal_code: str | None = None
+    refusal_message: str | None = None
+    @property
+    def refused(self) -> bool
+    def employer_costs(self) -> dict[str, str]
+  def _q(amount: Decimal) -> Decimal
+  def _refuse(code: str, message: str, draft: PayslipDraft) -> PayslipDraft
+  def run_pipeline(config: PipelineConfig, earnings: list[EarningLine], deductions: list[DeductionLine], reimbursements: list[ReimbursementLine] | None=None) -> PayslipDraft
+### backend/tests/test_pay_history.py
+  class _DisposableTenant()
+    @dataclass
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+  @pytest.fixture()
+  def disposable_tenant() -> Iterator[_DisposableTenant]
+  @pytest.fixture()
+  def api(api_client: TestClient, disposable_tenant: _DisposableTenant)
+  @pytest.fixture()
+  def db(disposable_tenant: _DisposableTenant) -> Iterator[Session]
+  def _login(client: TestClient, slug: str, username: str, password: str) -> str
+  def _auth(token: str, slug: str) -> dict[str, str]
+  def _admin_token(client: TestClient, slug: str) -> str
+  def _mk_user(session: Session, *, username: str, role: str, password: str, employee_id: uuid.UUID | None=None) -> User
+  def _mk_employee(session: Session, code: str, *, hire: date | None=None) -> Employee
+  def _mk_pay_history(session: Session, *, employee_id: uuid.UUID, base_rate: float, effective_from: date, status: str='pending', changed_by: uuid.UUID | None=None) -> EmployeePayHistory
+  def test_list_requires_auth(api, db)
+  def test_list_hr_can_see_any_employee(api, db)
+  def test_list_auditor_can_see_any_employee(api, db)
+  def test_list_employee_cannot_see_other_employee(api, db)
+  def test_list_employee_can_see_own(api, db)
+  def test_list_filters_by_status(api, db)
+  def test_list_filters_by_effective_from_range(api, db)
+  def test_list_include_total(api, db)
+  def test_create_employee_forbidden(api, db)
+  def test_create_hr_ok(api, db)
+  def test_create_overlapping_pending_rejected(api, db)
+  def test_create_overlapping_approved_rejected(api, db)
+  def test_create_before_hire_date_rejected(api, db)
+  def test_create_employee_not_found(api, db)
+  def test_approve_applies_employee_rate(api, db)
+  def test_approve_future_dated_not_applied(api, db)
+  def test_approve_out_of_order_recomputes(api, db)
+  def test_approve_non_pending_returns_409(api, db)
+  def test_reject_pending_ok(api, db)
+  def test_reject_non_pending_returns_409(api, db)
+### backend/tests/test_payroll_formulas.py
+  def test_formula_registry_has_six_entries()
+  def test_every_registered_formula_is_callable()
+  def test_gen_base_salary_full_period()
+  def test_gen_base_salary_quantizes_half_up()
+  def test_gen_part_period_joiner_leaver_full_period()
+  def test_gen_part_period_joiner_leaver_mid_month()
+  def test_gen_part_period_joiner_leaver_terminated_mid_month()
+  def test_gen_part_period_joiner_leaver_empty_window()
+  def test_gen_unpaid_absence_basic()
+  def test_gen_unpaid_absence_zero_days()
+  def test_gen_salaried_premiums_full_mode_returns_zero()
+  def test_gen_salaried_premiums_none_mode_returns_zero()
+  def test_gen_salaried_premiums_hourly_equivalent()
+  def test_gen_salaried_premiums_requires_multiplier()
+  def test_gen_salaried_premiums_unknown_mode_raises()
+  def test_gen_paid_leave_basic()
+  def test_gen_public_holiday_unworked_basic()
+  def test_gen_public_holiday_unworked_requires_multiplier()
+  def test_hourly_rate_from_monthly_40h_week()
+  def test_hourly_rate_from_monthly_45h_week()
+  def test_hourly_rate_from_monthly_zero_hours_raises()
+### backend/tests/test_payroll_formulas_endpoints.py
+  class _DisposableTenant()
+    @dataclass
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+  @pytest.fixture()
+  def disposable_tenant() -> Iterator[_DisposableTenant]
+  @pytest.fixture()
+  def tenant_session(disposable_tenant)
+  def _admin()
+  def test_readiness_empty(tenant_session)
+  def test_acknowledge_creates_settings_when_absent(tenant_session)
+  def test_acknowledge_updates_existing(tenant_session)
+  def test_acknowledge_unknown_formula_raises(tenant_session)
+  def test_all_six_can_be_acknowledged_and_readiness_flips(tenant_session)
+### backend/tests/test_payroll_pipeline.py
+  def _tax_tables() -> T.TaxTables
+  UIF_ROWS = [{'row_key': 'employee_rate', 'value': '0.01'}, {'row_key': 'employer_rate', 'value': '0.01'}, {'row_key': ...
+  SDL_ROWS = [{'row_key': 'rate', 'value': '0.01'}, {'row_key': 'exemption_threshold_annual', 'value': '50000'}]
+  RETIREMENT_ROWS = [{'row_key': 'percentage_of_taxable_income', 'value': '0.10'}, {'row_key': 'annual_cap', 'value': '1000'}]
+  def _config(*, net_pay_floor: Decimal=Decimal('0.00'), sdl_applies: bool | None=True, uif_exempt: bool=False, age: int=40, medical_members: int=0) -> P.PipelineConfig
+  def test_baseline_monthly_1000()
+  def test_retirement_capped_by_11f()
+  def test_medical_credits_2_members()
+  def test_garnishee_breaching_floor_refused()
+  def test_garnishee_within_floor_applied()
+  def test_loan_breaching_floor_deferred()
+  def test_loan_within_floor_applied()
+  def test_two_deductions_one_deferred()
+  def test_uif_exempt_zero_uif()
+  def test_sdl_applies_unset_refuses()
+  def test_irregular_taxable_refuses()
+  def test_irregular_nontaxable_allowed()
+  def test_reimbursement_added_after_tax()
+  def test_employer_costs_do_not_reduce_net()
+  def test_multiple_earnings_uif_sdl_flags_respected()
+  def test_zero_gross_no_refusal()

@@ -1,0 +1,4 @@
+### backend/app/api/v1/payroll_system_types.py
+  router = APIRouter(prefix='/payroll', tags=['payroll-system-types'])
+  @router.post('/earning-types/ensure-system')
+  def ensure_system_types_endpoint(db: TenantDbDep, user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_FINALISE))]) -> dict

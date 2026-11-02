@@ -1,14 +1,15 @@
-"""Payroll earnings-generation formulas (Chapter 4, Bundle 004a-i).
+"""Payroll earnings-generation formulas (Chapter 4 + Chapter 4H B-4c).
 
 Each gen_* function is pure: no DB, no clock, no side effects. Inputs are
 explicit and, where a statutory multiplier is needed, the parameter has NO
-default — the pipeline must supply it from an acknowledged source. This
-respects the "no invented statutory values" rule while letting the functions
-be tested today with clearly-fake fixture values.
+default — the pipeline must supply it from an acknowledged source.
 
-FORMULA_REGISTRY lists every formula. Each must be acknowledged by the
-payroll admin (F8) before first finalise; readiness endpoint surfaces which
-are outstanding.
+FORMULA_REGISTRY (6 entries) is what finalise gates on via formula_acks.
+DERIVATION_FORMULAS is a separate set for formulas that convert a value
+(monthly salary -> hourly rate) using data already on the employee and a
+documented conversion constant — they do NOT invent a statutory amount,
+so they do not require ack. `PATCH /payroll/settings` accepts either set
+as a formula code setting.
 """
 from __future__ import annotations
 
@@ -32,6 +33,18 @@ FORMULA_REGISTRY: dict[str, str] = {
         "Daily rate x paid leave days",
     "gen_public_holiday_unworked":
         "Unworked public holiday pay per country policy (requires explicit multiplier)",
+}
+
+
+# Derivation formulas. Convert one value into another using data already
+# on the employee (monthly salary, contracted hours) and a fixed conversion
+# factor (52 weeks / 12 months). They do NOT embed a statutory amount, so
+# they are NOT part of the formula ack gate — but the runner validates that
+# `monthly_hourly_derivation_formula_code` (if set) refers to a formula in
+# this set, not to a statutory one.
+DERIVATION_FORMULAS: dict[str, str] = {
+    "hourly_rate_from_monthly":
+        "monthly_salary / (contracted_weekly_hours * 52 / 12) -> hourly rate",
 }
 
 
@@ -67,7 +80,8 @@ def gen_unpaid_absence(
     daily_rate: Decimal,
     unpaid_days: Decimal,
 ) -> Decimal:
-    """Daily rate x unpaid absence days."""
+    """Daily rate x unpaid absence days. Returns a POSITIVE amount; caller
+    negates it if it is to reduce gross."""
     return _q(daily_rate * unpaid_days)
 
 
@@ -130,7 +144,7 @@ def hourly_rate_from_monthly(
     monthly_salary: Decimal,
     contracted_weekly_hours: Decimal,
 ) -> Decimal:
-    """D4 formula (subject to accountant confirmation).
+    """Derivation formula (subject to accountant confirmation).
 
     monthly_hours = contracted_weekly_hours * 52 / 12
     hourly_rate   = monthly_salary / monthly_hours
@@ -142,5 +156,3 @@ def hourly_rate_from_monthly(
     return (monthly_salary / monthly_hours).quantize(
         Decimal("0.0001"), rounding=ROUND_HALF_UP
     )
-
-# END OF FILE
