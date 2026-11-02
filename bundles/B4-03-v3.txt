@@ -1,0 +1,5 @@
+﻿[System.IO.File]::WriteAllText("C:\xampp\htdocs\Payroll\bundles\B4-03-v3.txt", (Get-Clipboard -Raw), [System.Text.Encoding]::UTF8)
+(Get-Item bundles\B4-03-v3.txt).Length
+Get-Content bundles\B4-03-v3.txt -Tail 1
+python tools\apply_bundle.py bundles\B4-03-v3.txt --commit "feat(B4-03 4G-c): golden payslip case framework (Pydantic schema, per-line diff, loud skip for unreviewed, 6 framework tests)"
+Push-Location backend; ..\.venv\Scripts\python.exe -m pytest tests\test_golden_payslips.py -q; Pop-Location
