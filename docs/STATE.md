@@ -13,15 +13,13 @@ both proposes and commits.
   `payroll_settings_change_request` table plus approve/reject endpoints,
   mirroring `payroll_change_request`.
 
-## System earning types auto-seed (gap)
-`provision_tenant` does not call `ensure_system_earning_types` in
-`_seed_tenant_defaults`. A freshly provisioned real tenant has zero
-`EarningType` rows until the user calls
-`POST /payroll/earning-types/ensure-system`, or until the first
-`run_preview`/`finalise` (which calls it internally).
-- **To close**: import `ensure_system_earning_types` in
-  `provisioning.py::_seed_tenant_defaults`. Needs `provisioning.py` source.
-  Recorded for a future bundle.
+## System earning types auto-seed
+**Closed in B4-02f.** `provision_tenant::_seed_tenant_defaults` now calls
+`ensure_system_earning_types` in the same provisioning transaction as the
+company row insert. A freshly provisioned real tenant has 13
+`EarningType` rows before the first request lands, so `GET
+/payroll/earning-types` returns a populated list without requiring a
+manual `POST /payroll/earning-types/ensure-system` call.
 
 ## Chapter 4H B-4 progress
 - **B4-01** (committed): migration `ten_0021`, `PayrollSettings`
@@ -35,12 +33,9 @@ both proposes and commits.
   attendance-earnings tests.
 - **B4-02d.1** (committed): finalise open-exceptions ack + preview
   surfaces per-employee `attendance_warnings`.
-- **B4-02e** (this bundle): demo PDF watermark. `payroll_runner` writes
-  `demo_values` into `calculation_context["attendance_inputs"]["settings"]`
-  on every payslip; `payroll_pdf.render_payslip_pdf` prepends/appends a
-  `*** DEMO - NOT A REAL PAYSLIP ***` line when the flag is set (or when
-  a caller passes `demo_values=True` explicitly).
-- **B4-02f** (pending): `provisioning.py` auto-seed hook.
+- **B4-02e** (committed): demo PDF watermark via `payroll_pdf`.
+- **B4-02f** (this bundle): `provision_tenant` auto-seeds the 13 system
+  earning types. Closes the "System earning types auto-seed" gap above.
 - **B4-02d.2** (pending): demo-tenant preview e2e + non-demo unset 409
   (needs control-table fixtures in test).
 

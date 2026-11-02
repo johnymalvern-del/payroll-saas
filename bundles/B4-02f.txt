@@ -1,0 +1,520 @@
+=== FILE: backend/app/services/provisioning.py ===
+"""Tenant provisioning: creates the tenant database, runs migrations, seeds
+defaults, creates the first admin user, and records the schema version.
+
+Full rollback on any failure: the subscriber row is created first as
+'provisioning', all DB work happens, then the row is updated to 'active'.
+On error, the tenant DB is dropped and the subscriber row is marked
+'failed' with the error message.
+
+Chapter 4H B-4f: `_seed_tenant_defaults` now also seeds the 13 system
+earning types via `payroll_seed.ensure_system_earning_types`, so a freshly
+provisioned tenant has `GET /payroll/earning-types` populated without a
+manual `POST /payroll/earning-types/ensure-system` call.
+"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, text
+
+from app.core.config import get_settings
+from app.core.logging import get_logger
+from app.db.control.models import Subscriber
+from app.db.control.session import control_session
+from app.db.encryption import new_tenant_key, seal_with_master
+
+log = get_logger("app.services.provisioning")
+
+
+class ProvisioningError(Exception):
+    """Raised when a tenant cannot be provisioned. All side effects are rolled back."""
+
+
+@dataclass(frozen=True)
+class ProvisioningResult:
+    subscriber_id: uuid.UUID
+    slug: str
+    tenant_db_name: str
+    schema_version: str
+
+
+import re
+
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,60}$")
+
+_RESERVED_SLUGS: frozenset[str] = frozenset(
+    {"www", "api", "admin", "app", "static", "platform", "control", "payroll", "mail", "ftp"}
+)
+
+
+def _validate_slug(slug: str) -> None:
+    if not _SLUG_RE.match(slug):
+        raise ProvisioningError(
+            f"Invalid slug '{slug}': must match [a-z0-9][a-z0-9-]*, 2-61 chars"
+        )
+    if slug in _RESERVED_SLUGS:
+        raise ProvisioningError(f"Slug '{slug}' is reserved")
+
+
+def _tenant_db_name(slug: str) -> str:
+    name = f"tenant_{slug.replace('-', '_')}"
+    if len(name) > 63:
+        raise ProvisioningError(f"Slug too long for PostgreSQL database name: {slug!r}")
+    return name
+
+
+def _admin_url(db_name: str = "postgres") -> str:
+    return get_settings().database_url_tenant_admin_template.format(tenant_db=db_name)
+
+
+def _control_admin_url(db_name: str = "postgres") -> str:
+    """URL for the CONTROL-database admin role, pointed at the named database.
+
+    Reuses the control admin URL (which points at the superuser) but swaps
+    the trailing database name. Used for administrative operations that must
+    run as a superuser - terminating backends and dropping databases cannot
+    be done by non-superuser roles when the caller needs to terminate
+    backends owned by a superuser.
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    base = get_settings().database_url_superuser
+    parsed = urlparse(base.replace("postgresql+psycopg://", "postgresql://", 1))
+    rebuilt = parsed._replace(path=f"/{db_name}")
+    return urlunparse(rebuilt).replace("postgresql://", "postgresql+psycopg://", 1)
+
+
+def _run_tenant_migrations(db_name: str) -> str:
+    """Apply all tenant migrations to the named database. Return resulting revision."""
+    backend_dir = Path(__file__).resolve().parent.parent.parent
+    cfg = Config(str(backend_dir / "alembic.ini"), ini_section="tenant")
+    cfg.set_main_option("sqlalchemy.url", _admin_url(db_name))
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(_admin_url(db_name), future=True)
+    try:
+        with engine.connect() as conn:
+            version = conn.scalar(text("SELECT version_num FROM alembic_version LIMIT 1"))
+    finally:
+        engine.dispose()
+
+    if not version:
+        raise ProvisioningError("Tenant migrations completed but alembic_version is empty")
+    return str(version)
+
+
+def _seed_tenant_defaults(db_name: str, company_name: str) -> None:
+    """Insert the singleton company row with ZA defaults, then seed the 13
+    system earning types (Chapter 4H B-4f).
+
+    Both operations run against the tenant DB. If either fails,
+    `provision_tenant` drops the tenant DB and marks the subscriber failed —
+    so partial state inside this function is not observable externally.
+    `ensure_system_earning_types` is idempotent by code, so a re-run (which
+    should never happen inside one provision call) is safe.
+    """
+    from sqlalchemy.orm import Session
+
+    from app.services.payroll_seed import ensure_system_earning_types
+
+    engine = create_engine(_admin_url(db_name), future=True)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO company "
+                    "(id, legal_name, country_code, currency, default_timezone, settings) "
+                    "VALUES (:id, :name, 'ZA', 'ZAR', 'Africa/Johannesburg', '{}'::jsonb)"
+                ),
+                {"id": str(uuid.uuid4()), "name": company_name},
+            )
+        with Session(engine) as s:
+            ensure_system_earning_types(s)
+            s.commit()
+    finally:
+        engine.dispose()
+
+
+def _create_first_admin(db_name: str, username: str, password_hash: str) -> None:
+    """Insert the first payroll_admin user with must_change_password=true."""
+    engine = create_engine(_admin_url(db_name), future=True)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    'INSERT INTO "user" '
+                    "(id, username, password_hash, role, is_active, must_change_password) "
+                    "VALUES (:id, :u, :p, 'payroll_admin', true, true)"
+                ),
+                {"id": str(uuid.uuid4()), "u": username, "p": password_hash},
+            )
+    finally:
+        engine.dispose()
+
+
+def _drop_tenant_database(db_name: str) -> None:
+    """Forcefully drop a tenant database.
+
+    Used during provisioning rollback, test teardown, and the erase command.
+
+    IMPORTANT: this runs as the CONTROL-database admin role (a superuser),
+    not as the tenant admin role. Two things require superuser:
+      * pg_terminate_backend: non-superusers cannot terminate backends owned
+        by a superuser, which happens routinely when a test opens a session
+        and then a rollback or teardown runs while that session is alive.
+      * DROP DATABASE: if the DB is owned by a non-superuser role that is no
+        longer connected, only a superuser (or that owner) can drop it.
+
+    Both are administrative operations and belong on the superuser connection.
+    """
+    admin_engine = create_engine(
+        _control_admin_url("postgres"),
+        isolation_level="AUTOCOMMIT",
+        future=True,
+    )
+    try:
+        with admin_engine.connect() as conn:
+            conn.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :d AND pid <> pg_backend_pid()"
+                ),
+                {"d": db_name},
+            )
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{db_name}"'))
+    finally:
+        admin_engine.dispose()
+
+
+def provision_tenant(
+    *,
+    slug: str,
+    name: str,
+    admin_username: str,
+    admin_password_hash: str,
+) -> ProvisioningResult:
+    """Provision a new tenant end-to-end.
+
+    Steps:
+      1. Reserve the subscriber row (slug uniqueness protects against races).
+      2. Create the tenant database.
+      3. Apply all tenant migrations.
+      4. Seed the singleton company row + 13 system earning types.
+      5. Create the first payroll_admin user (must_change_password=true).
+      6. Mark the subscriber active and record the schema version.
+
+    Any failure drops the tenant database (if created) and marks the
+    subscriber 'failed' with the error message. The function raises
+    ProvisioningError so callers can surface a clean API response.
+    """
+    _validate_slug(slug)
+
+    tenant_key = new_tenant_key()
+    key_encrypted = seal_with_master(tenant_key.decode("ascii"))
+    db_name = _tenant_db_name(slug)
+
+    # Step 1: reserve the subscriber row
+    with control_session() as session:
+        existing = session.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+        if existing is not None:
+            raise ProvisioningError(f"Slug '{slug}' is already taken")
+        subscriber = Subscriber(
+            slug=slug,
+            name=name,
+            country_code="ZA",
+            status="provisioning",
+            provisioning_status="pending",
+            tenant_db_name=db_name,
+            encryption_key_encrypted=key_encrypted,
+        )
+        session.add(subscriber)
+        session.flush()
+        subscriber_id = subscriber.id
+
+    log.info(
+        "tenant.provisioning.start",
+        subscriber_id=str(subscriber_id),
+        slug=slug,
+        db=db_name,
+    )
+
+    try:
+        # Step 2: create the tenant database
+        admin_engine = create_engine(
+            _admin_url("postgres"), isolation_level="AUTOCOMMIT", future=True
+        )
+        try:
+            with admin_engine.connect() as conn:
+                conn.execute(text(f'CREATE DATABASE "{db_name}"'))
+        finally:
+            admin_engine.dispose()
+
+        # Step 3: run tenant migrations
+        schema_version = _run_tenant_migrations(db_name)
+
+        # Step 4: seed tenant defaults
+        _seed_tenant_defaults(db_name, name)
+
+        # Step 5: create the first admin
+        _create_first_admin(db_name, admin_username, admin_password_hash)
+
+        # Step 6: mark active
+        with control_session() as session:
+            sub = session.get(Subscriber, subscriber_id)
+            if sub is None:
+                raise ProvisioningError(
+                    "Subscriber row disappeared mid-provisioning"
+                )
+            sub.status = "active"
+            sub.provisioning_status = "active"
+            sub.tenant_schema_version = schema_version
+            sub.provisioning_error = None
+
+        log.info(
+            "tenant.provisioning.done",
+            subscriber_id=str(subscriber_id),
+            slug=slug,
+            db=db_name,
+            schema_version=schema_version,
+        )
+        return ProvisioningResult(
+            subscriber_id=subscriber_id,
+            slug=slug,
+            tenant_db_name=db_name,
+            schema_version=schema_version,
+        )
+
+    except Exception as exc:
+        log.exception(
+            "tenant.provisioning.failed",
+            subscriber_id=str(subscriber_id),
+            slug=slug,
+        )
+        # Roll back: drop the tenant DB if we created it, mark subscriber failed
+        try:
+            _drop_tenant_database(db_name)
+        except Exception:
+            log.exception("tenant.provisioning.rollback.drop_failed", db_name=db_name)
+        with control_session() as session:
+            sub = session.get(Subscriber, subscriber_id)
+            if sub is not None:
+                sub.status = "failed"
+                sub.provisioning_status = "failed"
+                sub.provisioning_error = str(exc)[:500]
+        raise ProvisioningError(str(exc)) from exc
+
+# --- 4A-bis: _4A_BIS_PROVISIONING: template DB fast path, test-only ---
+import os as _os_4a_prov
+from pathlib import Path as _Path_4a_prov
+
+_TEST_TEMPLATE_ENABLED = False
+_TEMPLATE_NAME_CACHE = None
+_TEMPLATE_VERSION_CACHE = None
+
+def _4a_get_template_name():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    backend_dir = _Path_4a_prov(__file__).resolve().parent.parent.parent
+    cfg = Config(str(backend_dir / "alembic.ini"), ini_section="tenant")
+    cfg.set_main_option("sqlalchemy.url", "driver://")
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    return f"payroll_tpl_{head}".replace(".", "_")
+
+def _4a_bootstrap_template_db():
+    global _TEMPLATE_NAME_CACHE, _TEMPLATE_VERSION_CACHE
+    if _TEMPLATE_NAME_CACHE is None:
+        _TEMPLATE_NAME_CACHE = _4a_get_template_name()
+    template = _TEMPLATE_NAME_CACHE
+    engine = create_engine(_admin_url("postgres"), future=True, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as conn:
+            exists = conn.scalar(text("SELECT 1 FROM pg_database WHERE datname=:n"), {"n": template})
+            if not exists:
+                conn.execute(text(f'CREATE DATABASE "{template}"'))
+    finally:
+        engine.dispose()
+    from alembic import command
+    from alembic.config import Config
+    backend_dir = _Path_4a_prov(__file__).resolve().parent.parent.parent
+    cfg = Config(str(backend_dir / "alembic.ini"), ini_section="tenant")
+    cfg.set_main_option("sqlalchemy.url", _admin_url(template))
+    command.upgrade(cfg, "head")
+    engine = create_engine(_admin_url(template), future=True)
+    try:
+        with engine.connect() as conn:
+            _TEMPLATE_VERSION_CACHE = conn.scalar(text("SELECT version_num FROM alembic_version LIMIT 1"))
+    finally:
+        engine.dispose()
+
+def _4a_run_migrations_from_template(db_name):
+    assert _TEST_TEMPLATE_ENABLED
+    assert _TEMPLATE_NAME_CACHE is not None
+    assert _TEMPLATE_VERSION_CACHE is not None
+    _drop_tenant_database(db_name)
+    engine = create_engine(_admin_url("postgres"), future=True, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{db_name}" TEMPLATE "{_TEMPLATE_NAME_CACHE}"'))
+    finally:
+        engine.dispose()
+    return str(_TEMPLATE_VERSION_CACHE)
+# --- end ---
+
+# END OF FILE
+=== END FILE: backend/app/services/provisioning.py ===
+
+=== FILE: backend/tests/test_provisioning_system_types.py ===
+"""Chapter 4H B-4f: provision_tenant seeds the 13 system earning types."""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from typing import Iterator
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from app.core.security import hash_password
+from app.db.control.models import Subscriber
+from app.db.control.session import control_session
+from app.db.tenant.models.organisation import Company
+from app.db.tenant.models.pay import EarningType
+from app.services.payroll_seed import SYSTEM_TYPES
+from app.services.provisioning import (
+    _drop_tenant_database,
+    _tenant_db_name,
+    provision_tenant,
+)
+
+
+EXPECTED_CODES = {spec["code"] for spec in SYSTEM_TYPES}
+
+
+@dataclass
+class _DisposableTenant:
+    slug: str
+    tenant_db_name: str
+    subscriber_id: uuid.UUID
+
+
+@pytest.fixture()
+def disposable_tenant() -> Iterator[_DisposableTenant]:
+    slug = f"provst-{uuid.uuid4().hex[:8]}"
+    result = provision_tenant(
+        slug=slug,
+        name="Provision Seed Co",
+        admin_username="admin",
+        admin_password_hash=hash_password("AdminPassword123!"),
+    )
+    try:
+        yield _DisposableTenant(
+            slug=slug,
+            tenant_db_name=result.tenant_db_name,
+            subscriber_id=result.subscriber_id,
+        )
+    finally:
+        _drop_tenant_database(result.tenant_db_name)
+        with control_session() as s:
+            r = s.query(Subscriber).filter(Subscriber.slug == slug).one_or_none()
+            if r is not None:
+                s.delete(r)
+
+
+@pytest.fixture()
+def session(disposable_tenant) -> Iterator[Session]:
+    url = (
+        "postgresql+psycopg://payroll_app:payroll_app_dev_password"
+        f"@localhost:5432/{disposable_tenant.tenant_db_name}"
+    )
+    engine = create_engine(url, future=True)
+    s = Session(bind=engine)
+    try:
+        yield s
+    finally:
+        s.rollback()
+        s.close()
+        engine.dispose()
+
+
+def test_provision_seeds_company_row(session):
+    """Regression: `_seed_tenant_defaults` still inserts the company row."""
+    company = session.scalar(select(Company))
+    assert company is not None
+    assert company.country_code == "ZA"
+    assert company.currency == "ZAR"
+    assert company.default_timezone == "Africa/Johannesburg"
+
+
+def test_provision_seeds_thirteen_system_earning_types(session):
+    rows = list(session.scalars(select(EarningType)).all())
+    assert len(rows) == 13
+    codes = {r.code for r in rows}
+    assert codes == EXPECTED_CODES
+    assert all(r.is_system is True for r in rows)
+    assert all(r.is_active is True for r in rows)
+
+
+def test_provision_system_earning_types_are_per_hour_regular(session):
+    rows = list(session.scalars(select(EarningType)).all())
+    for r in rows:
+        assert r.calc_method == "per_hour"
+        assert r.frequency == "regular"
+        assert r.is_taxable is True
+        assert r.counts_for_uif is True
+        assert r.counts_for_sdl is True
+=== END FILE: backend/tests/test_provisioning_system_types.py ===
+
+=== FILE: docs/STATE.md ===
+# Backend state
+
+## Payroll settings approval flow (gap)
+Money-affecting payroll settings (`sdl_applies`, `net_pay_floor`, and the
+Chapter 4H closing fields added by `ten_0021`) are changed via direct
+`PATCH /payroll/settings` by a user holding `PAYROLL_FINALISE` (today:
+`payroll_admin`). There is no separate approval workflow: the acting user
+both proposes and commits.
+- Before/after values are written to the audit log
+  (`payroll_settings.update` action) on every PATCH.
+- **Gap**: a two-person control (proposer + approver) for money-affecting
+  settings does not exist. To close: introduce a
+  `payroll_settings_change_request` table plus approve/reject endpoints,
+  mirroring `payroll_change_request`.
+
+## System earning types auto-seed
+**Closed in B4-02f.** `provision_tenant::_seed_tenant_defaults` now calls
+`ensure_system_earning_types` in the same provisioning transaction as the
+company row insert. A freshly provisioned real tenant has 13
+`EarningType` rows before the first request lands, so `GET
+/payroll/earning-types` returns a populated list without requiring a
+manual `POST /payroll/earning-types/ensure-system` call.
+
+## Chapter 4H B-4 progress
+- **B4-01** (committed): migration `ten_0021`, `PayrollSettings`
+  model/schema extension, PATCH validation + audit.
+- **B4-02a** (committed): demo seed pay setup.
+- **B4-02b** (committed): 13 system earning types + demo
+  `attendance_earning_map`.
+- **B4-02c.1** (committed): attendance-to-earnings integration in
+  `payroll_runner`.
+- **B4-02c.2** (committed): demo seed `ShiftRateRule` rows + 16
+  attendance-earnings tests.
+- **B4-02d.1** (committed): finalise open-exceptions ack + preview
+  surfaces per-employee `attendance_warnings`.
+- **B4-02e** (committed): demo PDF watermark via `payroll_pdf`.
+- **B4-02f** (this bundle): `provision_tenant` auto-seeds the 13 system
+  earning types. Closes the "System earning types auto-seed" gap above.
+- **B4-02d.2** (pending): demo-tenant preview e2e + non-demo unset 409
+  (needs control-table fixtures in test).
+
+## Payroll golden cases (Chapter 4H, 4G-c)
+- Framework: not yet delivered (Bundle B4-03).
+- Pending from accountant: (none yet).
+- Reviewed: 0.
+- Unreviewed: 0.
+=== END FILE: docs/STATE.md ===

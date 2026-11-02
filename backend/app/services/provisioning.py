@@ -5,6 +5,11 @@ Full rollback on any failure: the subscriber row is created first as
 'provisioning', all DB work happens, then the row is updated to 'active'.
 On error, the tenant DB is dropped and the subscriber row is marked
 'failed' with the error message.
+
+Chapter 4H B-4f: `_seed_tenant_defaults` now also seeds the 13 system
+earning types via `payroll_seed.ensure_system_earning_types`, so a freshly
+provisioned tenant has `GET /payroll/earning-types` populated without a
+manual `POST /payroll/earning-types/ensure-system` call.
 """
 from __future__ import annotations
 
@@ -103,7 +108,19 @@ def _run_tenant_migrations(db_name: str) -> str:
 
 
 def _seed_tenant_defaults(db_name: str, company_name: str) -> None:
-    """Insert the singleton company row with ZA defaults."""
+    """Insert the singleton company row with ZA defaults, then seed the 13
+    system earning types (Chapter 4H B-4f).
+
+    Both operations run against the tenant DB. If either fails,
+    `provision_tenant` drops the tenant DB and marks the subscriber failed —
+    so partial state inside this function is not observable externally.
+    `ensure_system_earning_types` is idempotent by code, so a re-run (which
+    should never happen inside one provision call) is safe.
+    """
+    from sqlalchemy.orm import Session
+
+    from app.services.payroll_seed import ensure_system_earning_types
+
     engine = create_engine(_admin_url(db_name), future=True)
     try:
         with engine.begin() as conn:
@@ -115,6 +132,9 @@ def _seed_tenant_defaults(db_name: str, company_name: str) -> None:
                 ),
                 {"id": str(uuid.uuid4()), "name": company_name},
             )
+        with Session(engine) as s:
+            ensure_system_earning_types(s)
+            s.commit()
     finally:
         engine.dispose()
 
@@ -183,7 +203,7 @@ def provision_tenant(
       1. Reserve the subscriber row (slug uniqueness protects against races).
       2. Create the tenant database.
       3. Apply all tenant migrations.
-      4. Seed the singleton company row.
+      4. Seed the singleton company row + 13 system earning types.
       5. Create the first payroll_admin user (must_change_password=true).
       6. Mark the subscriber active and record the schema version.
 
