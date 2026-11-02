@@ -1,11 +1,11 @@
-"""Payroll runner (Chapter 4 Bundle 004b-a + Chapter 4H B-4c/d).
+"""Payroll runner (Chapter 4 Bundle 004b-a + Chapter 4H B-4c/d/e).
 
-Chapter 4H B-4c: attendance-to-earnings integration (see bundle B4-02c.1).
-Chapter 4H B-4d: finalise now refuses when open exceptions exist in the
-period unless the caller passes an explicit ack reason (audited). This
-preserves the "closed period re-previews unchanged" guarantee — a
-finalised period is locked and should not silently contain unaddressed
-exceptions.
+Chapter 4H B-4c: attendance-to-earnings integration.
+Chapter 4H B-4d: finalise refuses open exceptions in period without ack.
+Chapter 4H B-4e: the attendance snapshot stored in
+`Payslip.calculation_context["attendance_inputs"]["settings"]` now includes
+`demo_values`, so `payroll_pdf.render_payslip_pdf` can prepend a demo
+watermark on payslips from demo-flagged tenants.
 """
 from __future__ import annotations
 
@@ -337,6 +337,7 @@ def _build_attendance_earnings(
             "monthly_hourly_derivation_formula_code":
                 settings.monthly_hourly_derivation_formula_code,
             "attendance_earning_map": dict(settings.attendance_earning_map or {}),
+            "demo_values": bool(settings.demo_values),
         },
     }
     lines: list[P.EarningLine] = []
@@ -781,12 +782,6 @@ def _formula_warnings(db: Session) -> list[str]:
 def _count_open_exceptions_in_period(
     db: Session, pay_period: PayPeriod,
 ) -> tuple[int, list[dict]]:
-    """Count open ExceptionItem rows whose work_date is in the period.
-
-    Round-2 §1: closed periods must not contain unaddressed exceptions.
-    Returns (count, sample) where sample is at most 5 items for the 409
-    details.
-    """
     rows = db.execute(
         select(
             ExceptionItem.employee_id,
@@ -882,7 +877,6 @@ def finalise(
             409,
         )
 
-    # Round-2 §1: refuse on open exceptions in period unless ack reason given.
     open_count, open_sample = _count_open_exceptions_in_period(db, pay_period)
     ack_used = False
     if open_count > 0:

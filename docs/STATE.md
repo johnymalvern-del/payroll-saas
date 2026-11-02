@@ -30,26 +30,19 @@ both proposes and commits.
 - **B4-02b** (committed): 13 system earning types + demo
   `attendance_earning_map`.
 - **B4-02c.1** (committed): attendance-to-earnings integration in
-  `payroll_runner`; `FORMULA_REGISTRY` unchanged at 6;
-  `DERIVATION_FORMULAS` accepted by PATCH validation.
+  `payroll_runner`.
 - **B4-02c.2** (committed): demo seed `ShiftRateRule` rows + 16
   attendance-earnings tests.
-- **B4-02d1** (this bundle): finalise open-exceptions ack (round-2 §1) +
-  preview surfaces per-employee `attendance_warnings` from
-  `Payslip.calculation_context` (round-1 §3 UI surfacing).
-  - `finalise(db, user, pay_period, *, ack_open_exceptions_reason=None)`.
-  - 409 `open_exceptions_in_period` with `{count, sample}` unless ack
-    reason is non-blank.
-  - Audit records `open_exception_count_at_finalise` and
-    `ack_open_exceptions_reason` (only when ack was used).
-  - `_preview_row_from_payslip` helper surfaces warnings from
-    `calculation_context["attendance_warnings"]`; empty when context
-    missing.
-- **B4-02d2** (pending): demo-tenant preview e2e + non-demo unset 409
-  (needs control-table fixtures in test).
-- **B4-02e** (pending): demo PDF watermark via
-  `payroll_pdf.render_payslip_pdf` when `PayrollSettings.demo_values`.
+- **B4-02d.1** (committed): finalise open-exceptions ack + preview
+  surfaces per-employee `attendance_warnings`.
+- **B4-02e** (this bundle): demo PDF watermark. `payroll_runner` writes
+  `demo_values` into `calculation_context["attendance_inputs"]["settings"]`
+  on every payslip; `payroll_pdf.render_payslip_pdf` prepends/appends a
+  `*** DEMO - NOT A REAL PAYSLIP ***` line when the flag is set (or when
+  a caller passes `demo_values=True` explicitly).
 - **B4-02f** (pending): `provisioning.py` auto-seed hook.
+- **B4-02d.2** (pending): demo-tenant preview e2e + non-demo unset 409
+  (needs control-table fixtures in test).
 
 ## Payroll golden cases (Chapter 4H, 4G-c)
 - Framework: not yet delivered (Bundle B4-03).

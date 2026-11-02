@@ -1,17 +1,22 @@
-"""Minimal PDF renderer for payslips (Chapter 4, Bundle 004b-b).
+"""Minimal PDF renderer for payslips (Chapter 4 Bundle 004b-b + Chapter 4H B-4e).
 
 No external dependency (no reportlab). Renders a single-page text PDF
-containing the standard payslip fields, which is sufficient for a proof-of-
-concept and a mechanical correctness check. Upgrading to a nicer layout is
-a follow-up that swaps this module only.
+containing the standard payslip fields.
 
-Storage via StorageDep is deferred (documented in STATE.md at 016c). The
-endpoint returns bytes on demand.
+Chapter 4H B-4e (round-1 §3): demo-flagged tenants get a visible
+"*** DEMO - NOT A REAL PAYSLIP ***" mark at the top and bottom of every
+payslip PDF. The flag is read from
+`payslip.calculation_context["attendance_inputs"]["settings"]["demo_values"]`,
+which the runner writes on every payslip it produces. A caller may override
+by passing `demo_values=True/False` explicitly.
 """
 from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any
+
+
+_DEMO_MARK = "*** DEMO - NOT A REAL PAYSLIP ***"
 
 
 def _esc(s: str) -> str:
@@ -26,7 +31,26 @@ def _fmt(v: Any) -> str:
     return str(v)
 
 
-def _payslip_text_lines(payslip: Any, employee: Any, pay_period: Any) -> list[str]:
+def _demo_flag_from_payslip(payslip: Any) -> bool:
+    ctx = getattr(payslip, "calculation_context", None)
+    if not isinstance(ctx, dict):
+        return False
+    inputs = ctx.get("attendance_inputs")
+    if not isinstance(inputs, dict):
+        return False
+    settings = inputs.get("settings")
+    if not isinstance(settings, dict):
+        return False
+    return bool(settings.get("demo_values", False))
+
+
+def _payslip_text_lines(
+    payslip: Any,
+    employee: Any,
+    pay_period: Any,
+    *,
+    demo_values: bool = False,
+) -> list[str]:
     code = getattr(employee, "employee_code", "") or ""
     name = " ".join(
         x for x in (getattr(employee, "first_name", "") or "", getattr(employee, "last_name", "") or "")
@@ -55,6 +79,9 @@ def _payslip_text_lines(payslip: Any, employee: Any, pay_period: Any) -> list[st
         f"UIF (employer)        {_fmt(getattr(payslip, 'uif_employer', None))}",
         f"SDL                   {_fmt(getattr(payslip, 'sdl', None))}",
     ]
+
+    if demo_values:
+        lines = [_DEMO_MARK, ""] + lines + ["", _DEMO_MARK]
     return lines
 
 
@@ -101,7 +128,22 @@ def _render_minimal_pdf(lines: list[str]) -> bytes:
     return bytes(out)
 
 
-def render_payslip_pdf(payslip: Any, employee: Any, pay_period: Any) -> bytes:
-    return _render_minimal_pdf(_payslip_text_lines(payslip, employee, pay_period))
+def render_payslip_pdf(
+    payslip: Any,
+    employee: Any,
+    pay_period: Any,
+    *,
+    demo_values: bool | None = None,
+) -> bytes:
+    """Render the payslip PDF.
 
-# END OF FILE
+    `demo_values` may be passed explicitly (from a tenant setting lookup).
+    When `None` (default), the demo flag is read from the payslip's stored
+    calculation_context; a payslip from an older run without that context
+    will not carry the demo mark.
+    """
+    if demo_values is None:
+        demo_values = _demo_flag_from_payslip(payslip)
+    return _render_minimal_pdf(
+        _payslip_text_lines(payslip, employee, pay_period, demo_values=demo_values)
+    )
