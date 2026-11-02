@@ -1,14 +1,11 @@
-"""Demo seed for tenant-demo (B-2).
-
-Uses the real engine end-to-end:
-  - country_calendar pre-populated (ZA fixed-date public holidays)
-  - punches via app.api.v1.punches._process_punch
-  - adjustments via app.api.v1.attendance_engine._persist_adjustment
-  - days + exceptions via ensure_days + recompute_day
-  - change requests via app.services.payroll_change_request.submit_change_request
-  - tenant provisioning via app.services.provisioning.provision_tenant
+"""Demo seed for tenant-demo (B-2 + Chapter 4H B-4).
 
 Refuses when environment in ("staging", "production").
+
+Deferred (recorded in docs/SEED.md / STATE.md):
+  - Fake statutory fixture load into control DB.
+  - Demo PDF watermark (needs payroll_pdf.py source).
+  - provision_tenant auto-seed hook (needs provisioning.py source).
 """
 from __future__ import annotations
 
@@ -17,6 +14,7 @@ import secrets
 import sys
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, text
@@ -48,7 +46,10 @@ from app.db.tenant.models.organisation import Branch, Company, Department, Site
 from app.db.tenant.models.people import Employee, User
 from app.db.tenant.models.pay import PayPeriod
 from app.db.tenant.session import tenant_session
-from app.services.payroll_change_request import submit_change_request
+from app.services.payroll_change_request import (
+    approve_change_request,
+    submit_change_request,
+)
 from app.services.provisioning import (
     _drop_tenant_database,
     _tenant_db_name,
@@ -90,10 +91,6 @@ ROLES_EXTRA = [
     ("employee", "employee"),
 ]
 
-# ZA public holidays with legally fixed calendar dates (Public Holidays Act
-# 36 of 1994). Moving holidays (Good Friday, Family Day) omitted on purpose:
-# an absent row is treated as a normal weekday (safe); a guessed date would
-# misclassify a day.
 _FIXED_ZA_HOLIDAYS = [
     ((1, 1), "New Year's Day"),
     ((3, 21), "Human Rights Day"),
@@ -105,6 +102,23 @@ _FIXED_ZA_HOLIDAYS = [
     ((12, 16), "Day of Reconciliation"),
     ((12, 25), "Christmas Day"),
     ((12, 26), "Day of Goodwill"),
+]
+
+# DEMO PLACEHOLDER multipliers (round-1 §5: not real payroll policy; flagged
+# here and in docs/SEED.md). Real tenants must set their own shift_rate_rule
+# rows through the shift-rate-rule API, based on accountant guidance.
+_DEMO_RATE_RULES: list[dict] = [
+    {"day_type": "weekday", "kind": "normal", "tier": 1, "method": "multiplier", "value": "1.0"},
+    {"day_type": "saturday", "kind": "normal", "tier": 1, "method": "multiplier", "value": "1.5"},
+    {"day_type": "sunday", "kind": "normal", "tier": 1, "method": "multiplier", "value": "2.0"},
+    {"day_type": "public_holiday", "kind": "normal", "tier": 1, "method": "multiplier", "value": "2.0"},
+    {"day_type": "weekday", "kind": "overtime", "tier": 1, "method": "multiplier", "value": "1.5"},
+    {"day_type": "weekday", "kind": "overtime", "tier": 2, "method": "multiplier", "value": "2.0"},
+    {"day_type": "weekday", "kind": "overtime", "tier": 3, "method": "multiplier", "value": "3.0"},
+    {"day_type": "saturday", "kind": "overtime", "tier": 1, "method": "multiplier", "value": "2.0"},
+    {"day_type": "saturday", "kind": "overtime", "tier": 2, "method": "multiplier", "value": "2.5"},
+    {"day_type": "sunday", "kind": "overtime", "tier": 1, "method": "multiplier", "value": "2.5"},
+    {"day_type": "public_holiday", "kind": "overtime", "tier": 1, "method": "multiplier", "value": "3.0"},
 ]
 
 
@@ -258,6 +272,44 @@ def _seed_shift(db) -> Shift:
     return shift
 
 
+def _seed_shift_rate_rules(db, shift: Shift) -> int:
+    """Demo shift_rate_rule rows so attendance segments produce amounts.
+
+    Multipliers are DEMO PLACEHOLDERS (round-1 §5: no invented money). For
+    real tenants these must come from accountant-confirmed policy.
+    """
+    eff = date(2024, 1, 1)
+    existing = {
+        (r.day_type, r.kind, r.tier)
+        for r in db.scalars(
+            select(ShiftRateRule).where(
+                ShiftRateRule.shift_id == shift.id,
+                ShiftRateRule.effective_from == eff,
+            )
+        ).all()
+    }
+    added = 0
+    for spec in _DEMO_RATE_RULES:
+        key = (spec["day_type"], spec["kind"], spec["tier"])
+        if key in existing:
+            continue
+        db.add(ShiftRateRule(
+            shift_id=shift.id,
+            day_type=spec["day_type"],
+            kind=spec["kind"],
+            tier=spec["tier"],
+            tier_up_to_minutes=None,
+            method=spec["method"],
+            value=Decimal(spec["value"]),
+            flat_unit=None,
+            effective_from=eff,
+            effective_to=None,
+        ))
+        added += 1
+    db.flush()
+    return added
+
+
 def _seed_work_pattern(db, shift: Shift) -> WorkPattern:
     wp = WorkPattern(
         name="Mon-Fri Day",
@@ -332,6 +384,126 @@ def _seed_device(db, site: Site) -> tuple[Device, str]:
     db.add(device)
     db.flush()
     return device, raw
+
+
+def _seed_pay_setup(
+    db,
+    employees: list[Employee],
+    admin_user: User | None,
+    hr_user: User | None,
+) -> None:
+    from app.db.tenant.models.payroll_settings import PayrollSettings
+    from app.db.tenant.models.pay import EarningType
+    from app.services.payroll_formulas import FORMULA_REGISTRY
+    from app.services.payroll_seed import ensure_system_earning_types
+
+    settings = db.scalar(select(PayrollSettings))
+    if settings is None:
+        settings = PayrollSettings(
+            id=uuid.uuid4(),
+            age_reference_date="date_of_birth",
+            sdl_applies=True,
+            net_pay_floor=Decimal("0.00"),
+            formula_acks={},
+            attendance_earning_map={
+                "normal|weekday|any": "hourly_normal",
+                "normal|saturday|any": "hourly_saturday",
+                "normal|sunday|any": "hourly_sunday",
+                "normal|public_holiday|any": "hourly_public_holiday",
+                "overtime|weekday|1": "overtime_t1",
+                "overtime|weekday|2": "overtime_t2",
+                "overtime|weekday|3": "overtime_t3",
+                "overtime|saturday|1": "overtime_t1",
+                "overtime|saturday|2": "overtime_t2",
+                "overtime|sunday|1": "overtime_t1",
+                "overtime|public_holiday|1": "overtime_t1",
+                "allowance|weekday|any": "shift_allowance",
+                "allowance|saturday|any": "shift_allowance",
+                "allowance|sunday|any": "shift_allowance",
+                "allowance|public_holiday|any": "shift_allowance",
+            },
+            unpaid_day_behaviour="deduct_daily",
+            unpaid_day_formula_code="gen_unpaid_absence",
+            public_holiday_unworked_monthly="paid",
+            public_holiday_paid=True,
+            leave_authoritative_source="adjustment",
+            monthly_hourly_derivation_formula_code="hourly_rate_from_monthly",
+            leave_earning_for_monthly=False,
+            demo_values=True,
+            row_version=1,
+        )
+        db.add(settings)
+        db.flush()
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    admin_id = str(getattr(admin_user, "id", "")) if admin_user else ""
+    settings.formula_acks = {
+        code: {"acknowledged_at": now_iso, "acknowledged_by": admin_id}
+        for code in FORMULA_REGISTRY
+    }
+    db.flush()
+
+    ensure_system_earning_types(db)
+    db.flush()
+
+    for i, emp in enumerate(employees):
+        if i % 2 == 0:
+            emp.pay_basis = "monthly"
+            emp.pay_frequency = "monthly"
+            emp.contracted_weekly_hours = 40.0
+            emp.base_rate = None
+        else:
+            emp.pay_basis = "hourly"
+            emp.pay_frequency = "monthly"
+            emp.base_rate = Decimal("85.00")
+    db.flush()
+
+    base_type = db.scalar(select(EarningType).where(EarningType.code == "BASE_MONTHLY"))
+    if base_type is None:
+        base_type = EarningType(
+            id=uuid.uuid4(),
+            name="Base Monthly Salary",
+            code="BASE_MONTHLY",
+            calc_method="fixed_amount",
+            frequency="regular",
+            is_taxable=True,
+            counts_for_uif=True,
+            counts_for_sdl=True,
+            proration_rule="none",
+            is_system=False,
+            is_active=True,
+            row_version=1,
+        )
+        db.add(base_type)
+        db.flush()
+
+    db.commit()
+
+    if admin_user is not None and hr_user is not None and admin_user.id != hr_user.id:
+        for i, emp in enumerate(employees):
+            if i % 2 != 0:
+                continue
+            payload = {
+                "earning_type_id": str(base_type.id),
+                "amount": "25000.00",
+                "effective_from": "2024-01-01",
+            }
+            try:
+                req = submit_change_request(
+                    db, hr_user,
+                    kind="employee_earning_create",
+                    employee_id=emp.id,
+                    payload=payload,
+                )
+                db.flush()
+                approve_change_request(db, admin_user, req.id)
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                print(
+                    f"[seed] earning request skipped for {emp.employee_code}: {exc}",
+                    file=sys.stderr,
+                )
 
 
 def _seed_punches_and_engine(
@@ -429,10 +601,6 @@ def _seed_pay_periods(db, start_date: date, end_date: date) -> tuple[PayPeriod, 
     prev_end = start_date - timedelta(days=1)
     prev_start = prev_end.replace(day=1)
 
-    # cutoff_at is NOT NULL on pay_period — set it to 23:59 local on the
-    # period's end date (that is the natural "last moment this period
-    # counts" semantic). Converted to UTC because the column is timezone-
-    # aware.
     prev_cutoff = _utc(prev_end, 23, 59)
     open_cutoff = _utc(end_date, 23, 59)
 
@@ -503,7 +671,7 @@ def _reset_or_keep(reset: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Seed tenant-demo (B-2)")
+    parser = argparse.ArgumentParser(description="Seed tenant-demo (B-2 + 4H B-4)")
     parser.add_argument("--reset", action="store_true",
                         help="Drop and recreate the demo tenant")
     parser.add_argument("--keep", action="store_true",
@@ -536,6 +704,9 @@ def main(argv: list[str] | None = None) -> int:
 
         company, sites, deps = _seed_org(db)
         shift = _seed_shift(db)
+        rules_added = _seed_shift_rate_rules(db, shift)
+        db.commit()
+        print(f"[seed] shift_rate_rules: {rules_added} DEMO placeholder rows")
         wp = _seed_work_pattern(db, shift)
         employees = _seed_employees(db, sites, deps, wp)
         print(f"[seed] {len(employees)} employees created")
@@ -564,6 +735,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[seed] users: admin/{DEV_PASSWORD_PREFIX}admin + "
               + ", ".join(f"{u}/{DEV_PASSWORD_PREFIX}{r}" for u, r in ROLES_EXTRA))
 
+        admin_ref = db.scalar(select(User).where(User.username == "admin"))
+        hr_ref = db.scalar(select(User).where(User.username == "hr"))
+        _seed_pay_setup(db, employees, admin_ref, hr_ref)
+        print(f"[seed] demo pay setup: demo_values=True, 13 system types, "
+              f"base salary for monthly staff, base rate for hourly staff")
+
         device, device_key = _seed_device(db, sites[0])
         db.commit()
 
@@ -588,9 +765,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[seed] pay periods: {locked.period_key} (locked), "
               f"{open_.period_key} (open)")
 
-        admin_ref = db.scalar(select(User).where(User.username == "admin"))
-        if admin_ref is not None:
-            _seed_change_requests(db, admin_ref, employees)
+        admin_ref2 = db.scalar(select(User).where(User.username == "admin"))
+        if admin_ref2 is not None:
+            _seed_change_requests(db, admin_ref2, employees)
             print(f"[seed] 3 pending change requests submitted")
 
     print()
