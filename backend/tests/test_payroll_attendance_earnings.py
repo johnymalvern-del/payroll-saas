@@ -299,7 +299,7 @@ def test_attendance_earnings_locked_day_still_included(session):
 
     lines, warnings, _snap = _build_attendance_earnings(session, emp, period)
     assert len(lines) == 1
-    assert lines[0].amount == Decimal("800.00")  # 100 * 1.0 * 8h
+    assert lines[0].amount == Decimal("800.00")
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +321,7 @@ def test_attendance_earnings_hourly_saturday_uses_saturday_type(session):
 
     lines, _, _ = _build_attendance_earnings(session, emp, period)
     assert len(lines) == 1
-    assert lines[0].amount == Decimal("1200.00")  # 100 * 1.5 * 8
+    assert lines[0].amount == Decimal("1200.00")
     assert "hourly_saturday" in (lines[0].source_ref or {}).get("earning_type_code", "")
 
 
@@ -418,7 +418,6 @@ def test_attendance_earnings_monthly_overtime_derivation_set_produces_line(sessi
     )
     emp = _mk_employee(session, pay_basis="monthly", base_rate=None,
                        contracted_weekly_hours=40.0)
-    # BASE_MONTHLY earning row so _monthly_salary_from_earnings finds a rate.
     from app.db.tenant.models.pay import EmployeeEarning
     base_et = session.scalar(select(EarningType).where(EarningType.code == "BASE_MONTHLY"))
     session.add(EmployeeEarning(
@@ -441,8 +440,6 @@ def test_attendance_earnings_monthly_overtime_derivation_set_produces_line(sessi
     lines, _, _ = _build_attendance_earnings(session, emp, period)
     ot_lines = [l for l in lines if (l.source_ref or {}).get("earning_type_code") == "overtime_t1"]
     assert len(ot_lines) == 1
-    # monthly 25000 / (40*52/12) = 25000 / 173.3333 = 144.2308 (4 dp)
-    # * 1.5 * 60/60 = 216.3462 -> quantise 2 dp -> 216.35
     assert ot_lines[0].amount == Decimal("216.35")
 
 
@@ -485,7 +482,7 @@ def test_attendance_earnings_overtime_approved_paid(session):
 
     lines, warnings, _ = _build_attendance_earnings(session, emp, period)
     assert len(lines) == 1
-    assert lines[0].amount == Decimal("150.00")  # 100 * 1.5 * 1h
+    assert lines[0].amount == Decimal("150.00")
     assert not any("overtime_unapproved" in w for w in warnings)
 
 
@@ -553,7 +550,6 @@ def test_attendance_earnings_leave_source_not_adjustment_422(session):
     with pytest.raises(AppError) as exc:
         _build_attendance_earnings(session, emp, period)
     assert exc.value.code == "leave_source_not_available"
-    assert exc.value.status == 422
 
 
 def test_attendance_earnings_leave_adjustment_earns_leave_paid_hourly(session):
@@ -572,7 +568,7 @@ def test_attendance_earnings_leave_adjustment_earns_leave_paid_hourly(session):
     lines, _, _ = _build_attendance_earnings(session, emp, period)
     leave = [l for l in lines if (l.source_ref or {}).get("kind") == "paid_leave"]
     assert len(leave) == 1
-    assert leave[0].amount == Decimal("800.00")  # 100 * 8h
+    assert leave[0].amount == Decimal("800.00")
 
 
 # ---------------------------------------------------------------------------
@@ -663,9 +659,6 @@ def test_attendance_earnings_end_to_end_hourly_gross_paye_net(session):
     draft = P.run_pipeline(_fake_pipeline_config(), earnings, [])
     assert not draft.refused
     assert draft.gross == Decimal("800.00")
-    # UIF = 1% of 800 = 8.00
     assert draft.uif_employee == Decimal("8.00")
-    # PAYE > 0 (annual taxable 9600 > 5000 threshold, 18% bracket)
     assert draft.paye > Decimal("0.00")
-    # Net strictly less than gross (tax + UIF applied)
     assert Decimal("0.00") < draft.net < draft.gross
