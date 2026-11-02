@@ -19,7 +19,7 @@ from app.db.tenant.models.attendance import (
     AttendanceSegment,
 )
 from app.db.tenant.models.organisation import Company
-from app.db.tenant.models.pay import PayPeriod
+from app.db.tenant.models.pay import EarningType, PayPeriod
 from app.db.tenant.models.payroll_settings import PayrollSettings
 from app.db.tenant.models.people import Employee
 from app.services.payroll_pdf import (
@@ -162,14 +162,19 @@ def test_payslip_text_lines_no_marker_when_not_demo():
     assert _DEMO_MARK not in lines
 
 
-def _mk_settings(session, *, demo_values: bool) -> PayrollSettings:
+def _mk_settings(
+    session,
+    *,
+    demo_values: bool,
+    attendance_earning_map: dict | None = None,
+) -> PayrollSettings:
     row = PayrollSettings(
         id=uuid.uuid4(),
         age_reference_date="date_of_birth",
         sdl_applies=True,
         net_pay_floor=Decimal("0.00"),
         formula_acks={},
-        attendance_earning_map={},
+        attendance_earning_map=attendance_earning_map or {},
         unpaid_day_behaviour=None,
         unpaid_day_formula_code=None,
         public_holiday_unworked_monthly=None,
@@ -197,6 +202,26 @@ def _mk_company(session):
     session.add(c)
     session.flush()
     return c
+
+
+def _mk_earning_type(session, *, code: str) -> EarningType:
+    et = EarningType(
+        id=uuid.uuid4(),
+        name=code.replace("_", " ").title(),
+        code=code,
+        calc_method="per_hour",
+        frequency="regular",
+        is_taxable=True,
+        counts_for_uif=True,
+        counts_for_sdl=True,
+        proration_rule="none",
+        is_system=True,
+        is_active=True,
+        row_version=1,
+    )
+    session.add(et)
+    session.flush()
+    return et
 
 
 def _mk_period(session):
@@ -234,7 +259,12 @@ def _mk_employee(session):
 
 def test_runner_snapshot_includes_demo_values_true(session):
     _mk_company(session)
-    _mk_settings(session, demo_values=True)
+    _mk_earning_type(session, code="hourly_normal")
+    _mk_settings(
+        session,
+        demo_values=True,
+        attendance_earning_map={"normal|weekday|any": "hourly_normal"},
+    )
     emp = _mk_employee(session)
     period = _mk_period(session)
     day = AttendanceDay(
