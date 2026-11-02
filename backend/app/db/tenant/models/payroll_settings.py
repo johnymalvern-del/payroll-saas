@@ -14,7 +14,16 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, func, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -62,19 +71,16 @@ class PayrollSettings(Base):
 
     # Demo-tenant marker (round-1 amendment 3). Never set for real tenants.
     demo_values: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=sa_false_text()
+        Boolean, nullable=False, default=False, server_default=text("false")
     )
 
     row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
     )
     updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("user.id", ondelete="SET NULL"), nullable=True
     )
-
-
-def sa_false_text() -> str:
-    """Server default for demo_values. Kept as a helper so the migration
-    and the model share the same literal."""
-    return "false"

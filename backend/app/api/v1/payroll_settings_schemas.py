@@ -8,13 +8,11 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.services.payroll_runner import AgeRef  # type: ignore[attr-defined]
-
 
 class PayrollSettingsOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    age_reference_date: AgeRef | None = None
+    age_reference_date: str | None = None
     sdl_applies: bool | None = None
     net_pay_floor: Decimal = Decimal("0.00")
     row_version: int = 0
@@ -31,7 +29,7 @@ class PayrollSettingsOut(BaseModel):
 
 
 class PayrollSettingsPatchIn(BaseModel):
-    age_reference_date: AgeRef | None = None
+    age_reference_date: str | None = None
     sdl_applies: bool | None = None
     net_pay_floor: Decimal | None = Field(None, ge=0)
     row_version: int
