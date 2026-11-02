@@ -1,11 +1,22 @@
-"""Chapter 4H B-3: /payroll/payslips/me routes + role matrix."""
+"""Chapter 4H B-3: /payroll/payslips/me routes + role matrix.
+
+Fix after first run:
+  - `test_me_excludes_preview_status`: two payslips on same (period, employee)
+    must have different revisions to satisfy
+    `uq_payslip_period_employee_rev (pay_period_id, employee_id, revision)`.
+    Preview payslip uses revision=2 (mirrors production invariant
+    `rev = prior_final_max + 1`).
+  - `test_me_{manager,hr,payroll_admin}_can_read_own`: helper no longer
+    creates a user; each test creates exactly one user for `emp.id` to
+    satisfy the partial unique index `uq_user_employee_active`
+    (one active user per employee).
+"""
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from types import SimpleNamespace
 from typing import Iterator
 
 import pytest
@@ -125,12 +136,12 @@ def _mk_period(session, period_key="2026-01", pay_date=None) -> PayPeriod:
     return p
 
 
-def _mk_run(session, period) -> PayrollRun:
+def _mk_run(session, period, *, revision: int = 1, kind: str = "final") -> PayrollRun:
     run = PayrollRun(
         id=uuid.uuid4(),
         pay_period_id=period.id,
-        kind="final",
-        revision=1,
+        kind=kind,
+        revision=revision,
         status="completed",
         rules_snapshot={},
     )
@@ -140,14 +151,18 @@ def _mk_run(session, period) -> PayrollRun:
 
 
 def _mk_payslip(
-    session, run, period, emp, *, status="current", net="890.00",
+    session, run, period, emp,
+    *,
+    status: str = "current",
+    net: str = "890.00",
+    revision: int = 1,
 ) -> Payslip:
     ps = Payslip(
         id=uuid.uuid4(),
         payroll_run_id=run.id,
         pay_period_id=period.id,
         employee_id=emp.id,
-        revision=run.revision,
+        revision=revision,
         status=status,
         gross=Decimal("1000.00"),
         pre_tax_deductions=Decimal("0"),
@@ -168,13 +183,17 @@ def _mk_payslip(
     return ps
 
 
-def _ctx_one_own_payslip(session):
+def _ctx_emp_period_ps(session):
+    """Employee + period + one current payslip, WITHOUT a user.
+
+    Each test that needs a user creates exactly one for `emp.id` —
+    `uq_user_employee_active` allows only one active user per employee.
+    """
     emp = _mk_employee(session)
-    user = _mk_user(session, role="employee", employee_id=emp.id)
     period = _mk_period(session)
-    run = _mk_run(session, period)
-    ps = _mk_payslip(session, run, period, emp)
-    return emp, user, period, ps
+    run = _mk_run(session, period, revision=1, kind="final")
+    ps = _mk_payslip(session, run, period, emp, revision=1)
+    return emp, period, ps
 
 
 def test_me_lists_only_own(session):
@@ -183,9 +202,9 @@ def test_me_lists_only_own(session):
     user1 = _mk_user(session, role="employee", employee_id=emp1.id)
 
     p1 = _mk_period(session, period_key="2026-01", pay_date=date(2026, 1, 31))
-    r1 = _mk_run(session, p1)
-    ps1 = _mk_payslip(session, r1, p1, emp1)
-    ps2 = _mk_payslip(session, r1, p1, emp2)
+    r1 = _mk_run(session, p1, revision=1, kind="final")
+    ps1 = _mk_payslip(session, r1, p1, emp1, revision=1)
+    ps2 = _mk_payslip(session, r1, p1, emp2, revision=1)
 
     out = list_my_payslips(session, user1, limit=100, cursor=None)
     ids = [it.id for it in out.items]
@@ -194,15 +213,22 @@ def test_me_lists_only_own(session):
 
 
 def test_me_excludes_preview_status(session):
+    """Two payslips for the same employee+period must use different revisions
+    (uq_payslip_period_employee_rev). Preview at revision=2 mirrors the
+    production invariant `rev = prior_final_max + 1`."""
     emp = _mk_employee(session)
     user = _mk_user(session, role="employee", employee_id=emp.id)
     period = _mk_period(session)
-    run = _mk_run(session, period)
-    _mk_payslip(session, run, period, emp, status="preview")
-    _mk_payslip(session, run, period, emp, status="current")
+
+    final_run = _mk_run(session, period, revision=1, kind="final")
+    _mk_payslip(session, final_run, period, emp, status="current", revision=1)
+
+    preview_run = _mk_run(session, period, revision=2, kind="preview")
+    _mk_payslip(session, preview_run, period, emp, status="preview", revision=2)
 
     out = list_my_payslips(session, user, limit=100, cursor=None)
     assert all(it.status != "preview" for it in out.items)
+    assert len(out.items) == 1
 
 
 def test_me_404_when_no_employee_record(session):
@@ -217,8 +243,8 @@ def test_me_detail_404_for_other_employee_payslip(session):
     emp2 = _mk_employee(session)
     user1 = _mk_user(session, role="employee", employee_id=emp1.id)
     period = _mk_period(session)
-    run = _mk_run(session, period)
-    other_ps = _mk_payslip(session, run, period, emp2)
+    run = _mk_run(session, period, revision=1, kind="final")
+    other_ps = _mk_payslip(session, run, period, emp2, revision=1)
 
     with pytest.raises(AppError) as exc:
         get_my_payslip(other_ps.id, session, user1)
@@ -230,8 +256,8 @@ def test_me_pdf_404_for_other_employee_payslip(session):
     emp2 = _mk_employee(session)
     user1 = _mk_user(session, role="employee", employee_id=emp1.id)
     period = _mk_period(session)
-    run = _mk_run(session, period)
-    other_ps = _mk_payslip(session, run, period, emp2)
+    run = _mk_run(session, period, revision=1, kind="final")
+    other_ps = _mk_payslip(session, run, period, emp2, revision=1)
 
     with pytest.raises(AppError) as exc:
         get_my_payslip_pdf(other_ps.id, session, user1)
@@ -247,8 +273,8 @@ def test_me_pagination_cursor(session):
             period_key=f"2026-{i + 1:02d}",
             pay_date=date(2026, i + 1, 28),
         )
-        r = _mk_run(session, p)
-        _mk_payslip(session, r, p, emp)
+        r = _mk_run(session, p, revision=1, kind="final")
+        _mk_payslip(session, r, p, emp, revision=1)
 
     first = list_my_payslips(session, user, limit=2, cursor=None)
     assert len(first.items) == 2
@@ -256,18 +282,11 @@ def test_me_pagination_cursor(session):
 
     second = list_my_payslips(session, user, limit=2, cursor=first.next_cursor)
     assert len(second.items) >= 1
-    # Different payslips between pages
     assert set(it.id for it in first.items) & set(it.id for it in second.items) == set()
 
 
 def test_me_not_parsed_as_id_by_route(session):
-    """Round-2 §12: 'me' must not be consumed by /{payslip_id}.
-
-    FastAPI registration order guarantees /me is matched before
-    /{payslip_id}. This test proves it in two ways: (a) the /me route
-    exists on the router (import-time check), (b) calling list_my_payslips
-    on the current user does not raise 'uuid parse' errors.
-    """
+    """Round-2 §12: 'me' must not be consumed by /{payslip_id}."""
     from app.api.v1.payroll_payslips import router as payslip_router
 
     paths = [r.path for r in payslip_router.routes]
@@ -279,33 +298,34 @@ def test_me_not_parsed_as_id_by_route(session):
     emp = _mk_employee(session)
     user = _mk_user(session, role="employee", employee_id=emp.id)
     out = list_my_payslips(session, user, limit=100, cursor=None)
-    assert out is not None  # no UUID-parse crash
+    assert out is not None
 
 
 def test_me_employee_can_read_own(session):
-    _emp, user, _period, _ps = _ctx_one_own_payslip(session)
+    emp, _period, _ps = _ctx_emp_period_ps(session)
+    user = _mk_user(session, role="employee", employee_id=emp.id)
     out = list_my_payslips(session, user, limit=100, cursor=None)
     assert out is not None
 
 
 def test_me_manager_can_read_own(session):
-    emp, _u, _p, _ps = _ctx_one_own_payslip(session)
-    manager_user = _mk_user(session, role="manager", employee_id=emp.id)
-    out = list_my_payslips(session, manager_user, limit=100, cursor=None)
+    emp, _period, _ps = _ctx_emp_period_ps(session)
+    user = _mk_user(session, role="manager", employee_id=emp.id)
+    out = list_my_payslips(session, user, limit=100, cursor=None)
     assert out is not None
 
 
 def test_me_hr_can_read_own(session):
-    emp, _u, _p, _ps = _ctx_one_own_payslip(session)
-    hr_user = _mk_user(session, role="hr", employee_id=emp.id)
-    out = list_my_payslips(session, hr_user, limit=100, cursor=None)
+    emp, _period, _ps = _ctx_emp_period_ps(session)
+    user = _mk_user(session, role="hr", employee_id=emp.id)
+    out = list_my_payslips(session, user, limit=100, cursor=None)
     assert out is not None
 
 
 def test_me_payroll_admin_can_read_own(session):
-    emp, _u, _p, _ps = _ctx_one_own_payslip(session)
-    admin_user = _mk_user(session, role="payroll_admin", employee_id=emp.id)
-    out = list_my_payslips(session, admin_user, limit=100, cursor=None)
+    emp, _period, _ps = _ctx_emp_period_ps(session)
+    user = _mk_user(session, role="payroll_admin", employee_id=emp.id)
+    out = list_my_payslips(session, user, limit=100, cursor=None)
     assert out is not None
 
 

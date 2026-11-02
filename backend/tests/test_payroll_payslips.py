@@ -3,9 +3,11 @@
 Seeds payslips directly via ORM. The schema constraint
 `uq_payslip_period_employee_rev (pay_period_id, employee_id, revision)`
 means every test that adds a second payslip for the same (period, employee)
-must use a higher revision - which mirrors production, where preview runs
-always come after / ahead of finalised payslips with a higher revision
-number (see payroll_runner.run_preview: rev = prior_final_max + 1).
+must use a higher revision.
+
+Chapter 4H B-3 amendment §14: the PDF `Content-Disposition` filename is now
+`payslip.pdf` (generic, no employee_code) and `Cache-Control: no-store`
+is set. The `test_get_pdf_returns_bytes` assertion was updated accordingly.
 """
 from __future__ import annotations
 
@@ -189,13 +191,7 @@ def ctx(tenant_session):
     )
 
 
-# ---------------------------------------------------------------------------
-# List
-# ---------------------------------------------------------------------------
-
 def test_list_excludes_preview_rows(ctx):
-    # Preview payslip must be at a higher revision than any current payslip
-    # (production invariant: rev = prior_final_max + 1).
     preview_run = _mk_run(ctx.session, ctx.period, kind="preview", revision=2)
     _mk_payslip(
         ctx.session, preview_run, ctx.period, ctx.emp,
@@ -214,10 +210,6 @@ def test_list_filters_by_employee(ctx):
     assert len(out.items) == 1
     assert out.items[0].employee_id == ctx.emp.id
 
-
-# ---------------------------------------------------------------------------
-# Get
-# ---------------------------------------------------------------------------
 
 def test_get_returns_payslip(ctx):
     out = get_payslip(payslip_id=ctx.ps.id, db=ctx.session, user=ctx.admin)
@@ -242,10 +234,6 @@ def test_get_preview_status_404(ctx):
     assert exc_info.value.code == "not_found"
 
 
-# ---------------------------------------------------------------------------
-# Explain
-# ---------------------------------------------------------------------------
-
 def test_explain_includes_lines_and_snapshot(ctx):
     out = explain_payslip(payslip_id=ctx.ps.id, db=ctx.session, user=ctx.admin)
     assert out.payslip.id == ctx.ps.id
@@ -254,17 +242,13 @@ def test_explain_includes_lines_and_snapshot(ctx):
     assert out.calculation_context.get("tax_method") == "regular_earnings_v1"
 
 
-# ---------------------------------------------------------------------------
-# PDF
-# ---------------------------------------------------------------------------
-
 def test_get_pdf_returns_bytes(ctx):
     response = get_payslip_pdf(payslip_id=ctx.ps.id, db=ctx.session, user=ctx.admin)
     assert response.media_type == "application/pdf"
     assert response.body[:5] == b"%PDF-"
     cd = response.headers.get("content-disposition", "")
+    # B-3 amendment §14: generic filename `payslip.pdf` (no employee code,
+    # no period key). Cache-Control: no-store set.
     assert "attachment;" in cd
-    assert "payslip-" in cd
-    assert ".pdf" in cd
-
-# END OF FILE
+    assert 'filename="payslip.pdf"' in cd
+    assert response.headers.get("cache-control") == "no-store"
