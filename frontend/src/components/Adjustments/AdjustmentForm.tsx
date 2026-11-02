@@ -9,6 +9,7 @@ import {
   Textarea,
   TextInput,
 } from "@mantine/core";
+import { useQuery } from "@tanstack/react-query";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
 import timezone from "dayjs/plugin/timezone";
@@ -16,13 +17,12 @@ import {
   ADJUSTMENT_OUTCOMES,
   type AdjustmentOutcome,
 } from "../../api/adjustments";
+import { fetchReasonCodes } from "../../api/reasonCodes";
 import { DEFAULT_SITE_TZ } from "../../lib/config";
 import { strings } from "../../lib/strings";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
-
-const REASON_CODE_MAX = 40;
 
 export type AdjustmentFormValues = {
   outcome: AdjustmentOutcome;
@@ -71,25 +71,30 @@ export function AdjustmentForm({
   const [note, setNote] = useState<string>(initial?.note ?? "");
   const [error, setError] = useState<string | null>(null);
 
+  const codesQuery = useQuery({
+    queryKey: ["refs", "reason_codes"],
+    queryFn: fetchReasonCodes,
+    staleTime: 5 * 60 * 1000,
+  });
+  const codes = codesQuery.data ?? [];
+  const selected = codes.find((c) => c.code === reasonCode) ?? null;
+  const requiresNote =
+    selected?.requires_note ?? (reasonCode === "other");
+
   const requiresTimes = outcome === "worked";
-  const reasonIsOther = reasonCode.trim().toLowerCase() === "other";
   const isNextDay = requiresTimes && timesCrossMidnight(timeIn, timeOut);
 
   const submit = () => {
     setError(null);
     if (!reasonCode.trim()) {
-      setError(strings.adjustments.reasonRequired);
-      return;
-    }
-    if (reasonCode.trim().length > REASON_CODE_MAX) {
-      setError(strings.adjustments.reasonCodeTooLong);
+      setError(strings.adjustments.reasonCodeRequired);
       return;
     }
     if (requiresTimes && (!timeIn || !timeOut)) {
       setError(strings.adjustments.timesRequired);
       return;
     }
-    if (reasonIsOther && note.trim().length < 10) {
+    if (requiresNote && note.trim().length < 10) {
       setError(strings.adjustments.noteRequiredForOther);
       return;
     }
@@ -103,11 +108,8 @@ export function AdjustmentForm({
         setError(strings.adjustments.timesRequired);
         return;
       }
-      // Night shift: a time-out earlier than time-in means the next
-      // calendar day. Both are computed in DEFAULT_SITE_TZ.
       const tout = isNextDay ? toutBase.add(1, "day") : toutBase;
       if (!tout.isAfter(tin)) {
-        // Equal times are invalid; end must strictly follow start.
         setError(strings.adjustments.timeOrder);
         return;
       }
@@ -127,6 +129,11 @@ export function AdjustmentForm({
   return (
     <Stack gap="sm">
       {error ? <Alert color="red">{error}</Alert> : null}
+      {codesQuery.isError ? (
+        <Alert color="red" data-testid="adj-reason-error">
+          {strings.adjustments.reasonCodeError}
+        </Alert>
+      ) : null}
       <Select
         label={strings.adjustments.outcome}
         data={ADJUSTMENT_OUTCOMES.map((o) => ({
@@ -163,12 +170,15 @@ export function AdjustmentForm({
           ) : null}
         </Stack>
       ) : null}
-      <TextInput
+      <Select
         label={strings.adjustments.reasonCode}
-        value={reasonCode}
-        onChange={(e) => setReasonCode(e.currentTarget.value)}
-        description={strings.adjustments.reasonCodeHint}
+        placeholder={strings.adjustments.selectReasonCode}
+        data={codes.map((c) => ({ value: c.code, label: c.label }))}
+        value={reasonCode || null}
+        onChange={(v) => setReasonCode(v ?? "")}
         required
+        disabled={codesQuery.isLoading || codesQuery.isError}
+        description={strings.adjustments.reasonCodeHint}
         data-testid="adj-reason"
       />
       <Textarea
@@ -176,7 +186,7 @@ export function AdjustmentForm({
         value={note}
         onChange={(e) => setNote(e.currentTarget.value)}
         description={
-          reasonIsOther ? strings.adjustments.noteOtherHint : undefined
+          requiresNote ? strings.adjustments.noteOtherHint : undefined
         }
         minRows={2}
         data-testid="adj-note"

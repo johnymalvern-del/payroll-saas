@@ -70,6 +70,13 @@ function setupMock(opts: {
     if (url.includes("/attendance/exceptions")) {
       return jr({ items: opts.exceptions ?? [], next_cursor: null });
     }
+
+    if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
     if (url.includes("/api/v1/employees")) {
       return jr({ items: opts.employees ?? [], next_cursor: null });
     }
@@ -221,7 +228,14 @@ describe("ExceptionsPage", () => {
       if (url.includes("/attendance/exceptions")) {
         return jr({ items: [EXC], next_cursor: null });
       }
-      if (url.includes("/api/v1/employees")) {
+  
+    if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -244,7 +258,14 @@ describe("ExceptionsPage", () => {
       if (url.includes("/attendance/exceptions")) {
         return jr({ items: [EXC], next_cursor: null });
       }
-      if (url.includes("/api/v1/employees")) {
+  
+    if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -260,7 +281,14 @@ describe("ExceptionsPage", () => {
     let employeeCalls = 0;
     global.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url.includes("/api/v1/employees")) {
+  
+    if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         employeeCalls += 1;
         if (employeeCalls === 1) {
           return jr({ error: { code: "boom" } }, 500);
@@ -307,9 +335,12 @@ describe("ExceptionsPage", () => {
     const customBtn = await screen.findByTestId("custom-exc1");
     fireEvent.click(customBtn);
     const dialog = await screen.findByRole("dialog");
-    fireEvent.change(within(dialog).getByTestId("adj-reason"), {
-      target: { value: "other" },
+    await waitFor(() => {
+      const el = within(dialog).getByTestId("adj-reason") as HTMLInputElement;
+      expect(el.disabled).toBe(false);
     });
+    fireEvent.click(within(dialog).getByTestId("adj-reason"));
+    fireEvent.click(await screen.findByText("Other"));
     fireEvent.change(within(dialog).getByTestId("adj-note"), {
       target: { value: "short" },
     });
@@ -335,7 +366,14 @@ describe("ExceptionsPage", () => {
         }
         return jr({ items: [EXC], next_cursor: "abc" });
       }
-      if (url.includes("/api/v1/employees")) {
+  
+    if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -382,7 +420,14 @@ describe("ExceptionsPage", () => {
       if (url.includes("/attendance/exceptions")) {
         return jr({ items: [EXC, EXC2], next_cursor: null });
       }
-      if (url.includes("/api/v1/employees")) {
+  
+    if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -438,7 +483,14 @@ describe("ExceptionsPage", () => {
       if (url.includes("/attendance/exceptions")) {
         return jr({ items: [EXC], next_cursor: null });
       }
-      if (url.includes("/api/v1/employees")) {
+  
+    if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -500,7 +552,14 @@ describe("ExceptionsPage", () => {
       if (url.includes("/attendance/exceptions")) {
         return jr({ items: [EXC], next_cursor: null });
       }
-      if (url.includes("/api/v1/employees")) {
+  
+    if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -553,7 +612,14 @@ describe("ExceptionsPage", () => {
       if (url.includes("/attendance/exceptions")) {
         return jr({ items: [EXC], next_cursor: null });
       }
-      if (url.includes("/api/v1/employees")) {
+  
+    if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);

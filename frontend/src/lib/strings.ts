@@ -216,6 +216,10 @@ export const strings = {
       "Reason 'other' requires a note of at least 10 characters.",
     nextDayIndicator: "+1 day",
     reasonCodeTooLong: "Reason code must be 40 characters or fewer.",
+    reasonCodeLoading: "Loading reason codes…",
+    reasonCodeError: "Could not load reason codes.",
+    selectReasonCode: "Select a reason",
+    reasonCodeRequired: "Reason code is required.",
     bulk: {
       title: "Bulk adjustment",
       employees: "Employees",

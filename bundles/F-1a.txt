@@ -1,0 +1,393 @@
+=== FILE: frontend/src/api/reasonCodes.ts ===
+import { absoluteUrl, wrappedFetch } from "./client";
+
+export type ReasonCode = {
+  code: string;
+  label: string;
+  requires_note: boolean;
+};
+
+type ReasonCodeListOut = {
+  items: ReasonCode[];
+};
+
+export async function fetchReasonCodes(): Promise<ReasonCode[]> {
+  const res = await wrappedFetch(
+    new Request(absoluteUrl("/api/v1/attendance/reason-codes"), {
+      credentials: "include",
+    }),
+  );
+  if (!res.ok) throw new Error(`http_${res.status}`);
+  const body = (await res.json()) as ReasonCodeListOut;
+  return body.items ?? [];
+}
+=== END FILE: frontend/src/api/reasonCodes.ts ===
+
+=== FILE: frontend/src/components/Adjustments/AdjustmentForm.tsx ===
+import { useState } from "react";
+import {
+  Alert,
+  Button,
+  Group,
+  Select,
+  Stack,
+  Text,
+  Textarea,
+  TextInput,
+} from "@mantine/core";
+import { useQuery } from "@tanstack/react-query";
+import dayjs from "dayjs";
+import utc from "dayjs/plugin/utc";
+import timezone from "dayjs/plugin/timezone";
+import {
+  ADJUSTMENT_OUTCOMES,
+  type AdjustmentOutcome,
+} from "../../api/adjustments";
+import { fetchReasonCodes } from "../../api/reasonCodes";
+import { DEFAULT_SITE_TZ } from "../../lib/config";
+import { strings } from "../../lib/strings";
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
+export type AdjustmentFormValues = {
+  outcome: AdjustmentOutcome;
+  time_in: string | null;
+  time_out: string | null;
+  reason_code: string;
+  note: string | null;
+};
+
+type Props = {
+  workDate: string;
+  initial?: Partial<AdjustmentFormValues>;
+  onSubmit: (values: AdjustmentFormValues) => void;
+  submitLabel?: string;
+  busy?: boolean;
+};
+
+function toTimeInput(value: string | null | undefined): string {
+  if (!value) return "";
+  const d = dayjs(value).tz(DEFAULT_SITE_TZ);
+  return d.isValid() ? d.format("HH:mm") : "";
+}
+
+function timesCrossMidnight(timeIn: string, timeOut: string): boolean {
+  if (!timeIn || !timeOut) return false;
+  return timeOut < timeIn;
+}
+
+export function AdjustmentForm({
+  workDate,
+  initial,
+  onSubmit,
+  submitLabel,
+  busy,
+}: Props) {
+  const [outcome, setOutcome] = useState<AdjustmentOutcome>(
+    initial?.outcome ?? "worked",
+  );
+  const [timeIn, setTimeIn] = useState<string>(toTimeInput(initial?.time_in));
+  const [timeOut, setTimeOut] = useState<string>(
+    toTimeInput(initial?.time_out),
+  );
+  const [reasonCode, setReasonCode] = useState<string>(
+    initial?.reason_code ?? "",
+  );
+  const [note, setNote] = useState<string>(initial?.note ?? "");
+  const [error, setError] = useState<string | null>(null);
+
+  const codesQuery = useQuery({
+    queryKey: ["refs", "reason_codes"],
+    queryFn: fetchReasonCodes,
+    staleTime: 5 * 60 * 1000,
+  });
+  const codes = codesQuery.data ?? [];
+  const selected = codes.find((c) => c.code === reasonCode) ?? null;
+  const requiresNote =
+    selected?.requires_note ?? (reasonCode === "other");
+
+  const requiresTimes = outcome === "worked";
+  const isNextDay = requiresTimes && timesCrossMidnight(timeIn, timeOut);
+
+  const submit = () => {
+    setError(null);
+    if (!reasonCode.trim()) {
+      setError(strings.adjustments.reasonCodeRequired);
+      return;
+    }
+    if (requiresTimes && (!timeIn || !timeOut)) {
+      setError(strings.adjustments.timesRequired);
+      return;
+    }
+    if (requiresNote && note.trim().length < 10) {
+      setError(strings.adjustments.noteRequiredForOther);
+      return;
+    }
+
+    let timeInIso: string | null = null;
+    let timeOutIso: string | null = null;
+    if (requiresTimes && timeIn && timeOut) {
+      const tin = dayjs.tz(`${workDate}T${timeIn}:00`, DEFAULT_SITE_TZ);
+      const toutBase = dayjs.tz(`${workDate}T${timeOut}:00`, DEFAULT_SITE_TZ);
+      if (!tin.isValid() || !toutBase.isValid()) {
+        setError(strings.adjustments.timesRequired);
+        return;
+      }
+      const tout = isNextDay ? toutBase.add(1, "day") : toutBase;
+      if (!tout.isAfter(tin)) {
+        setError(strings.adjustments.timeOrder);
+        return;
+      }
+      timeInIso = tin.toISOString();
+      timeOutIso = tout.toISOString();
+    }
+
+    onSubmit({
+      outcome,
+      time_in: timeInIso,
+      time_out: timeOutIso,
+      reason_code: reasonCode.trim(),
+      note: note.trim() ? note.trim() : null,
+    });
+  };
+
+  return (
+    <Stack gap="sm">
+      {error ? <Alert color="red">{error}</Alert> : null}
+      {codesQuery.isError ? (
+        <Alert color="red" data-testid="adj-reason-error">
+          {strings.adjustments.reasonCodeError}
+        </Alert>
+      ) : null}
+      <Select
+        label={strings.adjustments.outcome}
+        data={ADJUSTMENT_OUTCOMES.map((o) => ({
+          value: o,
+          label: o.replace(/_/g, " "),
+        }))}
+        value={outcome}
+        onChange={(v) => v && setOutcome(v as AdjustmentOutcome)}
+        allowDeselect={false}
+        data-testid="adj-outcome"
+      />
+      {requiresTimes ? (
+        <Stack gap={4}>
+          <Group grow align="flex-end">
+            <TextInput
+              label={strings.adjustments.timeIn}
+              type="time"
+              value={timeIn}
+              onChange={(e) => setTimeIn(e.currentTarget.value)}
+              data-testid="adj-time-in"
+            />
+            <TextInput
+              label={strings.adjustments.timeOut}
+              type="time"
+              value={timeOut}
+              onChange={(e) => setTimeOut(e.currentTarget.value)}
+              data-testid="adj-time-out"
+            />
+          </Group>
+          {isNextDay ? (
+            <Text size="xs" c="blue" data-testid="adj-next-day">
+              {strings.adjustments.nextDayIndicator}
+            </Text>
+          ) : null}
+        </Stack>
+      ) : null}
+      <Select
+        label={strings.adjustments.reasonCode}
+        placeholder={strings.adjustments.selectReasonCode}
+        data={codes.map((c) => ({ value: c.code, label: c.label }))}
+        value={reasonCode || null}
+        onChange={(v) => setReasonCode(v ?? "")}
+        required
+        disabled={codesQuery.isLoading || codesQuery.isError}
+        description={strings.adjustments.reasonCodeHint}
+        data-testid="adj-reason"
+      />
+      <Textarea
+        label={strings.adjustments.note}
+        value={note}
+        onChange={(e) => setNote(e.currentTarget.value)}
+        description={
+          requiresNote ? strings.adjustments.noteOtherHint : undefined
+        }
+        minRows={2}
+        data-testid="adj-note"
+      />
+      <Group justify="flex-end">
+        <Button onClick={submit} loading={busy} data-testid="adj-submit">
+          {submitLabel ?? strings.adjustments.submit}
+        </Button>
+      </Group>
+    </Stack>
+  );
+}
+=== END FILE: frontend/src/components/Adjustments/AdjustmentForm.tsx ===
+
+=== FILE: frontend/src/components/Adjustments/AdjustmentForm.test.tsx ===
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { MantineProvider } from "@mantine/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import dayjs from "dayjs";
+import utc from "dayjs/plugin/utc";
+import timezone from "dayjs/plugin/timezone";
+import { AdjustmentForm, type AdjustmentFormValues } from "./AdjustmentForm";
+import { DEFAULT_SITE_TZ } from "../../lib/config";
+
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function () {};
+}
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
+const CODES = [
+  { code: "system_correction", label: "System correction", requires_note: false },
+  { code: "forgot_clock", label: "Forgot clock", requires_note: false },
+  { code: "other", label: "Other", requires_note: true },
+];
+
+function mockCodes() {
+  global.fetch = vi.fn(async () =>
+    new Response(JSON.stringify({ items: CODES }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  ) as unknown as typeof fetch;
+}
+
+function renderForm(onSubmit: (v: AdjustmentFormValues) => void) {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <MantineProvider>
+      <QueryClientProvider client={qc}>
+        <AdjustmentForm workDate="2026-10-15" onSubmit={onSubmit} />
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+}
+
+async function pickReason(label: string) {
+  await waitFor(() => {
+    const el = screen.getByTestId("adj-reason") as HTMLInputElement;
+    expect(el.disabled).toBe(false);
+  });
+  fireEvent.click(screen.getByTestId("adj-reason"));
+  const opt = await screen.findByText(label);
+  fireEvent.click(opt);
+}
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+beforeEach(() => {
+  mockCodes();
+});
+
+describe("AdjustmentForm", () => {
+  it("night shift: time-out earlier than time-in means next calendar day", async () => {
+    const onSubmit = vi.fn();
+    renderForm(onSubmit);
+
+    fireEvent.change(screen.getByTestId("adj-time-in"), {
+      target: { value: "22:00" },
+    });
+    fireEvent.change(screen.getByTestId("adj-time-out"), {
+      target: { value: "06:00" },
+    });
+    await pickReason("System correction");
+
+    expect(screen.getByTestId("adj-next-day")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("adj-submit"));
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    const v = onSubmit.mock.calls[0][0] as AdjustmentFormValues;
+    expect(v.time_in).not.toBeNull();
+    expect(v.time_out).not.toBeNull();
+    expect(dayjs(v.time_in).tz(DEFAULT_SITE_TZ).format("HH:mm")).toBe("22:00");
+    expect(dayjs(v.time_out).tz(DEFAULT_SITE_TZ).format("HH:mm")).toBe("06:00");
+    expect(dayjs(v.time_out).tz(DEFAULT_SITE_TZ).format("YYYY-MM-DD")).toBe(
+      dayjs(v.time_in).tz(DEFAULT_SITE_TZ).add(1, "day").format("YYYY-MM-DD"),
+    );
+  });
+
+  it("day shift: no +1 day indicator when time-out is after time-in", () => {
+    renderForm(vi.fn());
+    fireEvent.change(screen.getByTestId("adj-time-in"), {
+      target: { value: "08:00" },
+    });
+    fireEvent.change(screen.getByTestId("adj-time-out"), {
+      target: { value: "16:30" },
+    });
+    expect(screen.queryByTestId("adj-next-day")).not.toBeInTheDocument();
+  });
+
+  it("requires a reason code", async () => {
+    const onSubmit = vi.fn();
+    renderForm(onSubmit);
+    fireEvent.change(screen.getByTestId("adj-time-in"), {
+      target: { value: "08:00" },
+    });
+    fireEvent.change(screen.getByTestId("adj-time-out"), {
+      target: { value: "16:30" },
+    });
+    fireEvent.click(screen.getByTestId("adj-submit"));
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent ?? "").toMatch(/required/i);
+  });
+
+  it("reason 'other' requires a note of at least 10 characters", async () => {
+    const onSubmit = vi.fn();
+    renderForm(onSubmit);
+    fireEvent.change(screen.getByTestId("adj-time-in"), {
+      target: { value: "08:00" },
+    });
+    fireEvent.change(screen.getByTestId("adj-time-out"), {
+      target: { value: "16:30" },
+    });
+    await pickReason("Other");
+    fireEvent.change(screen.getByTestId("adj-note"), {
+      target: { value: "short" },
+    });
+    fireEvent.click(screen.getByTestId("adj-submit"));
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent ?? "").toMatch(
+      /at least 10 characters/i,
+    );
+  });
+
+  it("submits non-other reason without requiring a note", async () => {
+    const onSubmit = vi.fn();
+    renderForm(onSubmit);
+    fireEvent.change(screen.getByTestId("adj-time-in"), {
+      target: { value: "08:00" },
+    });
+    fireEvent.change(screen.getByTestId("adj-time-out"), {
+      target: { value: "16:30" },
+    });
+    await pickReason("Forgot clock");
+    fireEvent.click(screen.getByTestId("adj-submit"));
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    const v = onSubmit.mock.calls[0][0] as AdjustmentFormValues;
+    expect(v.reason_code).toBe("forgot_clock");
+  });
+});
+=== END FILE: frontend/src/components/Adjustments/AdjustmentForm.test.tsx ===
