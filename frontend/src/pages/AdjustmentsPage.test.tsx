@@ -68,10 +68,14 @@ async function pickEmployee() {
   fireEvent.click(opt);
 }
 
-function setReason(value: string) {
-  fireEvent.change(screen.getByTestId("adjustments-bulk-reason"), {
-    target: { value },
+async function pickReason(label: string) {
+  await waitFor(() => {
+    const el = screen.getByTestId("adjustments-bulk-reason") as HTMLInputElement;
+    expect(el.disabled).toBe(false);
   });
+  fireEvent.click(screen.getByTestId("adjustments-bulk-reason"));
+  const opt = await screen.findByText(label);
+  fireEvent.click(opt);
 }
 
 afterEach(() => {
@@ -83,7 +87,13 @@ describe("AdjustmentsPage (bulk)", () => {
   beforeEach(() => {
     global.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url.includes("/api/v1/employees")) {
+      if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -135,7 +145,13 @@ describe("AdjustmentsPage (bulk)", () => {
           token: "T1",
         });
       }
-      if (url.includes("/api/v1/employees")) {
+      if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -143,7 +159,7 @@ describe("AdjustmentsPage (bulk)", () => {
 
     renderPage();
     await pickEmployee();
-    setReason("system_correction");
+    await pickReason("System correction");
 
     await waitFor(() => {
       expect(
@@ -211,7 +227,13 @@ describe("AdjustmentsPage (bulk)", () => {
           token: "T1",
         });
       }
-      if (url.includes("/api/v1/employees")) {
+      if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -219,7 +241,7 @@ describe("AdjustmentsPage (bulk)", () => {
 
     renderPage();
     await pickEmployee();
-    setReason("system_correction");
+    await pickReason("System correction");
 
     // Switch outcome to revert
     fireEvent.click(screen.getByTestId("adjustments-bulk-outcome"));
@@ -275,7 +297,13 @@ describe("AdjustmentsPage (bulk)", () => {
           token: "T1",
         });
       }
-      if (url.includes("/api/v1/employees")) {
+      if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -283,7 +311,7 @@ describe("AdjustmentsPage (bulk)", () => {
 
     renderPage();
     await pickEmployee();
-    setReason("system_correction");
+    await pickReason("System correction");
 
     fireEvent.click(screen.getByTestId("adjustments-bulk-dry-run"));
     const row = await screen.findByTestId("adjustments-bulk-row-0");
@@ -326,7 +354,13 @@ describe("AdjustmentsPage (bulk)", () => {
           token: "T1",
         });
       }
-      if (url.includes("/api/v1/employees")) {
+      if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -334,7 +368,7 @@ describe("AdjustmentsPage (bulk)", () => {
 
     renderPage();
     await pickEmployee();
-    setReason("system_correction");
+    await pickReason("System correction");
 
     fireEvent.click(screen.getByTestId("adjustments-bulk-dry-run"));
     const row = await screen.findByTestId("adjustments-bulk-row-0");
@@ -374,7 +408,13 @@ describe("AdjustmentsPage (bulk)", () => {
           token: "T1",
         });
       }
-      if (url.includes("/api/v1/employees")) {
+      if (url.includes("/attendance/reason-codes")) {
+      return jr({ items: [
+        { code: "system_correction", label: "System correction", requires_note: false },
+        { code: "other", label: "Other", requires_note: true },
+      ] });
+    }
+    if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -382,7 +422,7 @@ describe("AdjustmentsPage (bulk)", () => {
 
     renderPage();
     await pickEmployee();
-    setReason("system_correction");
+    await pickReason("System correction");
     fireEvent.click(screen.getByTestId("adjustments-bulk-dry-run"));
     await screen.findByTestId("adjustments-bulk-results");
 
@@ -402,7 +442,7 @@ describe("AdjustmentsPage (bulk)", () => {
   it("over-cap shows warning and disables dry run", async () => {
     renderPage();
     await pickEmployee();
-    setReason("system_correction");
+    await pickReason("System correction");
 
     fireEvent.change(screen.getByTestId("adjustments-bulk-from"), {
       target: { value: "2026-10-01" },

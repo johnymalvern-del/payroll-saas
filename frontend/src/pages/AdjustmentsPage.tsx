@@ -28,6 +28,7 @@ import {
   type BulkAdjustItemIn,
   type BulkAdjustOut,
 } from "../api/adjustments";
+import { fetchReasonCodes } from "../api/reasonCodes";
 import { mapErrorCode } from "../api/errors";
 import { DEFAULT_SITE_TZ } from "../lib/config";
 import { strings } from "../lib/strings";
@@ -122,6 +123,16 @@ export function AdjustmentsPage() {
     staleTime: 5 * 60 * 1000,
   });
 
+  const codesQuery = useQuery({
+    queryKey: ["refs", "reason_codes"],
+    queryFn: fetchReasonCodes,
+    staleTime: 5 * 60 * 1000,
+  });
+  const codes = codesQuery.data ?? [];
+  const selected = codes.find((c) => c.code === reasonCode) ?? null;
+  const requiresNote =
+    selected?.requires_note ?? (reasonCode === "other");
+
   const empOptions = useMemo(
     () =>
       (employees.data ?? []).map((e) => ({
@@ -140,8 +151,9 @@ export function AdjustmentsPage() {
   );
   const totalRows = employeeIds.length * dates.length;
   const overCap = totalRows > BULK_CAP;
-  const reasonCodeTooLong = reasonCode.length > 40;
   const reasonCodeMissing = reasonCode.trim().length === 0;
+  const noteOkForOther =
+    !requiresNote || note.trim().length >= 10;
 
   const items: BulkAdjustItemIn[] = useMemo(() => {
     if (
@@ -149,7 +161,6 @@ export function AdjustmentsPage() {
       employeeIds.length === 0 ||
       dates.length === 0 ||
       reasonCodeMissing ||
-      reasonCodeTooLong ||
       overCap
     ) {
       return [];
@@ -169,16 +180,20 @@ export function AdjustmentsPage() {
     employeeIds,
     dates,
     reasonCodeMissing,
-    reasonCodeTooLong,
     overCap,
     requiresTimes,
     timeIn,
     timeOut,
     outcome,
+    reasonCode,
     note,
   ]);
 
-  const canDryRun = !busy && items.length > 0 && items.length <= BULK_CAP;
+  const canDryRun =
+    !busy &&
+    items.length > 0 &&
+    items.length <= BULK_CAP &&
+    noteOkForOther;
 
   const allOk =
     dryRun !== null &&
@@ -250,6 +265,11 @@ export function AdjustmentsPage() {
           {error}
         </Alert>
       ) : null}
+      {codesQuery.isError ? (
+        <Alert color="red" data-testid="adjustments-reason-error">
+          {strings.adjustments.reasonCodeError}
+        </Alert>
+      ) : null}
       <Paper withBorder p="md">
         <Stack gap="sm">
           <Select
@@ -311,24 +331,29 @@ export function AdjustmentsPage() {
             clearable
             data-testid="adjustments-bulk-employees"
           />
-          <TextInput
+          <Select
             label={strings.adjustments.reasonCode}
-            value={reasonCode}
-            onChange={(e) => setReasonCode(e.currentTarget.value)}
+            placeholder={strings.adjustments.selectReasonCode}
+            data={codes.map((c) => ({ value: c.code, label: c.label }))}
+            value={reasonCode || null}
+            onChange={(v) => setReasonCode(v ?? "")}
             description={strings.adjustments.reasonCodeHint}
-            error={
-              reasonCodeTooLong
-                ? strings.adjustments.reasonCodeTooLong
-                : undefined
-            }
             required
+            disabled={codesQuery.isLoading || codesQuery.isError}
             data-testid="adjustments-bulk-reason"
           />
           <Textarea
             label={strings.adjustments.note}
             value={note}
             onChange={(e) => setNote(e.currentTarget.value)}
-            description={strings.adjustments.noteOtherHint}
+            description={
+              requiresNote ? strings.adjustments.noteOtherHint : undefined
+            }
+            error={
+              requiresNote && note.trim().length > 0 && note.trim().length < 10
+                ? strings.adjustments.noteRequiredForOther
+                : undefined
+            }
             minRows={2}
             data-testid="adjustments-bulk-note"
           />
