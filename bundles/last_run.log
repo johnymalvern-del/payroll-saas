@@ -1,61 +1,121 @@
 
  RUN  v2.1.9 C:/xampp/htdocs/Payroll/frontend
 
- âœ“ src/pages/AdjustmentsPage.test.tsx (7 tests) 7568ms
-   âœ“ AdjustmentsPage (bulk) > renders with 0 rows and dry-run disabled until inputs are complete 949ms
-   âœ“ AdjustmentsPage (bulk) > dry run shows per-row results and enables confirm; confirm sends token 1944ms
-   âœ“ AdjustmentsPage (bulk) > revert outcome produces items with outcome=revert and no times 1284ms
-   âœ“ AdjustmentsPage (bulk) > dry run surfaces per-row cannot_adjust_own without enabling confirm 916ms
-   âœ“ AdjustmentsPage (bulk) > dry run surfaces per-row day_locked 676ms
-   âœ“ AdjustmentsPage (bulk) > token_mismatch on confirm shows mapped error 1078ms
-   âœ“ AdjustmentsPage (bulk) > over-cap shows warning and disables dry run 716ms
- âœ“ src/pages/ExceptionsPage.test.tsx (17 tests) 10434ms
-   âœ“ ExceptionsPage > renders the title, exception row, and employee name 1048ms
-   âœ“ ExceptionsPage > shows empty text when no exceptions 418ms
-   âœ“ ExceptionsPage > shows error state when fetch fails 393ms
-   âœ“ ExceptionsPage > never sends type= on the exceptions request (client-side filter) 481ms
-   âœ“ ExceptionsPage > apply suggestion asks for confirmation and does not POST when cancelled 493ms
-   âœ“ ExceptionsPage > apply suggestion POSTs resolve with action=apply_suggestion on confirm 632ms
-   âœ“ ExceptionsPage > direct apply surfaces day_locked at page level 493ms
-   âœ“ ExceptionsPage > direct apply surfaces cannot_adjust_own at page level 487ms
-   âœ“ ExceptionsPage > employees failure shows an error with a working retry 449ms
-   âœ“ ExceptionsPage > custom button opens modal with adjustment form 616ms
-   âœ“ ExceptionsPage > dismiss requires a note of at least 3 characters 761ms
-   âœ“ ExceptionsPage > adjustment form rejects 'other' reason with a short note 711ms
-   âœ“ ExceptionsPage > Load more follows next_cursor and appends items 416ms
-   âœ“ ExceptionsPage > bulk dry run renders per-row results and enables confirm 674ms
-   âœ“ ExceptionsPage > bulk confirm sends dry-run token and shows applied count 866ms
-   âœ“ ExceptionsPage > bulk confirm surfaces token_mismatch as mapped error 846ms
-   âœ“ ExceptionsPage > bulk dry run surfaces per-row cannot_adjust_own without enabling confirm 646ms
- âœ“ src/pages/EmployeesPage.test.tsx (10 tests) 14047ms
-   âœ“ EmployeesPage > renders the list with both employees 952ms
-   âœ“ EmployeesPage > shows empty text when no employees 431ms
-   âœ“ EmployeesPage > shows error state with retry 421ms
-   âœ“ EmployeesPage > Load more follows next_cursor and appends 570ms
-   âœ“ EmployeesPage > New button opens form; submit POSTs to /employees 3671ms
-   âœ“ EmployeesPage > Edit opens form with row data prefilled 1592ms
-   âœ“ EmployeesPage > Edit PATCHes with row_version 2019ms
-   âœ“ EmployeesPage > Validation: empty first name blocks submit 1694ms
-   âœ“ EmployeesPage > duplicate_code error is mapped on create 2421ms
- âœ“ src/auth/auth.test.tsx (5 tests) 317ms
- âœ“ src/components/Adjustments/AdjustmentForm.test.tsx (3 tests) 1717ms
-   âœ“ AdjustmentForm > night shift: time-out earlier than time-in means next calendar day 945ms
-   âœ“ AdjustmentForm > rejects reason_code longer than 40 chars 455ms
- âœ“ src/shell/nav.test.ts (5 tests) 20ms
- âœ“ src/pages/AttendanceSheetPage.test.tsx (8 tests) 8605ms
-   âœ“ AttendanceSheetPage monthly view > renders title and employee row 1721ms
-   âœ“ AttendanceSheetPage monthly view > shows empty text when sheet returns no employees 1022ms
-   âœ“ AttendanceSheetPage monthly view > renders a status badge for a worked cell 1021ms
-   âœ“ AttendanceSheetPage monthly view > shows an error message when sheet fetch fails 742ms
-   âœ“ AttendanceSheetPage monthly view > opens the day panel on cell click and shows the day summary 1188ms
-   âœ“ AttendanceSheetPage monthly view > day panel never shows an adjustment marker (C2) 1208ms
-   âœ“ AttendanceSheetPage daily view > switches to daily view and renders one row per employee 516ms
-   âœ“ AttendanceSheetPage mark reviewed > shows refused days table when some days are refused 1181ms
- âœ“ src/api/errors.test.ts (4 tests) 7ms
+ ✓ src/pages/AdjustmentsPage.test.tsx (7 tests) 7623ms
+   ✓ AdjustmentsPage (bulk) > renders with 0 rows and dry-run disabled until inputs are complete 862ms
+   ✓ AdjustmentsPage (bulk) > dry run shows per-row results and enables confirm; confirm sends token 1838ms
+   ✓ AdjustmentsPage (bulk) > revert outcome produces items with outcome=revert and no times 1328ms
+   ✓ AdjustmentsPage (bulk) > dry run surfaces per-row cannot_adjust_own without enabling confirm 903ms
+   ✓ AdjustmentsPage (bulk) > dry run surfaces per-row day_locked 789ms
+   ✓ AdjustmentsPage (bulk) > token_mismatch on confirm shows mapped error 1092ms
+   ✓ AdjustmentsPage (bulk) > over-cap shows warning and disables dry run 806ms
+ ✓ src/pages/ExceptionsPage.test.tsx (17 tests) 11376ms
+   ✓ ExceptionsPage > renders the title, exception row, and employee name 1119ms
+   ✓ ExceptionsPage > shows empty text when no exceptions 423ms
+   ✓ ExceptionsPage > shows error state when fetch fails 429ms
+   ✓ ExceptionsPage > never sends type= on the exceptions request (client-side filter) 562ms
+   ✓ ExceptionsPage > apply suggestion asks for confirmation and does not POST when cancelled 543ms
+   ✓ ExceptionsPage > apply suggestion POSTs resolve with action=apply_suggestion on confirm 563ms
+   ✓ ExceptionsPage > direct apply surfaces day_locked at page level 609ms
+   ✓ ExceptionsPage > direct apply surfaces cannot_adjust_own at page level 563ms
+   ✓ ExceptionsPage > employees failure shows an error with a working retry 443ms
+   ✓ ExceptionsPage > custom button opens modal with adjustment form 590ms
+   ✓ ExceptionsPage > dismiss requires a note of at least 3 characters 729ms
+   ✓ ExceptionsPage > adjustment form rejects 'other' reason with a short note 755ms
+   ✓ ExceptionsPage > Load more follows next_cursor and appends items 456ms
+   ✓ ExceptionsPage > bulk dry run renders per-row results and enables confirm 692ms
+   ✓ ExceptionsPage > bulk confirm sends dry-run token and shows applied count 1038ms
+   ✓ ExceptionsPage > bulk confirm surfaces token_mismatch as mapped error 1064ms
+   ✓ ExceptionsPage > bulk dry run surfaces per-row cannot_adjust_own without enabling confirm 790ms
+ ✓ src/pages/EmployeesPage.test.tsx (10 tests) 17689ms
+   ✓ EmployeesPage > renders the list with both employees 982ms
+   ✓ EmployeesPage > shows empty text when no employees 413ms
+   ✓ EmployeesPage > shows error state with retry 455ms
+   ✓ EmployeesPage > Load more follows next_cursor and appends 594ms
+   ✓ EmployeesPage > New button opens form; submit POSTs to /employees 3670ms
+   ✓ EmployeesPage > Edit opens form with row data prefilled 1534ms
+   ✓ EmployeesPage > Edit PATCHes with row_version 2111ms
+   ✓ EmployeesPage > Terminate confirms and PATCHes status=terminated 302ms
+   ✓ EmployeesPage > Validation: empty first name blocks submit 1912ms
+   ✓ EmployeesPage > duplicate_code error is mapped on create 5709ms
+ ❯ src/pages/ChangeRequestsPage.test.tsx (9 tests | 2 failed) 3291ms
+   ✓ ChangeRequestsPage > renders pending request with employee name and action buttons 969ms
+   ✓ ChangeRequestsPage > shows load error with retry 305ms
+   ✓ ChangeRequestsPage > approve modal posts to approve endpoint 421ms
+   ✓ ChangeRequestsPage > reject modal requires note before confirming 408ms
+   × ChangeRequestsPage > reject modal posts with note 287ms
+     → Unable to find an element by: [data-testid="change-requests-reject-note"]
 
- Test Files  8 passed (8)
-      Tests  59 passed (59)
-   Start at  15:39:13
-   Duration  52.84s (transform 1.84s, setup 4.51s, collect 45.17s, tests 42.72s, environment 21.06s, prepare 4.72s)
+Ignored nodes: comments, script, style
+...
+   × ChangeRequestsPage > cancel modal posts to cancel endpoint 259ms
+     → Unable to find an element by: [data-testid="change-requests-modal-apply"]
 
+Ignored nodes: comments, script, style
+...
+ ✓ src/auth/auth.test.tsx (5 tests) 319ms
+ ✓ src/pages/AttendanceSheetPage.test.tsx (8 tests) 8886ms
+   ✓ AttendanceSheetPage monthly view > renders title and employee row 1952ms
+   ✓ AttendanceSheetPage monthly view > shows empty text when sheet returns no employees 1005ms
+   ✓ AttendanceSheetPage monthly view > renders a status badge for a worked cell 789ms
+   ✓ AttendanceSheetPage monthly view > shows an error message when sheet fetch fails 528ms
+   ✓ AttendanceSheetPage monthly view > opens the day panel on cell click and shows the day summary 1010ms
+   ✓ AttendanceSheetPage monthly view > day panel never shows an adjustment marker (C2) 1203ms
+   ✓ AttendanceSheetPage daily view > switches to daily view and renders one row per employee 771ms
+   ✓ AttendanceSheetPage mark reviewed > shows refused days table when some days are refused 1622ms
+ ✓ src/shell/nav.test.ts (5 tests) 19ms
+ ✓ src/components/Adjustments/AdjustmentForm.test.tsx (3 tests) 1297ms
+   ✓ AdjustmentForm > night shift: time-out earlier than time-in means next calendar day 721ms
+   ✓ AdjustmentForm > rejects reason_code longer than 40 chars 301ms
+ ✓ src/api/errors.test.ts (4 tests) 18ms
+
+ Test Files  1 failed | 8 passed (9)
+      Tests  2 failed | 66 passed (68)
+   Start at  15:49:34
+   Duration  63.10s (transform 2.34s, setup 7.74s, collect 54.32s, tests 50.52s, environment 28.91s, prepare 4.41s)
+
+
+stderr | src/auth/auth.test.tsx > ProtectedRoute > redirects unauthenticated users to /login
+⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.
+⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/pages/ChangeRequestsPage.test.tsx > ChangeRequestsPage > reject modal posts with note
+TestingLibraryElementError: Unable to find an element by: [data-testid="change-requests-reject-note"]
+
+Ignored nodes: comments, script, style
+...
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/pages/ChangeRequestsPage.test.tsx:281:31
+    279|       fireEvent.click(screen.getByTestId("change-request-reject-cr1"));
+    280|       await screen.findByTestId("change-requests-modal");
+    281|       fireEvent.change(screen.getByTestId("change-requests-reject-note…
+       |                               ^
+    282|         target: { value: "not needed" },
+    283|       });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/pages/ChangeRequestsPage.test.tsx > ChangeRequestsPage > cancel modal posts to cancel endpoint
+TestingLibraryElementError: Unable to find an element by: [data-testid="change-requests-modal-apply"]
+
+Ignored nodes: comments, script, style
+...
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/pages/ChangeRequestsPage.test.tsx:322:30
+    320|       fireEvent.click(screen.getByTestId("change-request-cancel-cr1"));
+    321|       await screen.findByTestId("change-requests-modal");
+    322|       fireEvent.click(screen.getByTestId("change-requests-modal-apply"…
+       |                              ^
+    323| 
+    324|       await waitFor(() => {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
 

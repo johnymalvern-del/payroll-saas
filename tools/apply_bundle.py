@@ -161,7 +161,7 @@ def make_env():
 def run(cmd, env=None, cwd=None):
     e = env or make_env()
     return subprocess.run(
-        cmd, shell=True, capture_output=True, text=True, env=e, cwd=cwd
+        cmd, shell=True, capture_output=True, text=True, encoding='utf-8', errors='replace', env=e, cwd=cwd
     )
 
 
