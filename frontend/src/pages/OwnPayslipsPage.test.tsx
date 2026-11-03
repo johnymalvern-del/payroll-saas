@@ -1,0 +1,229 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MantineProvider } from "@mantine/core";
+
+const ctx = vi.hoisted(() => ({ role: "employee" as string }));
+
+vi.mock("../auth/useMe", () => ({
+  useMe: () => ({
+    data: {
+      id: "u1",
+      username: "u",
+      role: ctx.role,
+      employee_id: "e1",
+      permissions: [],
+      must_change_password: false,
+      default_timezone: null,
+    },
+    isLoading: false,
+    isSuccess: true,
+    isError: false,
+    error: null,
+  }),
+}));
+
+import { OwnPayslipsPage } from "./OwnPayslipsPage";
+
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function () {};
+}
+
+function jr(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    return input.url;
+  }
+  return String(input);
+}
+
+const ROW = {
+  id: "ps1",
+  pay_period_id: "pp1",
+  period_key: "2026-01",
+  pay_date: "2026-02-05",
+  status: "current",
+  gross: "1000.00",
+  net: "890.00",
+  computed_at: "2026-02-01T10:00:00Z",
+};
+
+const DETAIL = {
+  id: "ps1",
+  payroll_run_id: "r1",
+  pay_period_id: "pp1",
+  employee_id: "e1",
+  revision: 1,
+  status: "current",
+  gross: "1000.00",
+  pre_tax_deductions: "0.00",
+  taxable_income: "1000.00",
+  paye: "100.00",
+  uif_employee: "10.00",
+  uif_employer: "10.00",
+  sdl: "10.00",
+  other_deductions: "0.00",
+  reimbursements: "0.00",
+  net: "890.00",
+  pdf_object_key: null,
+  predecessor_payslip_id: null,
+  computed_at: "2026-02-01T10:00:00Z",
+};
+
+function isList(url: string): boolean {
+  return /\/payroll\/payslips\/me(\?|$)/.test(url);
+}
+function isDetail(url: string): boolean {
+  return /\/payroll\/payslips\/me\/[^/]+$/.test(url);
+}
+function isPdf(url: string): boolean {
+  return /\/payroll\/payslips\/me\/[^/]+\/pdf$/.test(url);
+}
+
+function renderPage() {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <MantineProvider>
+      <QueryClientProvider client={qc}>
+        <OwnPayslipsPage />
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+}
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  ctx.role = "employee";
+});
+
+describe("OwnPayslipsPage", () => {
+  it("renders rows from the /me list", async () => {
+    global.fetch = vi.fn(async () =>
+      jr({ items: [ROW], next_cursor: null }),
+    ) as unknown as typeof fetch;
+    renderPage();
+    const row = await screen.findByTestId("payslip-row-ps1");
+    expect(row.textContent ?? "").toMatch(/2026-01/);
+    expect(row.textContent ?? "").toMatch(/1000\.00/);
+  });
+
+  it("empty state", async () => {
+    global.fetch = vi.fn(async () =>
+      jr({ items: [], next_cursor: null }),
+    ) as unknown as typeof fetch;
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/no payslips yet/i)).toBeInTheDocument();
+    });
+  });
+
+  it("load error with retry", async () => {
+    let calls = 0;
+    global.fetch = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return jr({ error: { code: "boom" } }, 500);
+      return jr({ items: [ROW], next_cursor: null });
+    }) as unknown as typeof fetch;
+    renderPage();
+    await screen.findByTestId("payslips-error");
+    fireEvent.click(screen.getByTestId("payslips-retry"));
+    await screen.findByTestId("payslip-row-ps1");
+  });
+
+  it("auditor sees notice and never fetches the list", async () => {
+    ctx.role = "auditor";
+    const fetchMock = vi.fn(async () => jr({ items: [], next_cursor: null }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    renderPage();
+    await screen.findByTestId("payslips-auditor-notice");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("view detail opens drawer with fields", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (isDetail(url)) return jr(DETAIL);
+      if (isList(url)) return jr({ items: [ROW], next_cursor: null });
+      return jr({});
+    }) as unknown as typeof fetch;
+    renderPage();
+    await screen.findByTestId("payslip-row-ps1");
+    fireEvent.click(screen.getByTestId("payslip-view-ps1"));
+    const drawer = await screen.findByTestId("payslip-detail", undefined, {
+      timeout: 5000,
+    });
+    await waitFor(() => {
+      expect(drawer.textContent ?? "").toMatch(/100\.00/);
+      expect(drawer.textContent ?? "").toMatch(/890\.00/);
+    });
+  });
+
+  it("download triggers blob URL and anchor click", async () => {
+    const createUrl = vi.fn(() => "blob:test");
+    const revokeUrl = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", { value: createUrl, configurable: true });
+    Object.defineProperty(URL, "revokeObjectURL", { value: revokeUrl, configurable: true });
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(function () {
+        /* no-op */
+      });
+
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (isPdf(url)) {
+        return new Response(new Blob([new Uint8Array([37, 80, 68, 70])]), {
+          status: 200,
+          headers: { "Content-Type": "application/pdf" },
+        });
+      }
+      if (isList(url)) return jr({ items: [ROW], next_cursor: null });
+      return jr({});
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    await screen.findByTestId("payslip-row-ps1");
+    fireEvent.click(screen.getByTestId("payslip-download-ps1"));
+
+    await waitFor(() => {
+      expect(createUrl).toHaveBeenCalledTimes(1);
+      expect(clickSpy).toHaveBeenCalledTimes(1);
+      expect(revokeUrl).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("load more follows cursor", async () => {
+    const urls: string[] = [];
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      urls.push(url);
+      if (url.includes("cursor=abc")) {
+        return jr({ items: [], next_cursor: null });
+      }
+      return jr({ items: [ROW], next_cursor: "abc" });
+    }) as unknown as typeof fetch;
+    renderPage();
+    await screen.findByTestId("payslip-row-ps1");
+    fireEvent.click(screen.getByTestId("payslips-load-more"));
+    await waitFor(() => {
+      expect(urls.some((u) => u.includes("cursor=abc"))).toBe(true);
+    });
+  });
+});

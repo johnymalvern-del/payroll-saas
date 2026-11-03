@@ -173,3 +173,23 @@ otherwise delegates to `mapErrorCode` (so `day_locked`,
 - No action-level drill-down shortcuts (e.g. click `request_id` to filter by
   it) — one click on View opens the drawer with the full value visible.
 - No export / CSV.
+
+## Own payslips (committed)
+
+- `/payslips` renders `frontend/src/pages/OwnPayslipsPage.tsx` (was PlaceholderPage).
+- API module: `frontend/src/api/ownPayslips.ts`.
+- Strings: `strings.payslips`.
+
+### Page
+- Auditor role: shows a notice (`payslips-auditor-notice`) and never fetches — matches master brief §6.
+- List: `useInfiniteQuery(["my_payslips"])` → `GET /payroll/payslips/me`. Columns: period, pay date, status, gross, net, actions.
+- Load more via `next_cursor`.
+- Detail: `Drawer` (right, lg) driven by `GET /payroll/payslips/me/{id}`; shows gross → net breakdown + revision + computed_at. Uses the row's `period_key` for the title (the payslip payload has only `pay_period_id`).
+- PDF: `GET /payroll/payslips/me/{id}/pdf` → blob URL + anchor click; filename "payslip.pdf". Errors surface in a page-level dismissible Alert (`payslips-pdf-error`). Audited backend-side (`payslip.pdf_download_by_other` when non-owner; owner download is silent).
+- Errors mapped via `mapErrorCode`; `forbidden` → auditor notice text; `no_employee_record` → list error text.
+
+### Known limitations
+- Drawer title uses the row's `period_key` (passed via state) — a hard reload of a deep link to a payslip (no such route today) would need a `fetchPayPeriod` call.
+- Times shown with `dayjs(...).format(...)` (browser tz); follow-up to route through `getSiteTz()` as part of a global display pass.
+- No bulk PDF download; per-row only.
+- Employee-facing screen shows `status` (`current` | `superseded`) verbatim, uncoloured; no status-specific messaging for `superseded` beyond the raw value.
