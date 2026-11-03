@@ -454,3 +454,26 @@ describe("EmployeesPage", () => {
     MODAL_TEST_TIMEOUT_MS,
   );
 });
+describe("EmployeesPage site timezone display", () => {
+  it("shows the site timezone on the edit form", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      const refs = refsHandlers(url);
+      if (refs) return refs;
+      if (url.match(/\/api\/v1\/employees(\?|$)/)) {
+        return jr({ items: [EMP1], next_cursor: null });
+      }
+      return jr({}, 200);
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    await screen.findByTestId("employee-e1");
+    fireEvent.click(screen.getByTestId("employee-edit-e1"));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => {
+      expect(
+        within(dialog).getByText(/Site timezone: Africa\/Johannesburg/),
+      ).toBeInTheDocument();
+    });
+  });
+});

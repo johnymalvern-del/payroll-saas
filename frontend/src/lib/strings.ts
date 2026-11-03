@@ -312,6 +312,7 @@ export const strings = {
     fJobTitle: "Job title",
     fBranch: "Branch",
     fSite: "Site",
+    fSiteTimezone: "Site timezone",
     fDepartment: "Department",
     fManager: "Manager",
     fEmployeeType: "Employee type",

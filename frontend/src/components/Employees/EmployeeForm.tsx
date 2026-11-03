@@ -562,6 +562,11 @@ export function EmployeeForm({
               onChange={(v) => set("site_id", v ?? "")}
               clearable
               searchable
+              description={
+                isEdit && initial?.site_timezone
+                  ? `${strings.employees.fSiteTimezone}: ${initial.site_timezone}`
+                  : undefined
+              }
               data-testid="emp-site"
             />
             <Select
