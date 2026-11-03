@@ -1,5 +1,13 @@
 # Frontend state
 
+## F-3a closure (2026-11-03)
+
+- `frontend/src/pages/ExceptionsPage.test.tsx`: 17/17 passing
+  (`npx vitest run src/pages/ExceptionsPage.test.tsx --reporter=dot`).
+- Both ambiguous `getByText` calls noted in the handoff were already
+  scoped with `within(...)` on disk; verified green. No source change
+  was needed for F-3a.
+
 ## Exceptions queue (F-3a)
 
 ### Type filter
