@@ -343,7 +343,6 @@ export const strings = {
     errRecordChanged:
       "This employee changed since you loaded it. Reload and try again.",
   },
-
   payPeriods: {
     title: "Pay periods",
     newButton: "New pay period",
@@ -407,6 +406,7 @@ export const strings = {
     errInvalidRange: "Invalid date range.",
     errInvalidPayDate: "Pay date must be on or after end date.",
     errNotFound: "Pay period not found.",
+  },
   auditLog: {
     title: "Audit log",
     empty: "No audit entries match the current filters.",
@@ -442,4 +442,5 @@ export const strings = {
     fieldEmpty: "—",
     errInvalidRange: "From date must not be after To date.",
     errNotFound: "Audit entry not found.",
-  },  },} as const;
+  },
+} as const;

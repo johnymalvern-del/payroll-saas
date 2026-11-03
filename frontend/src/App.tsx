@@ -4,6 +4,7 @@ import { ProtectedRoute } from "./auth/ProtectedRoute";
 import { AppShell } from "./shell/AppShell";
 import { AdjustmentsPage } from "./pages/AdjustmentsPage";
 import { AttendanceSheetPage } from "./pages/AttendanceSheetPage";
+import { AuditLogPage } from "./pages/AuditLogPage";
 import { ChangeRequestsPage } from "./pages/ChangeRequestsPage";
 import { EmployeesPage } from "./pages/EmployeesPage";
 import { ExceptionsPage } from "./pages/ExceptionsPage";
@@ -43,7 +44,7 @@ export default function App() {
           <Route path="payroll/pay-periods" element={<PayPeriodsPage />} />
           <Route path="payroll/pay-periods/:id" element={<PayPeriodDetailPage />} />
           <Route path="payroll/change-requests" element={<ChangeRequestsPage />} />
-          <Route path="audit-log" element={<PlaceholderPage title="Audit log" phase="F-8" />} />
+          <Route path="audit-log" element={<AuditLogPage />} />
           <Route path="setup" element={<PlaceholderPage title="Setup" phase="F-5" />} />
           <Route path="payslips" element={<PlaceholderPage title="My payslips" phase="F-7" />} />
         </Route>
