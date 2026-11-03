@@ -1,0 +1,202 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MantineProvider } from "@mantine/core";
+import { AuditLogPage } from "./AuditLogPage";
+
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function () {};
+}
+
+const DRAWER_TEST_TIMEOUT_MS = 20000;
+
+function jr(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    return input.url;
+  }
+  return String(input);
+}
+
+const ENTRY = {
+  id: "ae1",
+  occurred_at: "2026-01-15T10:00:00Z",
+  actor_user_id: "u1",
+  actor_role: "payroll_admin",
+  entity_type: "employee",
+  entity_id: "e1",
+  action: "employee.update",
+  old_value: { status: "active" },
+  new_value: { status: "on_leave" },
+  reason: null,
+  ip_address: "127.0.0.1",
+  request_id: "req-1",
+};
+
+const LIST = {
+  items: [ENTRY],
+  next_cursor: null,
+  total: null,
+  occurred_from_applied: "2025-12-16T10:00:00Z",
+  occurred_to_applied: "2026-01-15T10:00:00Z",
+};
+
+function renderPage() {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <MantineProvider>
+      <QueryClientProvider client={qc}>
+        <AuditLogPage />
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+}
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+describe("AuditLogPage", () => {
+  it("renders rows with actor_role, action, entity type", async () => {
+    global.fetch = vi.fn(async () => jr(LIST)) as unknown as typeof fetch;
+    renderPage();
+    const row = await screen.findByTestId("audit-log-row-ae1");
+    expect(within(row).getByText("payroll_admin")).toBeInTheDocument();
+    expect(within(row).getByText("employee.update")).toBeInTheDocument();
+    expect(within(row).getByText("employee")).toBeInTheDocument();
+  });
+
+  it("shows range notice from backend applied values", async () => {
+    global.fetch = vi.fn(async () => jr(LIST)) as unknown as typeof fetch;
+    renderPage();
+    const range = await screen.findByTestId("audit-log-range");
+    expect(range.textContent ?? "").toMatch(/Range applied/i);
+  });
+
+  it("empty state", async () => {
+    global.fetch = vi.fn(async () =>
+      jr({ ...LIST, items: [] }),
+    ) as unknown as typeof fetch;
+    renderPage();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/no audit entries match/i),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("load error with retry", async () => {
+    let calls = 0;
+    global.fetch = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return jr({ error: { code: "boom" } }, 500);
+      return jr(LIST);
+    }) as unknown as typeof fetch;
+    renderPage();
+    await screen.findByTestId("audit-log-load-error");
+    fireEvent.click(screen.getByTestId("audit-log-retry"));
+    await screen.findByTestId("audit-log-row-ae1");
+  });
+
+  it("apply filters sends query params", async () => {
+    const calls: { url: string }[] = [];
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      calls.push({ url: requestUrl(input) });
+      return jr(LIST);
+    }) as unknown as typeof fetch;
+    renderPage();
+    await screen.findByTestId("audit-log-row-ae1");
+
+    fireEvent.change(screen.getByTestId("audit-log-entity-type"), {
+      target: { value: "employee" },
+    });
+    fireEvent.change(screen.getByTestId("audit-log-action"), {
+      target: { value: "employee.update" },
+    });
+    fireEvent.click(screen.getByTestId("audit-log-apply"));
+
+    await waitFor(() => {
+      const audit = calls.filter((c) => c.url.includes("/audit-log"));
+      const last = audit[audit.length - 1];
+      expect(last.url).toContain("entity_type=employee");
+      expect(last.url).toContain("action=employee.update");
+    });
+  });
+
+  it("invalid date range blocks apply", async () => {
+    global.fetch = vi.fn(async () => jr(LIST)) as unknown as typeof fetch;
+    renderPage();
+    await screen.findByTestId("audit-log-row-ae1");
+    fireEvent.change(screen.getByTestId("audit-log-from"), {
+      target: { value: "2026-02-01" },
+    });
+    fireEvent.change(screen.getByTestId("audit-log-to"), {
+      target: { value: "2026-01-01" },
+    });
+    fireEvent.click(screen.getByTestId("audit-log-apply"));
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("audit-log-filter-error").textContent ?? "",
+      ).toMatch(/from date/i);
+    });
+  });
+
+  it(
+    "view detail opens drawer with entry fields",
+    async () => {
+      global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/audit-log/ae1")) return jr(ENTRY);
+        return jr(LIST);
+      }) as unknown as typeof fetch;
+      renderPage();
+      await screen.findByTestId("audit-log-row-ae1");
+      fireEvent.click(screen.getByTestId("audit-log-view-ae1"));
+      const detail = await screen.findByTestId("audit-log-detail", undefined, {
+        timeout: 5000,
+      });
+      await waitFor(() => {
+        expect(detail.textContent ?? "").toMatch(/employee.update/);
+        expect(detail.textContent ?? "").toMatch(/active/);
+        expect(detail.textContent ?? "").toMatch(/on_leave/);
+      });
+    },
+    DRAWER_TEST_TIMEOUT_MS,
+  );
+
+  it("load more follows cursor", async () => {
+    const calls: { url: string }[] = [];
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      calls.push({ url });
+      if (url.includes("cursor=abc")) {
+        return jr({ ...LIST, items: [], next_cursor: null });
+      }
+      return jr({ ...LIST, next_cursor: "abc" });
+    }) as unknown as typeof fetch;
+    renderPage();
+    await screen.findByTestId("audit-log-row-ae1");
+    fireEvent.click(screen.getByTestId("audit-log-load-more"));
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.includes("cursor=abc"))).toBe(true);
+    });
+  });
+});

@@ -138,3 +138,38 @@ otherwise delegates to `mapErrorCode` (so `day_locked`,
 - **Per-employee preview drill-down** (`previewPayPeriodEmployee`) is wired in `payPeriods.ts` but not surfaced in `PayPeriodDetailPage`. Follow-up: row click opens a `PreviewEmployeeDetail` modal or route; test on arrival.
 - **No `pay_period` cache invalidation on finalise/reopen beyond `pay_periods` list + reopen log** — the current detail refetch comes from `["pay_period", id]` invalidation. If a payslip view exists later, it will need its own invalidation key.
 - **`unacknowledged_formulas` warning is informational only** — no "acknowledge" button; formula acknowledgement lives on the (future) payroll-formulas screen.
+
+## F-8 Audit log (committed)
+
+- `/audit-log` renders `frontend/src/pages/AuditLogPage.tsx` (was PlaceholderPage).
+- API module: `frontend/src/api/auditLog.ts`.
+- Strings: `strings.auditLog`.
+
+### Page
+- Filters (all optional, Apply button, Clear button):
+  `occurred_from`, `occurred_to` (date, day bounds), `entity_type`, `entity_id`,
+  `action`, `actor_role`, `actor_user_id`, `request_id`, `reason`.
+- `occurred_from`/`occurred_to` are converted to ISO with `startOf("day")`/
+  `endOf("day")` before send.
+- Range notice: reads `occurred_from_applied` / `occurred_to_applied` from the
+  first page's response — the backend may widen or clamp the requested range
+  (defaults to last 30 days when `occurred_from` is unset). Note is shown in a
+  small dim text under the filters.
+- List: `Table` with columns Occurred at / Actor role / Action / Entity type /
+  Entity id (short) / Request id (short) / View.
+- Load more via `useInfiniteQuery`.
+- Detail: `Drawer` (right, lg) with all fields, `old_value`/`new_value`
+  pretty-printed as JSON in monospace. Fetched lazily via
+  `["audit_entry", id]` on View click.
+- Filter errors: local `invalid_range` check (From > To) prevents the request;
+  server `invalid_range` and `audit_entry_not_found` mapped via
+  `mapErrorCode` / specific strings.
+
+### Known limitations
+- Times rendered with `dayjs(...).format(...)` — browser tz, not site tz.
+  Follow-up to route through `getSiteTz()` (same call as F-1c) once time-tz
+  display becomes a global concern.
+- Full ID shown only in the drawer; table truncates to 8 chars.
+- No action-level drill-down shortcuts (e.g. click `request_id` to filter by
+  it) — one click on View opens the drawer with the full value visible.
+- No export / CSV.
