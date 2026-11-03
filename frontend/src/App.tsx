@@ -12,6 +12,7 @@ import { ForcePasswordChangePage } from "./pages/ForcePasswordChangePage";
 import { HomePage } from "./pages/HomePage";
 import { LoginPage } from "./pages/LoginPage";
 import { PayPeriodsPage } from "./pages/PayPeriodsPage";
+import { OwnPayslipsPage } from "./pages/OwnPayslipsPage";
 import { PayPeriodDetailPage } from "./pages/PayPeriodDetailPage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 
@@ -46,7 +47,7 @@ export default function App() {
           <Route path="payroll/change-requests" element={<ChangeRequestsPage />} />
           <Route path="audit-log" element={<AuditLogPage />} />
           <Route path="setup" element={<PlaceholderPage title="Setup" phase="F-5" />} />
-          <Route path="payslips" element={<PlaceholderPage title="My payslips" phase="F-7" />} />
+          <Route path="payslips" element={<OwnPayslipsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

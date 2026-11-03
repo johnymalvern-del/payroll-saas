@@ -1,88 +1,85 @@
 
  RUN  v2.1.9 C:/xampp/htdocs/Payroll/frontend
 
- ✓ src/pages/AdjustmentsPage.test.tsx (7 tests) 10785ms
-   ✓ AdjustmentsPage (bulk) > renders with 0 rows and dry-run disabled until inputs are complete 1012ms
-   ✓ AdjustmentsPage (bulk) > dry run shows per-row results and enables confirm; confirm sends token 2724ms
-   ✓ AdjustmentsPage (bulk) > revert outcome produces items with outcome=revert and no times 1818ms
-   ✓ AdjustmentsPage (bulk) > dry run surfaces per-row cannot_adjust_own without enabling confirm 1366ms
-   ✓ AdjustmentsPage (bulk) > dry run surfaces per-row day_locked 1032ms
-   ✓ AdjustmentsPage (bulk) > token_mismatch on confirm shows mapped error 1627ms
-   ✓ AdjustmentsPage (bulk) > over-cap shows warning and disables dry run 1201ms
- ✓ src/pages/ExceptionsPage.test.tsx (17 tests) 13012ms
-   ✓ ExceptionsPage > renders the title, exception row, and employee name 1147ms
-   ✓ ExceptionsPage > shows empty text when no exceptions 478ms
-   ✓ ExceptionsPage > shows error state when fetch fails 413ms
-   ✓ ExceptionsPage > never sends type= on the exceptions request (client-side filter) 595ms
-   ✓ ExceptionsPage > apply suggestion asks for confirmation and does not POST when cancelled 525ms
-   ✓ ExceptionsPage > apply suggestion POSTs resolve with action=apply_suggestion on confirm 731ms
-   ✓ ExceptionsPage > direct apply surfaces day_locked at page level 573ms
-   ✓ ExceptionsPage > direct apply surfaces cannot_adjust_own at page level 616ms
-   ✓ ExceptionsPage > employees failure shows an error with a working retry 552ms
-   ✓ ExceptionsPage > custom button opens modal with adjustment form 1007ms
-   ✓ ExceptionsPage > dismiss requires a note of at least 3 characters 799ms
-   ✓ ExceptionsPage > adjustment form rejects 'other' reason with a short note 1364ms
-   ✓ ExceptionsPage > Load more follows next_cursor and appends items 452ms
-   ✓ ExceptionsPage > bulk dry run renders per-row results and enables confirm 903ms
-   ✓ ExceptionsPage > bulk confirm sends dry-run token and shows applied count 1161ms
-   ✓ ExceptionsPage > bulk confirm surfaces token_mismatch as mapped error 1008ms
-   ✓ ExceptionsPage > bulk dry run surfaces per-row cannot_adjust_own without enabling confirm 683ms
- ✓ src/pages/EmployeesPage.test.tsx (11 tests) 16789ms
-   ✓ EmployeesPage > renders the list with both employees 894ms
-   ✓ EmployeesPage > shows empty text when no employees 364ms
-   ✓ EmployeesPage > shows error state with retry 483ms
-   ✓ EmployeesPage > Load more follows next_cursor and appends 502ms
-   ✓ EmployeesPage > New button opens form; submit POSTs to /employees 4676ms
-   ✓ EmployeesPage > Edit opens form with row data prefilled 1885ms
-   ✓ EmployeesPage > Edit PATCHes with row_version 2689ms
-   ✓ EmployeesPage > Terminate confirms and PATCHes status=terminated 336ms
-   ✓ EmployeesPage > Validation: empty first name blocks submit 1646ms
-   ✓ EmployeesPage > duplicate_code error is mapped on create 1863ms
-   ✓ EmployeesPage site timezone display > shows the site timezone on the edit form 1445ms
- ✓ src/pages/ChangeRequestsPage.test.tsx (9 tests) 3622ms
-   ✓ ChangeRequestsPage > renders pending request with employee name and action buttons 768ms
-   ✓ ChangeRequestsPage > shows load error with retry 307ms
-   ✓ ChangeRequestsPage > approve modal posts to approve endpoint 511ms
-   ✓ ChangeRequestsPage > reject modal requires note before confirming 345ms
-   ✓ ChangeRequestsPage > reject modal posts with note 608ms
-   ✓ ChangeRequestsPage > cancel modal posts to cancel endpoint 384ms
- ✓ src/pages/AuditLogPage.test.tsx (8 tests) 3397ms
-   ✓ AuditLogPage > renders rows with actor_role, action, entity type 623ms
-   ✓ AuditLogPage > load error with retry 344ms
-   ✓ AuditLogPage > apply filters sends query params 464ms
-   ✓ AuditLogPage > invalid date range blocks apply 354ms
-   ✓ AuditLogPage > view detail opens drawer with entry fields 793ms
-   ✓ AuditLogPage > load more follows cursor 354ms
- ✓ src/pages/AttendanceSheetPage.test.tsx (8 tests) 9017ms
-   ✓ AttendanceSheetPage monthly view > renders title and employee row 1969ms
-   ✓ AttendanceSheetPage monthly view > shows empty text when sheet returns no employees 1023ms
-   ✓ AttendanceSheetPage monthly view > renders a status badge for a worked cell 989ms
-   ✓ AttendanceSheetPage monthly view > shows an error message when sheet fetch fails 502ms
-   ✓ AttendanceSheetPage monthly view > opens the day panel on cell click and shows the day summary 830ms
-   ✓ AttendanceSheetPage monthly view > day panel never shows an adjustment marker (C2) 1114ms
-   ✓ AttendanceSheetPage daily view > switches to daily view and renders one row per employee 984ms
-   ✓ AttendanceSheetPage mark reviewed > shows refused days table when some days are refused 1598ms
- ✓ src/pages/PayPeriodDetailPage.test.tsx (4 tests) 1471ms
-   ✓ PayPeriodDetailPage > renders period and preview button 415ms
-   ✓ PayPeriodDetailPage > preview button shows employee rows 304ms
-   ✓ PayPeriodDetailPage > finalise shows ack field after open_exceptions_in_period error 475ms
- ✓ src/auth/auth.test.tsx (5 tests) 392ms
- ✓ src/pages/PayPeriodsPage.test.tsx (4 tests) 1592ms
-   ✓ PayPeriodsPage > renders list with period key and status 503ms
-   ✓ PayPeriodsPage > create modal validates required fields then submits 792ms
- ✓ src/shell/nav.test.ts (5 tests) 17ms
- ✓ src/lib/__tests__/siteTz.test.ts (6 tests) 10ms
- ✓ src/api/errors.test.ts (4 tests) 12ms
- ✓ src/components/Adjustments/AdjustmentForm.test.tsx (5 tests) 2675ms
-   ✓ AdjustmentForm > night shift: time-out earlier than time-in means next calendar day 1072ms
-   ✓ AdjustmentForm > requires a reason code 356ms
-   ✓ AdjustmentForm > reason 'other' requires a note of at least 10 characters 565ms
-   ✓ AdjustmentForm > submits non-other reason without requiring a note 375ms
+ ✓ src/pages/AdjustmentsPage.test.tsx (7 tests) 9462ms
+   ✓ AdjustmentsPage (bulk) > renders with 0 rows and dry-run disabled until inputs are complete 1028ms
+   ✓ AdjustmentsPage (bulk) > dry run shows per-row results and enables confirm; confirm sends token 2660ms
+   ✓ AdjustmentsPage (bulk) > revert outcome produces items with outcome=revert and no times 1397ms
+   ✓ AdjustmentsPage (bulk) > dry run surfaces per-row cannot_adjust_own without enabling confirm 970ms
+   ✓ AdjustmentsPage (bulk) > dry run surfaces per-row day_locked 1057ms
+   ✓ AdjustmentsPage (bulk) > token_mismatch on confirm shows mapped error 1384ms
+   ✓ AdjustmentsPage (bulk) > over-cap shows warning and disables dry run 962ms
+ ✓ src/pages/ExceptionsPage.test.tsx (17 tests) 11668ms
+   ✓ ExceptionsPage > renders the title, exception row, and employee name 1106ms
+   ✓ ExceptionsPage > shows empty text when no exceptions 551ms
+   ✓ ExceptionsPage > shows error state when fetch fails 403ms
+   ✓ ExceptionsPage > never sends type= on the exceptions request (client-side filter) 492ms
+   ✓ ExceptionsPage > apply suggestion asks for confirmation and does not POST when cancelled 614ms
+   ✓ ExceptionsPage > apply suggestion POSTs resolve with action=apply_suggestion on confirm 533ms
+   ✓ ExceptionsPage > direct apply surfaces day_locked at page level 610ms
+   ✓ ExceptionsPage > direct apply surfaces cannot_adjust_own at page level 505ms
+   ✓ ExceptionsPage > employees failure shows an error with a working retry 475ms
+   ✓ ExceptionsPage > custom button opens modal with adjustment form 705ms
+   ✓ ExceptionsPage > dismiss requires a note of at least 3 characters 774ms
+   ✓ ExceptionsPage > adjustment form rejects 'other' reason with a short note 1061ms
+   ✓ ExceptionsPage > Load more follows next_cursor and appends items 408ms
+   ✓ ExceptionsPage > bulk dry run renders per-row results and enables confirm 780ms
+   ✓ ExceptionsPage > bulk confirm sends dry-run token and shows applied count 932ms
+   ✓ ExceptionsPage > bulk confirm surfaces token_mismatch as mapped error 981ms
+   ✓ ExceptionsPage > bulk dry run surfaces per-row cannot_adjust_own without enabling confirm 732ms
+ ✓ src/pages/EmployeesPage.test.tsx (11 tests) 15154ms
+   ✓ EmployeesPage > renders the list with both employees 967ms
+   ✓ EmployeesPage > shows empty text when no employees 484ms
+   ✓ EmployeesPage > shows error state with retry 493ms
+   ✓ EmployeesPage > Load more follows next_cursor and appends 449ms
+   ✓ EmployeesPage > New button opens form; submit POSTs to /employees 3866ms
+   ✓ EmployeesPage > Edit opens form with row data prefilled 1575ms
+   ✓ EmployeesPage > Edit PATCHes with row_version 2063ms
+   ✓ EmployeesPage > Validation: empty first name blocks submit 1722ms
+   ✓ EmployeesPage > duplicate_code error is mapped on create 1974ms
+   ✓ EmployeesPage site timezone display > shows the site timezone on the edit form 1270ms
+ ✓ src/pages/ChangeRequestsPage.test.tsx (9 tests) 3481ms
+   ✓ ChangeRequestsPage > renders pending request with employee name and action buttons 689ms
+   ✓ ChangeRequestsPage > approve modal posts to approve endpoint 463ms
+   ✓ ChangeRequestsPage > reject modal requires note before confirming 367ms
+   ✓ ChangeRequestsPage > reject modal posts with note 563ms
+   ✓ ChangeRequestsPage > cancel modal posts to cancel endpoint 381ms
+ ✓ src/pages/AuditLogPage.test.tsx (8 tests) 3251ms
+   ✓ AuditLogPage > renders rows with actor_role, action, entity type 756ms
+   ✓ AuditLogPage > load error with retry 342ms
+   ✓ AuditLogPage > apply filters sends query params 405ms
+   ✓ AuditLogPage > invalid date range blocks apply 373ms
+   ✓ AuditLogPage > view detail opens drawer with entry fields 655ms
+ ✓ src/pages/AttendanceSheetPage.test.tsx (8 tests) 8855ms
+   ✓ AttendanceSheetPage monthly view > renders title and employee row 1881ms
+   ✓ AttendanceSheetPage monthly view > shows empty text when sheet returns no employees 1079ms
+   ✓ AttendanceSheetPage monthly view > renders a status badge for a worked cell 1027ms
+   ✓ AttendanceSheetPage monthly view > shows an error message when sheet fetch fails 472ms
+   ✓ AttendanceSheetPage monthly view > opens the day panel on cell click and shows the day summary 814ms
+   ✓ AttendanceSheetPage monthly view > day panel never shows an adjustment marker (C2) 1155ms
+   ✓ AttendanceSheetPage daily view > switches to daily view and renders one row per employee 915ms
+   ✓ AttendanceSheetPage mark reviewed > shows refused days table when some days are refused 1505ms
+ ✓ src/pages/PayPeriodDetailPage.test.tsx (4 tests) 1529ms
+   ✓ PayPeriodDetailPage > renders period and preview button 404ms
+   ✓ PayPeriodDetailPage > finalise shows ack field after open_exceptions_in_period error 508ms
+   ✓ PayPeriodDetailPage > reopen requires reason 324ms
+ ✓ src/auth/auth.test.tsx (5 tests) 285ms
+ ✓ src/pages/PayPeriodsPage.test.tsx (4 tests) 1781ms
+   ✓ PayPeriodsPage > renders list with period key and status 650ms
+   ✓ PayPeriodsPage > create modal validates required fields then submits 774ms
+ ✓ src/shell/nav.test.ts (5 tests) 20ms
+ ✓ src/lib/__tests__/siteTz.test.ts (6 tests) 15ms
+ ✓ src/api/errors.test.ts (4 tests) 8ms
+ ✓ src/components/Adjustments/AdjustmentForm.test.tsx (5 tests) 2916ms
+   ✓ AdjustmentForm > night shift: time-out earlier than time-in means next calendar day 1097ms
+   ✓ AdjustmentForm > requires a reason code 417ms
+   ✓ AdjustmentForm > reason 'other' requires a note of at least 10 characters 592ms
+   ✓ AdjustmentForm > submits non-other reason without requiring a note 498ms
 
  Test Files  13 passed (13)
       Tests  93 passed (93)
-   Start at  10:33:40
-   Duration  78.11s (transform 2.50s, setup 7.33s, collect 69.26s, tests 62.79s, environment 33.36s, prepare 6.17s)
+   Start at  10:37:51
+   Duration  80.66s (transform 2.45s, setup 7.69s, collect 77.25s, tests 58.43s, environment 33.82s, prepare 6.62s)
 
 
 stderr | src/pages/PayPeriodDetailPage.test.tsx > PayPeriodDetailPage > renders period and preview button
