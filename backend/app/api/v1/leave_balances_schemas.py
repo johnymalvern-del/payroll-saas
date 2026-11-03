@@ -31,6 +31,8 @@ class LeaveBalanceOut(BaseModel):
 class LeaveBalanceListOut(BaseModel):
     items: list[LeaveBalanceOut]
     next_cursor: str | None = None
+    accrued_as_of: datetime | None = None
+    accrual_stale: bool = False
 
 
 class BalanceAdjustIn(BaseModel):

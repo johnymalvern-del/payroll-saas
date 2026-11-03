@@ -36,6 +36,7 @@ from app.api.v1.sheet import router as sheet_router
 from app.api.v1.reason_codes import router as reason_codes_router
 from app.api.v1.leave_types import router as leave_types_router
 from app.api.v1.leave_balances import router as leave_balances_router
+from app.api.v1.leave_accruals import router as leave_accruals_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(register_router)
@@ -64,6 +65,7 @@ api_router.include_router(sheet_router)
 api_router.include_router(reason_codes_router)
 api_router.include_router(leave_types_router)
 api_router.include_router(leave_balances_router)
+api_router.include_router(leave_accruals_router)
 api_router.include_router(payroll_settings_router)
 api_router.include_router(payroll_types_router)
 api_router.include_router(payroll_employees_router)

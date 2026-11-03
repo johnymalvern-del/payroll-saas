@@ -86,6 +86,9 @@ class PayrollSettings(Base):
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
     net_estimate_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_accrual_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Demo-tenant marker. Never set for real tenants.
     demo_values: Mapped[bool] = mapped_column(

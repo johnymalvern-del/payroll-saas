@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Annotated, Any
 
@@ -101,6 +101,12 @@ def list_leave_balances(
 ) -> LeaveBalanceListOut:
     _require_any_view(user)
 
+    settings_for_run = db.scalar(select(PayrollSettings).limit(1))
+    last_run = settings_for_run.last_accrual_run_at if settings_for_run else None
+    if last_run is not None and last_run.tzinfo is None:
+        last_run = last_run.replace(tzinfo=timezone.utc)
+    stale = last_run is None or (datetime.now(timezone.utc) - last_run) > timedelta(days=1)
+
     q = select(LeaveBalance)
 
     if _is_self_only(user):
@@ -147,6 +153,8 @@ def list_leave_balances(
     return LeaveBalanceListOut(
         items=[_to_out(r) for r in rows],
         next_cursor=next_cursor,
+        accrued_as_of=last_run,
+        accrual_stale=stale,
     )
 
 

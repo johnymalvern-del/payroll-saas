@@ -8,7 +8,7 @@ rule.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -38,6 +38,7 @@ class PayrollSettingsOut(BaseModel):
     sick_leave_codes: list[str] = Field(default_factory=list)
     net_estimate_method: str | None = None
 
+    last_accrual_run_at: datetime | None = None
     demo_values: bool = False
 
 
