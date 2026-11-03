@@ -11,6 +11,7 @@ import { ForcePasswordChangePage } from "./pages/ForcePasswordChangePage";
 import { HomePage } from "./pages/HomePage";
 import { LoginPage } from "./pages/LoginPage";
 import { PayPeriodsPage } from "./pages/PayPeriodsPage";
+import { PayPeriodDetailPage } from "./pages/PayPeriodDetailPage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 
 export default function App() {
@@ -40,6 +41,7 @@ export default function App() {
           <Route path="attendance/adjustments" element={<AdjustmentsPage />} />
           <Route path="employees" element={<EmployeesPage />} />
           <Route path="payroll/pay-periods" element={<PayPeriodsPage />} />
+          <Route path="payroll/pay-periods/:id" element={<PayPeriodDetailPage />} />
           <Route path="payroll/change-requests" element={<ChangeRequestsPage />} />
           <Route path="audit-log" element={<PlaceholderPage title="Audit log" phase="F-8" />} />
           <Route path="setup" element={<PlaceholderPage title="Setup" phase="F-5" />} />

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   useInfiniteQuery,
   useMutation,
@@ -79,6 +80,7 @@ function periodToIn(f: FormState): PayPeriodIn {
 
 export function PayPeriodsPage() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState<FormState>(BLANK_FORM);
@@ -236,6 +238,14 @@ export function PayPeriodsPage() {
                       {strings.payPeriods.rowPayDate}: {localDate(p.pay_date)}
                     </Text>
                   </Stack>
+                <Button
+                  size="xs"
+                  variant="default"
+                  onClick={() => navigate(`/payroll/pay-periods/${p.id}`)}
+                  data-testid={`pay-period-open-${p.id}`}
+                >
+                  {strings.payPeriods.openDetail}
+                </Button>
                 </Group>
               </Paper>
             ))}
