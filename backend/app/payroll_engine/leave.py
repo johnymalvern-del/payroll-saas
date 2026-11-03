@@ -1,26 +1,26 @@
 """Leave engine helpers (Chapter 3, 3B + 3C).
 
 Cycle bounds, availability, balance reservation helpers, approval chain
-construction, and per-day computation for requests.
+construction, per-day computation for requests, and the accrual service.
 
-Amendment 1: approval chain resolves role → concrete approver. Self-
-approval is never allowed; if all chain roles resolve to the submitter
-or are unavailable, escalate to payroll_admin (only if the leave type
-sets requires_payroll_admin_final) or raise no_eligible_approver.
+Amendment 1: approval chain resolves role -> concrete approver. Self-
+approval is never allowed; if every role resolves to self or unavailable,
+escalate to payroll_admin (only if the leave type sets
+requires_payroll_admin_final) or raise no_eligible_approver.
 
 Amendment 4: available_balance excludes `entitled` (informational only).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
-from app.db.tenant.models.leave import LeaveBalance, LeaveType
+from app.db.tenant.models.leave import LeaveBalance, LeaveBalanceLedger, LeaveType
 from app.db.tenant.models.payroll_settings import PayrollSettings
 from app.db.tenant.models.people import Employee, User
 
@@ -119,7 +119,179 @@ def available_balance(balance: LeaveBalance) -> Decimal:
 
 
 # ---------------------------------------------------------------------------
-# Balance reservation (Chapter 3, 3C)
+# Accrual (3B.3, amendment 3)
+# ---------------------------------------------------------------------------
+
+def _period_keys_for(
+    leave_type: LeaveType,
+    bounds: CycleBounds,
+    as_of_date: date,
+) -> list[str]:
+    if leave_type.accrual_method == "fixed":
+        return [f"fixed:{bounds.start.isoformat()}"]
+    keys: list[str] = []
+    cur = date(bounds.start.year, bounds.start.month, 1)
+    stop = date(bounds.end.year, bounds.end.month, 1)
+    as_of_month = date(as_of_date.year, as_of_date.month, 1)
+    if as_of_month < stop:
+        stop = as_of_month
+    while cur <= stop:
+        keys.append(f"{cur.year}-{cur.month:02d}")
+        if cur.month == 12:
+            cur = date(cur.year + 1, 1, 1)
+        else:
+            cur = date(cur.year, cur.month + 1, 1)
+    return keys
+
+
+def _accrual_amount_for(leave_type: LeaveType) -> Decimal:
+    if leave_type.accrual_amount is None:
+        return _ZERO
+    if leave_type.accrual_method == "annual":
+        return (_d(leave_type.accrual_amount) / Decimal(12)).quantize(_QUANT)
+    if leave_type.accrual_method == "monthly":
+        return _d(leave_type.accrual_amount)
+    if leave_type.accrual_method == "fixed":
+        return _d(leave_type.accrual_amount)
+    return _ZERO
+
+
+def _carry_in_for_prior_cycle(
+    db: Session,
+    employee: Employee,
+    leave_type: LeaveType,
+    bounds: CycleBounds,
+) -> Decimal:
+    prior = db.scalar(
+        select(LeaveBalance)
+        .where(
+            LeaveBalance.employee_id == employee.id,
+            LeaveBalance.leave_type_id == leave_type.id,
+            LeaveBalance.cycle_end == bounds.start - timedelta(days=1),
+        )
+        .order_by(LeaveBalance.cycle_start.desc())
+        .limit(1)
+    )
+    if prior is None:
+        return _ZERO
+    prior_avail = available_balance(prior)
+    if prior_avail <= _ZERO:
+        return _ZERO
+    if leave_type.max_carryover is None:
+        return prior_avail
+    return min(prior_avail, leave_type.max_carryover)
+
+
+def accrue_all_employees(db: Session, as_of_date: date) -> dict:
+    """Materialise accruals. Idempotent per (employee, type, cycle, period_key)
+    via LeaveBalanceLedger.reason = "accrual:<period_key>"."""
+    settings = db.scalar(select(PayrollSettings).limit(1))
+    employees = list(
+        db.scalars(
+            select(Employee).where(Employee.status != "terminated")
+        ).all()
+    )
+    types = list(
+        db.scalars(
+            select(LeaveType).where(LeaveType.is_active.is_(True))
+        ).all()
+    )
+
+    rows_written = 0
+    employees_touched = 0
+
+    for emp in employees:
+        wrote_for_emp = False
+        for t in types:
+            if t.accrual_method == "none":
+                continue
+            try:
+                bounds = compute_cycle_bounds(emp, t, settings, as_of_date)
+            except AppError:
+                continue
+
+            balance = db.scalar(
+                select(LeaveBalance).where(
+                    LeaveBalance.employee_id == emp.id,
+                    LeaveBalance.leave_type_id == t.id,
+                    LeaveBalance.cycle_start == bounds.start,
+                )
+            )
+            if balance is None:
+                carry = _carry_in_for_prior_cycle(db, emp, t, bounds)
+                entitled = (
+                    _d(t.accrual_amount)
+                    if t.accrual_method in ("annual", "fixed")
+                    else _ZERO
+                )
+                balance = LeaveBalance(
+                    employee_id=emp.id,
+                    leave_type_id=t.id,
+                    cycle_start=bounds.start,
+                    cycle_end=bounds.end,
+                    entitled=entitled,
+                    accrued=_ZERO,
+                    taken=_ZERO,
+                    pending=_ZERO,
+                    carried_in=carry,
+                    adjusted=_ZERO,
+                    row_version=1,
+                )
+                db.add(balance)
+                db.flush()
+
+            needed = _period_keys_for(t, bounds, as_of_date)
+            if not needed:
+                continue
+
+            existing = set(
+                db.scalars(
+                    select(LeaveBalanceLedger.reason).where(
+                        LeaveBalanceLedger.employee_id == emp.id,
+                        LeaveBalanceLedger.leave_type_id == t.id,
+                        LeaveBalanceLedger.reason.like("accrual:%"),
+                    )
+                ).all()
+            )
+
+            amount = _accrual_amount_for(t)
+            if amount <= _ZERO:
+                continue
+
+            for pk in needed:
+                reason_key = f"accrual:{pk}"
+                if reason_key in existing:
+                    continue
+                db.add(
+                    LeaveBalanceLedger(
+                        employee_id=emp.id,
+                        leave_type_id=t.id,
+                        delta=amount,
+                        reason=reason_key,
+                        reference_id=None,
+                        created_by_user_id=None,
+                    )
+                )
+                balance.accrued = (balance.accrued or _ZERO) + amount
+                balance.row_version = balance.row_version + 1
+                rows_written += 1
+                wrote_for_emp = True
+
+        if wrote_for_emp:
+            employees_touched += 1
+
+    if settings is not None:
+        settings.last_accrual_run_at = datetime.now(timezone.utc)
+    db.commit()
+    return {
+        "employees_touched": employees_touched,
+        "rows_written": rows_written,
+        "as_of": as_of_date,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Balance reservation (3C)
 # ---------------------------------------------------------------------------
 
 def reserve_pending(
@@ -148,7 +320,7 @@ def convert_pending_to_taken(
 
 
 # ---------------------------------------------------------------------------
-# Request day computation
+# Request day computation (3C)
 # ---------------------------------------------------------------------------
 
 def compute_request_days(
@@ -169,7 +341,7 @@ def compute_request_days(
 
 
 # ---------------------------------------------------------------------------
-# Approval chain (Chapter 3, 3C, amendment 1)
+# Approval chain (3C, amendment 1)
 # ---------------------------------------------------------------------------
 
 def resolve_approver_for_role(
@@ -205,13 +377,6 @@ def build_approval_chain(
     leave_type: LeaveType,
     submitter: User,
 ) -> list[str]:
-    """Ordered list of approver roles for the request.
-
-    Returns [] when leave_type.requires_approval is False (caller auto-
-    approves). Otherwise excludes self-approvers; if every role resolves
-    to self or is unavailable, either escalates to payroll_admin (when
-    requires_payroll_admin_final) or raises no_eligible_approver.
-    """
     if not leave_type.requires_approval:
         return []
 
@@ -231,9 +396,9 @@ def build_approval_chain(
         else:
             raise AppError(
                 "no_eligible_approver",
-                "No eligible approvers for this request after excluding "
-                "self-approval. Set requires_payroll_admin_final or adjust "
-                "the leave type's approval_chain.",
+                "No eligible approvers after excluding self-approval. Set "
+                "requires_payroll_admin_final or adjust the leave type's "
+                "approval_chain.",
                 409,
             )
     elif (
