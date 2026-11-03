@@ -1,21 +1,22 @@
-"""Payroll settings (Chapter 4 Bundle 003b + Chapter 4H B-4 foundation).
+"""Payroll settings (Chapter 4 Bundle 003b + Chapter 4H B-4 + Chapter 3 L1a).
 
-Chapter 4H adds the settings that will gate attendance-to-earnings
-integration. Every new money-affecting field is NULLABLE and carries NO
-invented default: the run must 409 unless the tenant sets it (round-1
-amendment 5: no invented values).
+Chapter 4H adds the attendance-to-earnings settings. Chapter 3 L1a adds
+leave approval chain extras, chapter 3 accountant-gated settings, and
+sick-leave code list. Every money/law-affecting field is NULLABLE with
+no invented default; the run must 409 unless the tenant sets it.
 
 `demo_values` marks tenants seeded by demo_seed; payslip PDFs for those
-tenants carry a "DEMO — NOT A REAL PAYSLIP" mark.
+tenants carry a "DEMO - NOT A REAL PAYSLIP" mark.
 """
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     Integer,
@@ -69,7 +70,24 @@ class PayrollSettings(Base):
         Boolean, nullable=True
     )
 
-    # Demo-tenant marker (round-1 amendment 3). Never set for real tenants.
+    # Chapter 3 L1a — leave / advance / net-estimate settings (all nullable
+    # with no invented default; unset = feature disabled, backend refuses).
+    leave_escalation_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    leave_cycle_fixed_anchor: Mapped[date | None] = mapped_column(
+        Date, nullable=True
+    )
+    advance_max_pct: Mapped[Decimal | None] = mapped_column(
+        Numeric(5, 4), nullable=True
+    )
+    advance_hard_cap: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2), nullable=True
+    )
+    sick_leave_codes: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    net_estimate_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+    # Demo-tenant marker. Never set for real tenants.
     demo_values: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )

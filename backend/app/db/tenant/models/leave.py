@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, Numeric,
-    String, Text, UniqueConstraint, func,
+    String, Text, UniqueConstraint, func, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -28,6 +28,12 @@ class LeaveType(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     code: Mapped[str] = mapped_column(String(30), nullable=False)
+    approval_chain: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("\'[]\'::jsonb")
+    )
+    requires_payroll_admin_final: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     unit: Mapped[str] = mapped_column(String(10), nullable=False)
     paid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     accrual_method: Mapped[str] = mapped_column(String(20), nullable=False)
