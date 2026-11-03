@@ -13,6 +13,7 @@ from sqlalchemy import (
     Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, Numeric,
     String, Text, UniqueConstraint, func, text,
 )
+from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -112,6 +113,21 @@ class LeaveRequest(Base):
     row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    days: Mapped[list["LeaveRequestDay"]] = relationship(
+        "LeaveRequestDay",
+        uselist=True,
+        foreign_keys="[LeaveRequestDay.leave_request_id]",
+        order_by="LeaveRequestDay.work_date",
+        lazy="raise",
+    )
+    steps: Mapped[list["LeaveApprovalStep"]] = relationship(
+        "LeaveApprovalStep",
+        uselist=True,
+        foreign_keys="[LeaveApprovalStep.leave_request_id]",
+        order_by="LeaveApprovalStep.step_no",
+        lazy="raise",
+    )
+
 
 
 class LeaveRequestDay(Base):

@@ -329,3 +329,44 @@ def _4a_bootstrap_template():
 # END OF FILE
 
 # _4A_BIS_010B conftest
+
+
+# --- LEAVE_TEST_FAST_FIXTURES ---
+@pytest.fixture(scope="session")
+def _leave_tenant_seeded(tenant_engine_admin):
+    """Seed the session-scoped tenant with one admin user; yield engine."""
+    from sqlalchemy.orm import Session as _Sess
+    try:
+        from app.db.tenant.models import User as _U
+    except Exception:
+        from app.db.tenant.models.user import User as _U
+    _s = _Sess(tenant_engine_admin)
+    try:
+        if _s.query(_U).filter(_U.username == "admin").first() is None:
+            _s.add(_U(
+                username="admin", password_hash="x",
+                role="payroll_admin", is_active=True,
+                must_change_password=False, failed_attempts=0,
+                row_version=1,
+            ))
+            _s.commit()
+    finally:
+        _s.close()
+    yield tenant_engine_admin
+
+
+@pytest.fixture()
+def _leave_session_shared(_leave_tenant_seeded):
+    """Per-test Session on a transactional connection; rollback on teardown."""
+    from sqlalchemy.orm import sessionmaker as _sm
+    _conn = _leave_tenant_seeded.connect()
+    _tx = _conn.begin()
+    _Sess = _sm(bind=_conn)
+    _s = _Sess()
+    try:
+        yield _s
+    finally:
+        _s.close()
+        _tx.rollback()
+        _conn.close()
+# --- END LEAVE_TEST_FAST_FIXTURES ---

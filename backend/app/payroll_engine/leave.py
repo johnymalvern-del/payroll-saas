@@ -330,11 +330,23 @@ def compute_request_days(
     to_date: date,
 ) -> list[tuple[date, Decimal]]:
     from app.api.v1.attendance_engine import _employee_expected
+    from app.db.tenant.models.attendance import EmployeeWorkPattern
+
+    has_wp = getattr(employee, "work_pattern_id", None) is not None
+    if not has_wp:
+        ewp_id = db.scalar(
+            select(EmployeeWorkPattern.id)
+            .where(EmployeeWorkPattern.employee_id == employee.id)
+            .limit(1)
+        )
+        has_wp = ewp_id is not None
+    if not has_wp:
+        return []
 
     out: list[tuple[date, Decimal]] = []
     cur = from_date
     while cur <= to_date:
-        if _employee_expected(db, employee, cur):
+        if _employee_expected(db, employee, cur)[0]:
             out.append((cur, Decimal("1")))
         cur += timedelta(days=1)
     return out
@@ -386,7 +398,7 @@ def build_approval_chain(
         approver = resolve_approver_for_role(db, employee, role)
         if approver is None:
             continue
-        if approver.id == submitter.id:
+        if approver.employee_id == employee.id:
             continue
         eligible.append(role)
 

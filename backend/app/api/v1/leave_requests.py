@@ -55,7 +55,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 
 from app.api.deps import TenantDbDep
 from app.api.v1.leave_requests_schemas import (
@@ -113,14 +113,32 @@ def _zero() -> Decimal:
     return _ZERO
 
 
-def _to_out(row: LeaveRequest) -> LeaveRequestOut:
-    out = LeaveRequestOut.model_validate(row)
-    out.days = [LeaveRequestDayOut.model_validate(d) for d in (row.days or [])]
-    out.steps = [
-        LeaveApprovalStepOut.model_validate(s)
-        for s in sorted(row.steps or [], key=lambda s: s.step_no)
-    ]
-    return out
+def _to_out(db: Any, request: LeaveRequest) -> LeaveRequestOut:
+    day_rows = db.scalars(
+        select(LeaveRequestDay)
+        .where(LeaveRequestDay.leave_request_id == request.id)
+        .order_by(LeaveRequestDay.work_date)
+    ).all()
+    step_rows = db.scalars(
+        select(LeaveApprovalStep)
+        .where(LeaveApprovalStep.leave_request_id == request.id)
+        .order_by(LeaveApprovalStep.step_no)
+    ).all()
+    data: dict = {}
+    for name in LeaveRequestOut.model_fields:
+        if name == "days":
+            data[name] = [
+                LeaveRequestDayOut.model_validate(d, from_attributes=True)
+                for d in day_rows
+            ]
+        elif name == "steps":
+            data[name] = [
+                LeaveApprovalStepOut.model_validate(s, from_attributes=True)
+                for s in step_rows
+            ]
+        else:
+            data[name] = getattr(request, name, None)
+    return LeaveRequestOut.model_validate(data)
 
 
 def _encode_cursor(created_at: datetime, rid: uuid.UUID) -> str:
@@ -242,10 +260,13 @@ def _ensure_no_hour_type(db: Any, request: LeaveRequest) -> LeaveType:
 def _current_step(
     db: Any, request: LeaveRequest,
 ) -> LeaveApprovalStep | None:
-    for s in sorted(request.steps or [], key=lambda x: x.step_no):
-        if s.status == "pending":
-            return s
-    return None
+    return db.scalars(
+        select(LeaveApprovalStep)
+        .where(LeaveApprovalStep.leave_request_id == request.id)
+        .where(LeaveApprovalStep.status == "pending")
+        .order_by(LeaveApprovalStep.step_no)
+        .limit(1)
+    ).first()
 
 
 def _ensure_current_approver(db: Any, request: LeaveRequest, user: Any) -> LeaveApprovalStep:
@@ -321,36 +342,61 @@ def _ensure_balance(
     return balance
 
 
+from sqlalchemy.exc import IntegrityError
+
+
+def _extract_constraint(msg: str) -> str | None:
+    marker = 'constraint "'
+    i = msg.find(marker)
+    if i < 0:
+        return None
+    j = msg.find('"', i + len(marker))
+    return msg[i + len(marker):j] if j > 0 else None
+
+
+def _commit_or_map(db: Any) -> None:
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise AppError(
+            "integrity_violation",
+            "Request violates a database constraint",
+            422,
+            {"constraint": _extract_constraint(str(exc))},
+        ) from exc
+
+
 def _rebuild_days(
     db: Any, request: LeaveRequest,
 ) -> list[LeaveRequestDay]:
     employee = db.get(Employee, request.employee_id)
     if employee is None:
         raise AppError("not_found", "Employee not found", 404)
-    for old in list(request.days or []):
-        db.delete(old)
-    db.flush()
     computed = compute_request_days(
         db, employee, request.from_date, request.to_date
     )
     if not computed:
         raise AppError(
             "no_working_days_in_range",
-            "The selected range contains no expected-working days",
+            "The date range has no working days for this employee",
             422,
         )
-    new_rows: list[LeaveRequestDay] = []
-    for wd, days in computed:
-        row = LeaveRequestDay(
-            leave_request_id=request.id,
-            work_date=wd,
-            days=days,
+    db.execute(
+        delete(LeaveRequestDay).where(
+            LeaveRequestDay.leave_request_id == request.id
         )
-        db.add(row)
-        new_rows.append(row)
+    )
+    rows = [
+        LeaveRequestDay(
+            leave_request_id=request.id, work_date=wd, days=d,
+        )
+        for wd, d in computed
+    ]
+    db.add_all(rows)
     request.days_requested = sum((d for _, d in computed), _zero())
     db.flush()
-    return new_rows
+    return rows
 
 
 def _apply_chain(
@@ -363,8 +409,11 @@ def _apply_chain(
     if lt is None:
         raise AppError("not_found", "Leave type not found", 404)
     chain = build_approval_chain(db, employee, lt, user)
-    for old in list(request.steps or []):
-        db.delete(old)
+    db.execute(
+        delete(LeaveApprovalStep).where(
+            LeaveApprovalStep.leave_request_id == request.id
+        )
+    )
     db.flush()
     if not chain:
         # Auto-approval: no approval chain (requires_approval=False)
@@ -386,6 +435,7 @@ def _apply_chain(
             status="pending",
         )
         db.add(step)
+    request.status = "submitted"
     db.flush()
 
 
@@ -397,7 +447,11 @@ def _final_approval_side_effects(
         raise AppError("not_found", "Leave type not found", 404)
     balance = _ensure_balance(db, request, lt)
     convert_pending_to_taken(db, balance, request.days_requested)
-    work_dates = [d.work_date for d in (request.days or [])]
+    work_dates = [d.work_date for d in db.scalars(
+            select(LeaveRequestDay).where(
+                LeaveRequestDay.leave_request_id == request.id
+            )
+        )]
     apply_leave_to_attendance(
         db, user=user, request=request, leave_type=lt, work_dates=work_dates
     )
@@ -510,7 +564,7 @@ def list_leave_requests(
         next_cursor = _encode_cursor(last.created_at, last.id)
 
     return LeaveRequestListOut(
-        items=[_to_out(r) for r in rows],
+        items=[_to_out(db, r) for r in rows],
         next_cursor=next_cursor,
     )
 
@@ -546,12 +600,21 @@ def create_leave_request(
     employee = _load_employee(db, user, employee_id)
     lt = _load_leave_type(db, body.leave_type_id)
 
+    computed = compute_request_days(db, employee, body.from_date, body.to_date)
+    if not computed:
+        raise AppError(
+            "no_working_days_in_range",
+            "The date range has no working days for this employee",
+            422,
+        )
+    days_total = sum((d for _, d in computed), _zero())
+
     request = LeaveRequest(
         employee_id=employee.id,
         leave_type_id=lt.id,
         from_date=body.from_date,
         to_date=body.to_date,
-        days_requested=_zero(),
+        days_requested=days_total,
         reason=body.reason,
         status="draft",
         captured_by_user_id=getattr(user, "id", None),
@@ -578,9 +641,9 @@ def create_leave_request(
             "days_requested": str(request.days_requested),
         }),
     ))
-    db.commit()
+    _commit_or_map(db)
     db.refresh(request)
-    return _to_out(request)
+    return _to_out(db, request)
 
 
 @router.patch("/{request_id}", response_model=LeaveRequestOut)
@@ -606,7 +669,7 @@ def patch_leave_request(
             {"current_row_version": request.row_version},
         )
 
-    old = _to_out(request).model_dump(mode="json")
+    old = _to_out(db, request).model_dump(mode="json")
     if body.from_date is not None:
         request.from_date = body.from_date
     if body.to_date is not None:
@@ -631,11 +694,11 @@ def patch_leave_request(
         entity_id=str(request.id),
         action="leave_request.update",
         old_value=redact_for_audit(old),
-        new_value=redact_for_audit(_to_out(request).model_dump(mode="json")),
+        new_value=redact_for_audit(_to_out(db, request).model_dump(mode="json")),
     ))
-    db.commit()
+    _commit_or_map(db)
     db.refresh(request)
-    return _to_out(request)
+    return _to_out(db, request)
 
 
 @router.post("/{request_id}/submit", response_model=LeaveRequestOut)
@@ -654,7 +717,11 @@ def submit_leave_request(
         )
 
     lt = _ensure_no_hour_type(db, request)
-    days = list(request.days or [])
+    days = list(db.scalars(
+        select(LeaveRequestDay).where(
+            LeaveRequestDay.leave_request_id == request.id
+        )
+    ))
     work_dates = [d.work_date for d in days]
     check_days_not_locked(db, request.employee_id, work_dates)
 
@@ -689,9 +756,9 @@ def submit_leave_request(
             old_value={"status": "draft"},
             new_value={"status": "submitted"},
         ))
-    db.commit()
+    _commit_or_map(db)
     db.refresh(request)
-    return _to_out(request)
+    return _to_out(db, request)
 
 
 @router.post("/{request_id}/cancel", response_model=LeaveRequestOut)
@@ -717,7 +784,11 @@ def cancel_leave_request(
     elif request.status == "approved":
         taken_future = [
             d.work_date
-            for d in (request.days or [])
+            for d in db.scalars(
+            select(LeaveRequestDay).where(
+                LeaveRequestDay.leave_request_id == request.id
+            )
+        )
             if d.work_date <= date.today()
         ]
         if taken_future:
@@ -753,9 +824,9 @@ def cancel_leave_request(
         old_value={"status": "prior"},
         new_value={"status": "cancelled"},
     ))
-    db.commit()
+    _commit_or_map(db)
     db.refresh(request)
-    return _to_out(request)
+    return _to_out(db, request)
 
 
 @router.get("/{request_id}/steps", response_model=list[LeaveApprovalStepOut])
@@ -766,7 +837,11 @@ def get_leave_steps(
 ) -> list[LeaveApprovalStepOut]:
     _require_any_read(user)
     request = _load_request(db, request_id, user)
-    steps = sorted(request.steps or [], key=lambda s: s.step_no)
+    steps = list(db.scalars(
+        select(LeaveApprovalStep)
+        .where(LeaveApprovalStep.leave_request_id == request.id)
+        .order_by(LeaveApprovalStep.step_no)
+    ))
     return [LeaveApprovalStepOut.model_validate(s) for s in steps]
 
 
@@ -837,9 +912,9 @@ def decide_step(
             "approve": body.approve,
         },
     ))
-    db.commit()
+    _commit_or_map(db)
     db.refresh(request)
-    return _to_out(request)
+    return _to_out(db, request)
 
 
 @router.post("/{request_id}/decide", response_model=LeaveRequestOut)
@@ -858,7 +933,11 @@ def decide_shortcut(
         lt = _ensure_no_hour_type(db, request)
         balance = _ensure_balance(db, request, lt)
         check_days_not_locked(
-            db, request.employee_id, [d.work_date for d in (request.days or [])]
+            db, request.employee_id, [d.work_date for d in db.scalars(
+            select(LeaveRequestDay).where(
+                LeaveRequestDay.leave_request_id == request.id
+            )
+        )]
         )
         available = available_balance(balance)
         if available - request.days_requested < _zero() and not lt.allow_negative:
@@ -872,9 +951,9 @@ def decide_shortcut(
         _apply_chain(db, request, user)
         db.flush()
         if request.status == "approved":
-            db.commit()
+            _commit_or_map(db)
             db.refresh(request)
-            return _to_out(request)
+            return _to_out(db, request)
 
     step = _current_step(db, request)
     if step is None:
@@ -906,9 +985,9 @@ def decide_shortcut(
         request.row_version = request.row_version + 1
         db.flush()
 
-    db.commit()
+    _commit_or_map(db)
     db.refresh(request)
-    return _to_out(request)
+    return _to_out(db, request)
 
 
 @router.post("/{request_id}/advance", response_model=LeaveRequestOut)
@@ -943,6 +1022,6 @@ def advance_request(
         old_value=None,
         new_value={"step_no": step.step_no, "new_status": request.status},
     ))
-    db.commit()
+    _commit_or_map(db)
     db.refresh(request)
-    return _to_out(request)
+    return _to_out(db, request)
