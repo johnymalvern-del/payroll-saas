@@ -10,6 +10,7 @@ import { ExceptionsPage } from "./pages/ExceptionsPage";
 import { ForcePasswordChangePage } from "./pages/ForcePasswordChangePage";
 import { HomePage } from "./pages/HomePage";
 import { LoginPage } from "./pages/LoginPage";
+import { PayPeriodsPage } from "./pages/PayPeriodsPage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 
 export default function App() {
@@ -38,7 +39,7 @@ export default function App() {
           <Route path="attendance/exceptions" element={<ExceptionsPage />} />
           <Route path="attendance/adjustments" element={<AdjustmentsPage />} />
           <Route path="employees" element={<EmployeesPage />} />
-          <Route path="payroll/pay-periods" element={<PlaceholderPage title="Pay periods" phase="F-7" />} />
+          <Route path="payroll/pay-periods" element={<PayPeriodsPage />} />
           <Route path="payroll/change-requests" element={<ChangeRequestsPage />} />
           <Route path="audit-log" element={<PlaceholderPage title="Audit log" phase="F-8" />} />
           <Route path="setup" element={<PlaceholderPage title="Setup" phase="F-5" />} />
