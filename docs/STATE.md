@@ -48,3 +48,14 @@ with file names listed; `test_golden_reviewed_cases_pass` skips because
 ## Chapter 4H remaining
 - **14 seed tests** — session-scoped seed-once fixture (needs
   `conftest.py`).
+
+## Chapter 3 — L1 (3B leave types & balances) committed
+
+- **L1a** migration ten_0022: leave_type.approval_chain, leave_type.requires_payroll_admin_final; payroll_settings leave_escalation_days, leave_cycle_fixed_anchor, advance_max_pct, advance_hard_cap, sick_leave_codes, net_estimate_method. audit_redact extended with leave_reason, advance_reason, grievance_subject/body/note, resolution_note, sick_note_*.
+- **L1b** leave types CRUD: GET/POST/PATCH/deactivate/reactivate at `/api/v1/leave/types`. Permission: GET = LEAVE_APPROVE OR SELF_VIEW; writes = USER_MANAGE. approval_chain defaults ["manager","hr"]. Business rules: accrual_amount required for annual/fixed, negative-requires-accrual, no-carryover-on-fixed. Code immutable on PATCH.
+- **L1c** leave balances: GET list + single at `/api/v1/leave/balances`; POST /adjust. Adjust writes LeaveBalanceLedger (reason="adjustment"), refuses 422 insufficient_balance when resulting available<0 and allow_negative=false. Adjusting closed cycle requires PAYROLL_FINALISE. Auto-creates missing live-cycle balance.
+- **L1c** `payroll_engine/leave.py`: compute_cycle_bounds (calendar/anniversary/fixed), available_balance = accrued + carried_in + adjusted - taken - pending (entitled informational only, per amendment 4).
+- **L1d** accrual: POST `/api/v1/leave/accruals/run` (USER_MANAGE). `accrue_all_employees(db, as_of)` computes period keys per cycle, idempotent via reason="accrual:<period_key>". Carry-over honoured at cycle creation, respects leave_type.max_carryover. Migration ten_0023 adds payroll_settings.last_accrual_run_at. GET /leave/balances now returns `accrued_as_of` + `accrual_stale` (True when last run is None or >1 day old). GETs never write.
+- **L1e** tests: `test_leave_types.py`, `test_leave_balances.py`, `test_leave_accruals.py` — covers create/dup/validators/PATCH/immutability/deactivate-refused-in-use/list-filters/approval-chain defaults, available_balance numeric formula (entitled excluded), self-vs-approver scope, adjust positive/negative/closed-cycle/ledger/auto-create, GET-never-writes, accrual monthly/annual/fixed/none, idempotency, carry-over max vs full, endpoint counts, stale/fresh detection.
+
+Pending chapter 3: L2 (3C leave requests + approval chain + attendance adjustments on approval), L3 (3D attachments/sick notes), L4 (3E advances + 3F grievances), L5 (3G /me aggregator + daily-jobs CLI + demo seed extension). Refer to Chapter 3 amendments 1–12 (approval_chain configurable, approved-leave creates adjustments, accrual never lazy-on-read, day-only for now, sick-note POPIA rules, audit redaction, capture-on-behalf, grievance notes, advance repayment_plan typed, 5-bundle split).
