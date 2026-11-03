@@ -1,0 +1,208 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MantineProvider } from "@mantine/core";
+import {
+  MemoryRouter,
+  Route,
+  Routes,
+} from "react-router-dom";
+import { PayPeriodDetailPage } from "./PayPeriodDetailPage";
+
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function () {};
+}
+
+const MODAL_TEST_TIMEOUT_MS = 20000;
+
+function jr(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    return input.url;
+  }
+  return String(input);
+}
+
+function requestMethod(input: RequestInfo | URL): string {
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    return input.method;
+  }
+  return "GET";
+}
+
+const PERIOD_OPEN = {
+  id: "pp1",
+  period_key: "2026-01",
+  start_date: "2026-01-01",
+  end_date: "2026-01-31",
+  pay_date: "2026-02-05",
+  status: "open",
+  cutoff_at: "2026-01-31T23:59:00+00:00",
+  row_version: 1,
+};
+
+const PERIOD_LOCKED = { ...PERIOD_OPEN, status: "locked" };
+
+const PREVIEW = {
+  run_id: "r1",
+  revision: 1,
+  status: "completed",
+  unacknowledged_formulas: [],
+  items: [
+    {
+      employee_id: "e1",
+      employee_code: "E001",
+      employee_name: "Ada",
+      gross: "1000.00",
+      paye: "100.00",
+      net: "890.00",
+      warnings: [],
+    },
+  ],
+  next_cursor: null,
+};
+
+function renderPage() {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <MantineProvider>
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/payroll/pay-periods/pp1"]}>
+          <Routes>
+            <Route
+              path="/payroll/pay-periods/:id"
+              element={<PayPeriodDetailPage />}
+            />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+}
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+describe("PayPeriodDetailPage", () => {
+  it("renders period and preview button", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/payroll/pay-periods/pp1")) {
+        return jr(PERIOD_OPEN);
+      }
+      return jr({});
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    expect(
+      await screen.findByText(/Pay period 2026-01/),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("pay-period-preview")).toBeInTheDocument();
+  });
+
+  it("preview button shows employee rows", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      const method = requestMethod(input);
+      if (url.endsWith("/payroll/pay-periods/pp1") && method === "GET") {
+        return jr(PERIOD_OPEN);
+      }
+      if (url.includes("/preview") && method === "POST") {
+        return jr(PREVIEW);
+      }
+      return jr({});
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    await screen.findByText(/Pay period 2026-01/);
+    fireEvent.click(screen.getByTestId("pay-period-preview"));
+    const result = await screen.findByTestId("pay-period-preview-result");
+    expect(result.textContent ?? "").toMatch(/Ada/);
+  });
+
+  it(
+    "finalise shows ack field after open_exceptions_in_period error",
+    async () => {
+      global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        const method = requestMethod(input);
+        if (url.endsWith("/payroll/pay-periods/pp1") && method === "GET") {
+          return jr(PERIOD_OPEN);
+        }
+        if (url.endsWith("/finalise") && method === "POST") {
+          return jr(
+            {
+              error: {
+                code: "open_exceptions_in_period",
+                details: { count: 2, sample: [] },
+              },
+            },
+            409,
+          );
+        }
+        return jr({});
+      }) as unknown as typeof fetch;
+
+      renderPage();
+      await screen.findByText(/Pay period 2026-01/);
+      fireEvent.click(screen.getByTestId("pay-period-finalise-open"));
+      await screen.findByTestId("pay-period-finalise-modal");
+      fireEvent.click(await screen.findByTestId("pay-period-finalise-submit"));
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("pay-period-finalise-error").textContent ?? "",
+        ).toMatch(/open exceptions/i);
+      });
+      expect(
+        screen.getByTestId("pay-period-finalise-ack"),
+      ).toBeInTheDocument();
+    },
+    MODAL_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "reopen requires reason",
+    async () => {
+      global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        const method = requestMethod(input);
+        if (url.endsWith("/payroll/pay-periods/pp1") && method === "GET") {
+          return jr(PERIOD_LOCKED);
+        }
+        return jr([]);
+      }) as unknown as typeof fetch;
+
+      renderPage();
+      await screen.findByText(/Pay period 2026-01/);
+      fireEvent.click(screen.getByTestId("pay-period-reopen-open"));
+      await screen.findByTestId("pay-period-reopen-modal");
+      fireEvent.click(await screen.findByTestId("pay-period-reopen-submit"));
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("pay-period-reopen-error").textContent ?? "",
+        ).toMatch(/reason is required/i);
+      });
+    },
+    MODAL_TEST_TIMEOUT_MS,
+  );
+});

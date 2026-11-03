@@ -101,3 +101,40 @@ otherwise delegates to `mapErrorCode` (so `day_locked`,
   `BulkAdjustOut` read from `adjustments_schemas.py` and implemented.
 - **B-10**: `/attendance/adjustments` placeholder replaced with
   `AdjustmentsPage`; route unchanged.
+
+## F-7 Pay periods (committed)
+
+- `/payroll/pay-periods` renders `PayPeriodsPage` (list + create modal).
+- `/payroll/pay-periods/:id` renders `PayPeriodDetailPage` (preview + finalise with ack + reopen + reopen log).
+- API module: `frontend/src/api/payPeriods.ts`.
+- Strings: `strings.payPeriods`.
+
+### F-7a (api + strings)
+- `fetchPayPeriods`, `fetchPayPeriod`, `createPayPeriod`, `previewPayPeriod`, `previewPayPeriodEmployee`, `finalisePayPeriod`, `reopenPayPeriod`, `fetchReopenLog`.
+- `PayPeriodsApiError` carries `code`, `status`, `details`.
+
+### F-7b (list page)
+- `useInfiniteQuery(["pay_periods", status])` + Load more.
+- Status SegmentedControl: all / open / locked.
+- Row: period key, status badge, date range, pay date, `Open` button → detail route.
+- Create modal: `period_key`, `start_date`, `end_date`, `pay_date`, `cutoff_at`.
+  - `cutoff_local` entered as `datetime-local`, converted via `dayjs.tz(..., getSiteTz())` then `.toISOString()`.
+  - Frontend validation: required fields, end >= start, pay_date >= end. Backend enforces `period_key_taken`, `invalid_range`, `invalid_pay_date`.
+  - Errors map through `mapErrorCode`.
+
+### F-7c (detail page)
+- Header: back button, title (`Pay period <key>`), status badge.
+- Actions: Preview (disabled when locked), Finalise (disabled when locked), Reopen (disabled when not locked).
+- Preview: `POST /payroll/.../preview` → inline table (Employee, Gross, PAYE, Net, Warnings). `unacknowledged_formulas` banner when non-empty.
+- Finalise:
+  - Modal with `ack_open_exceptions_reason` Textarea.
+  - First submit with no ack → backend 409 `open_exceptions_in_period` → modal stays open, `needsAck=true`, error shown, user types reason, submit again.
+  - Blank ack while `needsAck` → local validation error.
+  - `period_locked` mapped via `strings.payPeriods.errPeriodLocked`.
+- Reopen: Modal with required `reason` Textarea; blank submit → local validation error. `later_period_locked` surfaces via `mapErrorCode`.
+- Reopen log: shown only for locked periods when entries exist.
+
+### Known limitations
+- **Per-employee preview drill-down** (`previewPayPeriodEmployee`) is wired in `payPeriods.ts` but not surfaced in `PayPeriodDetailPage`. Follow-up: row click opens a `PreviewEmployeeDetail` modal or route; test on arrival.
+- **No `pay_period` cache invalidation on finalise/reopen beyond `pay_periods` list + reopen log** — the current detail refetch comes from `["pay_period", id]` invalidation. If a payslip view exists later, it will need its own invalidation key.
+- **`unacknowledged_formulas` warning is informational only** — no "acknowledge" button; formula acknowledgement lives on the (future) payroll-formulas screen.
