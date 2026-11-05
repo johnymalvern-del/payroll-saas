@@ -1,6 +1,8 @@
 import { Link as RouterLink, Outlet, useLocation } from "react-router-dom";
 import {
+  Anchor,
   AppShell as MantineAppShell,
+  Box,
   Burger,
   Button,
   Group,
@@ -15,7 +17,7 @@ import { useAuth } from "../auth/AuthContext";
 import { useMe } from "../auth/useMe";
 import { buildNav } from "./nav";
 import { strings } from "../lib/strings";
-import { Icon } from "../components/layout/Icon";
+import { tokens } from "../theme";
 
 export function AppShell() {
   const { logout } = useAuth();
@@ -27,12 +29,17 @@ export function AppShell() {
   return (
     <MantineAppShell
       header={{ height: 56 }}
-      navbar={{ width: 248, breakpoint: "sm", collapsed: { mobile: !opened } }}
+      navbar={{ width: 240, breakpoint: "sm", collapsed: { mobile: !opened } }}
       padding="lg"
     >
-      <MantineAppShell.Header>
+      <MantineAppShell.Header
+        style={{
+          backgroundColor: tokens.cardBg,
+          borderBottom: `1px solid ${tokens.hairline}`,
+        }}
+      >
         <Group h="100%" px="md" justify="space-between" wrap="nowrap">
-          <Group gap="sm" wrap="nowrap">
+          <Group gap="md" wrap="nowrap">
             <Burger
               opened={opened}
               onClick={toggle}
@@ -40,9 +47,34 @@ export function AppShell() {
               size="sm"
               aria-label="Toggle navigation"
             />
-            <Text fw={700} size="md">
-              {strings.appName}
-            </Text>
+            <Anchor
+              component={RouterLink}
+              to="/"
+              underline="never"
+              style={{ color: "inherit" }}
+            >
+              <Group gap="xs" wrap="nowrap">
+                <Box
+                  style={{
+                    width: 30,
+                    height: 30,
+                    borderRadius: 8,
+                    backgroundColor: tokens.tile.mint.bg,
+                    color: tokens.tile.mint.text,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontWeight: 600,
+                    fontSize: 14,
+                  }}
+                >
+                  {strings.appName.charAt(0)}
+                </Box>
+                <Text fw={600} size="md" style={{ color: tokens.text }}>
+                  {strings.appName}
+                </Text>
+              </Group>
+            </Anchor>
           </Group>
           <Group gap="sm" wrap="nowrap">
             <Menu position="bottom-end" withinPortal>
@@ -64,19 +96,28 @@ export function AppShell() {
         </Group>
       </MantineAppShell.Header>
 
-      <MantineAppShell.Navbar p="sm">
+      <MantineAppShell.Navbar
+        p="md"
+        style={{
+          backgroundColor: tokens.menuBg,
+          borderRight: "none",
+        }}
+      >
         <ScrollArea>
-          <Stack gap={4}>
+          <Stack gap="md">
             {nav.map((group) => (
-              <Stack key={group.label ?? "_home"} gap={2} mt="sm">
+              <Stack key={group.label ?? "_home"} gap={4}>
                 {group.label ? (
                   <Text
                     size="xs"
-                    c="dimmed"
-                    fw={600}
+                    fw={500}
                     tt="uppercase"
-                    pl="sm"
-                    pb={4}
+                    px="md"
+                    py={4}
+                    style={{
+                      color: tokens.menuMutedText,
+                      letterSpacing: 0.5,
+                    }}
                   >
                     {group.label}
                   </Text>
@@ -94,21 +135,20 @@ export function AppShell() {
                       onClick={close}
                       style={{
                         display: "block",
-                        padding: "8px 12px",
-                        borderRadius: 8,
+                        padding: "10px 14px",
+                        borderRadius: 999,
                         backgroundColor: active
-                          ? "var(--mantine-color-navy-0)"
+                          ? tokens.menuActiveBg
                           : "transparent",
                         color: active
-                          ? "var(--mantine-color-navy-7)"
-                          : "var(--mantine-color-text)",
+                          ? tokens.menuActiveText
+                          : tokens.menuText,
                         fontWeight: active ? 600 : 400,
+                        fontSize: 14,
+                        transition: "background-color 120ms ease",
                       }}
                     >
-                      <Group gap="sm" wrap="nowrap">
-                        <Icon name={item.icon} size={18} />
-                        <Text size="sm">{item.label}</Text>
-                      </Group>
+                      {item.label}
                     </UnstyledButton>
                   );
                 })}
@@ -118,7 +158,7 @@ export function AppShell() {
         </ScrollArea>
       </MantineAppShell.Navbar>
 
-      <MantineAppShell.Main>
+      <MantineAppShell.Main style={{ backgroundColor: tokens.pageBg }}>
         <Outlet />
       </MantineAppShell.Main>
     </MantineAppShell>

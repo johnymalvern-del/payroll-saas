@@ -116,3 +116,5 @@ class PreviewEmployeeOut(BaseModel):
     available: bool = True
     reason_unavailable: str | None = None
     as_of: date | None = None
+    unacknowledged_formulas: list[str] = Field(default_factory=list)
+    demo_values: bool = False

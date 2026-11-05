@@ -1,7 +1,31 @@
 import { createTheme } from "@mantine/core";
 
-// Single source of colours, fonts, radius, shadows, spacing.
-// Every page uses semantic names from theme/colors.ts — no literals elsewhere.
+// Single source of colours, fonts, radii, shadows, spacing for the Mint look.
+// Pages must not hard-code hexes; use tokens or Mantine CSS vars.
+
+export const tokens = {
+  pageBg: "#F3FBF7",
+  cardBg: "#FFFFFF",
+  text: "#0F2A24",
+  muted: "#5B7A71",
+  hairline: "#D5EBE2",
+  menuBg: "#0F2A24",
+  menuText: "#BFE8DA",
+  menuMutedText: "rgba(191,232,218,0.55)",
+  menuActiveBg: "#C9F3E0",
+  menuActiveText: "#0B5A43",
+  tile: {
+    mint: { bg: "#C9F3E0", text: "#0B5A43" },
+    yellow: { bg: "#FFE8A3", text: "#6B4E00" },
+    lavender: { bg: "#DAD5FF", text: "#3B2F9E" },
+    pink: { bg: "#FFD2DB", text: "#9A1F3E" },
+  },
+} as const;
+
+// Mantine palettes tuned to hit the token values at the indexes Mantine uses.
+// Index 7 = dark text / primary bg / light-variant text (primaryShade.light=7)
+// Index 0 = very light bg for light-variant backgrounds
+// Index 2 = tile background tints
 
 export const theme = createTheme({
   primaryColor: "navy",
@@ -9,59 +33,83 @@ export const theme = createTheme({
   defaultRadius: "md",
   focusRing: "auto",
   fontFamily:
-    "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+    "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
   fontFamilyMonospace:
     "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace",
   headings: {
     fontFamily:
-      "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-    fontWeight: "600",
+      "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+    fontWeight: "500",
     sizes: {
-      h1: { fontSize: "1.75rem", lineHeight: "1.25", fontWeight: "600" },
-      h2: { fontSize: "1.375rem", lineHeight: "1.3", fontWeight: "600" },
-      h3: { fontSize: "1.125rem", lineHeight: "1.35", fontWeight: "600" },
+      h1: { fontSize: "2rem", lineHeight: "1.2", fontWeight: "500" },
+      h2: { fontSize: "1.75rem", lineHeight: "1.25", fontWeight: "500" },
+      h3: { fontSize: "1.25rem", lineHeight: "1.3", fontWeight: "500" },
     },
   },
   colors: {
+    // Primary: dark green-black. Index 7 = #0F2A24 (button bg, side menu bg).
     navy: [
-      "#E6EEF3", "#C2D6E3", "#9DBDCF", "#5B8DAF",
-      "#2E688F", "#0B3D5C", "#0A3651", "#082C43",
-      "#062235", "#041927",
+      "#F0F5F2", "#DCE7E1", "#B8CFC3", "#8DAF9E", "#668C7B",
+      "#446858", "#1F4A3B", "#0F2A24", "#081612", "#030907",
     ],
-    accent: [
-      "#FDF1E7", "#FAE2CC", "#F5C4A0", "#EFA570",
-      "#EA8643", "#C45F22", "#AF531D", "#8F4317",
-      "#713510", "#522608",
-    ],
+    // Semantic "approved" = mint. Index 7 = #0B5A43, index 2 = #C9F3E0.
     approved: [
-      "#E7F8EE", "#C6EED4", "#A2E3B8", "#7AD89B",
-      "#57CD7F", "#2EA85B", "#1F8A47", "#186F39",
-      "#12552B", "#0B3B1D",
+      "#F0FCF6", "#DCF6E9", "#C9F3E0", "#9FEBC9", "#6EDFAE",
+      "#3FCE8F", "#24B270", "#0B5A43", "#083F2F", "#042A1F",
     ],
+    // Semantic "pending" = yellow. Index 7 = #6B4E00, index 2 = #FFE8A3.
     pending: [
-      "#FFF4E0", "#FFE4B8", "#FFD28C", "#FFBD5C",
-      "#FFA92E", "#D98600", "#B06B00", "#855100",
-      "#593700", "#2C1C00",
+      "#FFFDF5", "#FFF5DC", "#FFE8A3", "#FFDA6E", "#FFCB3A",
+      "#E8B41A", "#C89600", "#6B4E00", "#4A3500", "#2A1F00",
     ],
+    // Semantic "problem" = pink. Index 7 = #9A1F3E, index 2 = #FFD2DB.
     problem: [
-      "#FDECEE", "#FAC8CD", "#F5A0A9", "#EE7482",
-      "#E64B5E", "#C42B3D", "#A02030", "#7C1826",
-      "#59101B", "#2D0810",
+      "#FFF5F7", "#FFE0E6", "#FFD2DB", "#FFB0BF", "#FF8DA2",
+      "#F06080", "#C93F5F", "#9A1F3E", "#6E1428", "#420B18",
     ],
+    // Semantic "info" = lavender. Index 7 = #3B2F9E, index 2 = #DAD5FF.
+    info: [
+      "#F8F7FF", "#EDE9FF", "#DAD5FF", "#C0B8FF", "#A096FF",
+      "#7C6EEB", "#5B4DCA", "#3B2F9E", "#2A2178", "#1A134E",
+    ],
+    // Accent kept for backwards-compat with colors.accent references.
+    accent: [
+      "#FFF5EB", "#FDE5C8", "#F8CC9A", "#F0B070", "#E89345",
+      "#D97624", "#C45F22", "#A84E1B", "#7A3A14", "#4E250D",
+    ],
+  },
+  radius: {
+    xs: "4px",
+    sm: "8px",
+    md: "14px",
+    lg: "18px",
+    xl: "9999px",
   },
   shadows: {
-    xs: "0 1px 2px rgba(15, 23, 42, 0.04)",
-    sm: "0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 3px rgba(15, 23, 42, 0.04)",
-    md: "0 4px 12px rgba(15, 23, 42, 0.08)",
-    lg: "0 12px 32px rgba(15, 23, 42, 0.10)",
+    xs: "0 1px 2px rgba(15,42,36,0.04)",
+    sm: "0 1px 2px rgba(15,42,36,0.06)",
+    md: "0 2px 6px rgba(15,42,36,0.05)",
+    lg: "0 4px 12px rgba(15,42,36,0.06)",
   },
   components: {
-    Button: { defaultProps: { radius: "md" } },
-    Paper: { defaultProps: { radius: "md" } },
-    Card: { defaultProps: { radius: "md", shadow: "sm", padding: "lg" } },
-    Badge: { defaultProps: { radius: "sm" } },
-    Modal: { defaultProps: { radius: "md", centered: true } },
-    Alert: { defaultProps: { radius: "md" } },
+    Button: {
+      defaultProps: { radius: "xl" },
+    },
+    Card: {
+      defaultProps: { withBorder: true, radius: "md" },
+      styles: {
+        root: {
+          borderColor: tokens.hairline,
+          boxShadow: "none",
+        },
+      },
+    },
+    Paper: {
+      defaultProps: { radius: "md" },
+      styles: {
+        root: { borderColor: tokens.hairline },
+      },
+    },
     Table: {
       defaultProps: {
         horizontalSpacing: "md",
@@ -70,12 +118,46 @@ export const theme = createTheme({
       },
       styles: {
         th: {
-          backgroundColor: "#F7F8FA",
-          color: "#475569",
-          fontWeight: 600,
+          backgroundColor: "transparent",
+          color: tokens.muted,
+          fontWeight: 500,
           fontSize: 12,
           textTransform: "uppercase",
-          letterSpacing: 0.4,
+          letterSpacing: 0.3,
+          borderBottom: `1px solid ${tokens.hairline}`,
+        },
+        td: {
+          borderBottom: `1px solid ${tokens.hairline}`,
+        },
+        tr: {
+          "&:hover": {
+            backgroundColor: `${tokens.pageBg} !important`,
+          },
+        },
+      },
+    },
+    Badge: {
+      defaultProps: { radius: "sm" },
+    },
+    Modal: {
+      defaultProps: { radius: "md", centered: true },
+    },
+    Alert: {
+      defaultProps: { radius: "md" },
+    },
+    TextInput: { defaultProps: { radius: "md" } },
+    Textarea: { defaultProps: { radius: "md" } },
+    Select: { defaultProps: { radius: "md" } },
+    MultiSelect: { defaultProps: { radius: "md" } },
+    NumberInput: { defaultProps: { radius: "md" } },
+    PasswordInput: { defaultProps: { radius: "md" } },
+    Tabs: {
+      styles: {
+        tab: {
+          "&[data-active]": {
+            backgroundColor: tokens.tile.mint.bg,
+            color: tokens.tile.mint.text,
+          },
         },
       },
     },

@@ -23,6 +23,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { PayPeriodsPage } from "./pages/PayPeriodsPage";
 import { OwnPayslipsPage } from "./pages/OwnPayslipsPage";
 import { PayPeriodDetailPage } from "./pages/PayPeriodDetailPage";
+import { PayslipSoFarPage } from "./pages/PayslipSoFarPage";
 
 export default function App() {
   return (
@@ -54,6 +55,7 @@ export default function App() {
           <Route path="setup/devices" element={<DevicesPage />} />
           <Route path="payroll/pay-periods" element={<PayPeriodsPage />} />
           <Route path="payroll/pay-periods/:id" element={<PayPeriodDetailPage />} />
+          <Route path="payroll/pay-periods/:id/payslip-so-far/:employeeId" element={<PayslipSoFarPage />} />
           <Route path="payroll/change-requests" element={<ChangeRequestsPage />} />
           <Route path="audit-log" element={<AuditLogPage />} />
           <Route path="setup" element={<SetupLayout />}>

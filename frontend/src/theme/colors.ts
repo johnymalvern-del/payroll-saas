@@ -1,11 +1,11 @@
-// Semantic color aliases. These names live only here and in theme.ts.
-// Pages import this map; no page writes a literal color name again.
+// Semantic colour aliases. Names resolve to Mantine palettes defined in theme.ts.
+// Pages import this map; no page writes a literal hex again.
 export const colors = {
   approved: "approved",
   pending: "pending",
   problem: "problem",
   inactive: "gray",
-  info: "navy",
+  info: "info",
   warning: "pending",
   accent: "accent",
 } as const;

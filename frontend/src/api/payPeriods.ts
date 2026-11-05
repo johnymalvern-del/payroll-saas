@@ -237,3 +237,62 @@ export async function fetchReopenLog(id: string): Promise<ReopenLogOut[]> {
   if (!res.ok) throw await parseError(res);
   return (await res.json()) as ReopenLogOut[];
 }
+
+export type PreviewEmployeeAsOfOut = {
+  employee_id: string;
+  employee_code: string;
+  employee_name: string;
+  pay_period_id: string;
+  revision: number | null;
+  status: string;
+  as_of: string | null;
+  available: boolean;
+  reason_unavailable: string | null;
+  gross: string | null;
+  paye: string | null;
+  net: string | null;
+  warnings: string[];
+  lines: {
+    earning_type_code: string;
+    earning_type_name: string;
+    rate_source: string;
+    amount: string;
+    minutes: number | null;
+  }[];
+  deductions: {
+    deduction_type_code: string;
+    deduction_type_name: string;
+    amount: string;
+  }[];
+  unacknowledged_formulas: string[];
+  demo_values: boolean;
+};
+
+export async function previewEmployeeAsOf(
+  periodId: string,
+  employeeId: string,
+  asOf: string,
+): Promise<PreviewEmployeeAsOfOut> {
+  const url = `/api/v1/payroll/pay-periods/${periodId}/preview/${employeeId}?as_of=${encodeURIComponent(asOf)}`;
+  const res = await fetch(url, { credentials: "include" });
+  if (!res.ok) {
+    const errBody = (await res.json().catch(() => ({}))) as {
+      error?: { code?: string; message?: string; details?: unknown };
+    };
+    const apiMsg =
+      errBody.error?.message ??
+      (res.status === 403 ? "forbidden" : `HTTP ${res.status}`);
+    const apiCode = errBody.error?.code ?? "http_error";
+    const e = new Error(apiMsg) as Error & {
+      code?: string;
+      status?: number;
+      details?: unknown;
+    };
+    e.code = apiCode;
+    e.status = res.status;
+    e.details = errBody.error?.details ?? null;
+    throw e;
+  }
+return (await res.json()) as PreviewEmployeeAsOfOut;
+}
+
