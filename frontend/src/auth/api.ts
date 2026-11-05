@@ -1,5 +1,6 @@
 import { parseApiError, type ApiError } from "../api/errors";
 import { getTenantSlug } from "../api/tenant";
+import { getAccessToken } from "../api/client";
 
 const BASE = "/api/v1";
 
@@ -67,10 +68,15 @@ export async function changePasswordRequest(params: {
   currentPassword: string;
   newPassword: string;
 }): Promise<void> {
+  const token = getAccessToken();
   const res = await fetch(`${BASE}/auth/change-password`, {
     method: "POST",
     credentials: "include",
-    headers: { "Content-Type": "application/json", ...tenantHeaders() },
+    headers: {
+      "Content-Type": "application/json",
+      ...tenantHeaders(),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     body: JSON.stringify({
       current_password: params.currentPassword,
       new_password: params.newPassword,

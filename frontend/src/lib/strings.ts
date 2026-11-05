@@ -29,6 +29,47 @@ export function exceptionTypeLabel(code: string): string {
 }
 
 export const strings = {
+
+  clockIn: {
+    title: "Clock in",
+    intro: "Enter this device's key once. It will be stored on this browser.",
+    deviceKeyLabel: "Device key",
+    deviceKeyPlaceholder: "Paste the key issued by HR",
+    saveKey: "Save device key",
+    resetDevice: "Reset this device",
+    codeLabel: "Employee code",
+    findEmployee: "Find employee",
+    startCamera: "Start camera",
+    stopCamera: "Stop camera",
+    clockInNow: "Clock in",
+    submitting: "Submitting…",
+    success: "Clocked in at {time}",
+    noMatch: "No employee matches that code.",
+    lookupFailed: "Lookup failed.",
+    submitFailed: "Clock-in failed.",
+    needPhoto: "Start the camera before clocking in.",
+    cameraDenied: "Camera access denied or unavailable.",
+  },
+  devices: {
+    title: "Devices",
+    add: "Add device",
+    addTitle: "New device",
+    colName: "Name",
+    colType: "Type",
+    colStatus: "Status",
+    colLastSeen: "Last seen",
+    never: "—",
+    rotate: "Rotate key",
+    siteIdLabel: "Site id",
+    nameLabel: "Name",
+    typeLabel: "Type",
+    create: "Create",
+    keyOnce: "Device key (shown once)",
+    keyRotated: "New device key",
+    keyCopyNow: "Copy this key now. It will not be shown again.",
+    loadFailed: "Could not load devices.",
+  },
+
   appName: "Payroll",
   genericError: "Something went wrong. Please try again.",
   common: {
