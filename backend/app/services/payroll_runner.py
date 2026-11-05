@@ -319,6 +319,7 @@ def _build_attendance_earnings(
     db: Session,
     employee: Employee,
     pay_period: PayPeriod,
+    through_date: date | None = None,
 ) -> tuple[list[P.EarningLine], list[str], dict]:
     settings = _load_settings(db)
     warnings: list[str] = []
@@ -357,6 +358,8 @@ def _build_attendance_earnings(
             AttendanceDay.work_date <= pay_period.end_date,
         )
     ).all())
+    if through_date is not None:
+        days = [d for d in days if d.work_date <= through_date]
     if not days:
         return [], warnings, snapshot
 
@@ -642,9 +645,12 @@ def _build_attendance_earnings(
 
 def _build_all_earnings(
     db: Session, employee: Employee, pay_period: PayPeriod,
+    through_date: date | None = None,
 ) -> tuple[list[P.EarningLine], list[str], dict]:
     fixed = _build_fixed_earnings(db, employee, pay_period.pay_date)
-    attn, warnings, snapshot = _build_attendance_earnings(db, employee, pay_period)
+    attn, warnings, snapshot = _build_attendance_earnings(
+        db, employee, pay_period, through_date=through_date,
+    )
     return fixed + attn, warnings, snapshot
 
 
@@ -1032,3 +1038,103 @@ def reopen(db: Session, user, pay_period: PayPeriod, reason: str) -> PeriodReope
         old_value={"status": "locked"}, new_value={"status": "open", "reason": reason},
     )
     return log
+
+
+def run_preview_for_employee_as_of(
+    db: Session,
+    user,
+    pay_period: PayPeriod,
+    employee: Employee,
+    as_of: date,
+) -> dict:
+    """Read-only payslip-so-far for one employee, up to `as_of`.
+
+    No PayrollRun row, no Payslip row, no audit, no preview purge.
+    Refuses locked periods (409). Monthly salaried refused with typed
+    reason until the proration rule is confirmed (see §10).
+    """
+    if pay_period.status == "locked":
+        raise AppError(
+            "period_locked",
+            "Cannot preview a finalised period; reopen it first",
+            409,
+        )
+    if as_of < pay_period.start_date:
+        raise AppError(
+            "as_of_before_period_start",
+            f"as_of ({as_of.isoformat()}) is before period start "
+            f"({pay_period.start_date.isoformat()})",
+            422,
+        )
+    if as_of > pay_period.end_date:
+        as_of = pay_period.end_date
+
+    base = {
+        "employee_id": employee.id,
+        "employee_code": employee.employee_code,
+        "employee_name": f"{employee.first_name} {employee.last_name}".strip(),
+        "pay_period_id": pay_period.id,
+        "revision": None,
+        "status": "as_of",
+        "as_of": as_of,
+        "gross": None,
+        "paye": None,
+        "net": None,
+        "warnings": [],
+        "lines": [],
+        "deductions": [],
+        "available": False,
+        "reason_unavailable": None,
+    }
+
+    if employee.pay_basis not in ("hourly", "daily"):
+        base["reason_unavailable"] = "monthly_proration_pending"
+        return base
+
+    config = build_pipeline_config(db, employee, pay_period.pay_date)
+    earnings, attn_warnings, attn_snapshot = _build_all_earnings(
+        db, employee, pay_period, through_date=as_of,
+    )
+    deductions = _build_deductions(db, employee, as_of)
+    draft = P.run_pipeline(config, earnings, deductions, [])
+    if draft.refused:
+        base["reason_unavailable"] = draft.refusal_code or "compute_refused"
+        base["warnings"] = list(attn_warnings) + [
+            draft.refusal_message or "",
+        ]
+        return base
+
+    base["available"] = True
+    base["gross"] = draft.gross
+    base["paye"] = draft.paye
+    base["net"] = draft.net
+    base["warnings"] = list(attn_warnings)
+    base["lines"] = [
+        {
+            "earning_type_code": (
+                ln.source_ref.get("earning_type_code", "")
+                if ln.source_ref else ""
+            ),
+            "earning_type_name": ln.label,
+            "rate_source": (
+                "attendance"
+                if ln.source_ref and ln.source_ref.get("attendance_derived")
+                else "fixed"
+            ),
+            "amount": ln.amount,
+            "minutes": (
+                ln.source_ref.get("minutes")
+                if ln.source_ref else None
+            ),
+        }
+        for ln in earnings
+    ]
+    base["deductions"] = [
+        {
+            "deduction_type_code": getattr(d, "code", "") or "",
+            "deduction_type_name": getattr(d, "label", "") or "",
+            "amount": d.amount,
+        }
+        for d in deductions
+    ]
+    return base

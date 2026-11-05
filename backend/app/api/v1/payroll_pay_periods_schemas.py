@@ -40,15 +40,15 @@ class PreviewSummaryRow(BaseModel):
     employee_id: uuid.UUID
     employee_code: str
     employee_name: str
-    gross: Decimal
-    paye: Decimal
-    net: Decimal
+    gross: Decimal | None = None
+    paye: Decimal | None = None
+    net: Decimal | None = None
     warnings: list[str] = Field(default_factory=list)
 
 
 class PreviewOut(BaseModel):
     run_id: uuid.UUID
-    revision: int
+    revision: int | None = None
     status: str
     unacknowledged_formulas: list[str] = Field(default_factory=list)
     items: list[PreviewSummaryRow]
@@ -113,3 +113,6 @@ class PreviewEmployeeOut(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     lines: list[PreviewEmployeeLineOut] = Field(default_factory=list)
     deductions: list[PreviewEmployeeDeductionOut] = Field(default_factory=list)
+    available: bool = True
+    reason_unavailable: str | None = None
+    as_of: date | None = None

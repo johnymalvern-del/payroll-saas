@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
+from datetime import date
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
@@ -186,7 +187,10 @@ def preview_employee(
     employee_id: uuid.UUID,
     db: TenantDbDep,
     user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+    as_of: date | None = Query(None),
 ) -> PreviewEmployeeOut:
+    if as_of is not None:
+        return _preview_as_of(db, user, period_id, employee_id, as_of)
     period = db.scalar(select(PayPeriod).where(PayPeriod.id == period_id))
     if period is None:
         raise AppError("not_found", "Pay period not found", 404)
