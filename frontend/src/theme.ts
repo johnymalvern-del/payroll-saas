@@ -1,35 +1,37 @@
 import { createTheme } from "@mantine/core";
 
-// Single source of colours, fonts, radii, shadows, spacing for the Mint look.
-// Pages must not hard-code hexes; use tokens or Mantine CSS vars.
+// "Indigo Ledger" — modern fintech palette.
+// Single source of colours, fonts, radii. Pages must not hard-code hexes.
 
 export const tokens = {
-  pageBg: "#F3FBF7",
+  pageBg: "#F7F6F3",            // warm cream
   cardBg: "#FFFFFF",
-  text: "#0F2A24",
-  muted: "#5B7A71",
-  hairline: "#D5EBE2",
-  menuBg: "#0F2A24",
-  menuText: "#BFE8DA",
-  menuMutedText: "rgba(191,232,218,0.55)",
-  menuActiveBg: "#C9F3E0",
-  menuActiveText: "#0B5A43",
+  text: "#0F172A",              // ink
+  muted: "#64748B",             // slate
+  hairline: "#E2E8F0",
+
+  menuBgFrom: "#171233",        // deep indigo-black
+  menuBgTo: "#0E0A20",          // deeper violet-black
+  menuText: "#A5A3B8",          // muted lavender-grey
+  menuMutedText: "#6B6883",     // section labels
+  menuActiveFrom: "#4F46E5",    // indigo
+  menuActiveTo: "#7C3AED",      // violet
+  menuActiveText: "#FFFFFF",
+
+  logoFrom: "#6366F1",
+  logoTo: "#8B5CF6",
+
   tile: {
-    mint: { bg: "#C9F3E0", text: "#0B5A43" },
-    yellow: { bg: "#FFE8A3", text: "#6B4E00" },
-    lavender: { bg: "#DAD5FF", text: "#3B2F9E" },
-    pink: { bg: "#FFD2DB", text: "#9A1F3E" },
+    mint: { bg: "#C7F0E5", text: "#115E52" },      // teal (not green)
+    yellow: { bg: "#FDE68A", text: "#78350F" },    // honey
+    lavender: { bg: "#DDD6FE", text: "#4C1D95" },  // vivid violet
+    pink: { bg: "#FECDD3", text: "#881337" },      // rose
   },
 } as const;
 
-// Mantine palettes tuned to hit the token values at the indexes Mantine uses.
-// Index 7 = dark text / primary bg / light-variant text (primaryShade.light=7)
-// Index 0 = very light bg for light-variant backgrounds
-// Index 2 = tile background tints
-
 export const theme = createTheme({
   primaryColor: "navy",
-  primaryShade: { light: 7, dark: 5 },
+  primaryShade: { light: 6, dark: 4 },
   defaultRadius: "md",
   focusRing: "auto",
   fontFamily:
@@ -47,35 +49,35 @@ export const theme = createTheme({
     },
   },
   colors: {
-    // Primary: dark green-black. Index 7 = #0F2A24 (button bg, side menu bg).
+    // Primary: rich indigo. Index 6 = #4F46E5 (filled Button bg).
     navy: [
-      "#F0F5F2", "#DCE7E1", "#B8CFC3", "#8DAF9E", "#668C7B",
-      "#446858", "#1F4A3B", "#0F2A24", "#081612", "#030907",
+      "#EEF2FF", "#E0E7FF", "#C7D2FE", "#A5B4FC", "#818CF8",
+      "#6366F1", "#4F46E5", "#4338CA", "#3730A3", "#312E81",
     ],
-    // Semantic "approved" = mint. Index 7 = #0B5A43, index 2 = #C9F3E0.
+    // Semantic "approved" = teal. Index 7 = #0F766E, index 2 = #99F6E4.
     approved: [
-      "#F0FCF6", "#DCF6E9", "#C9F3E0", "#9FEBC9", "#6EDFAE",
-      "#3FCE8F", "#24B270", "#0B5A43", "#083F2F", "#042A1F",
+      "#F0FDFA", "#CCFBF1", "#99F6E4", "#5EEAD4", "#2DD4BF",
+      "#14B8A6", "#0D9488", "#0F766E", "#115E59", "#134E4A",
     ],
-    // Semantic "pending" = yellow. Index 7 = #6B4E00, index 2 = #FFE8A3.
+    // Semantic "pending" = honey/amber. Index 7 = #B45309, index 2 = #FDE68A.
     pending: [
-      "#FFFDF5", "#FFF5DC", "#FFE8A3", "#FFDA6E", "#FFCB3A",
-      "#E8B41A", "#C89600", "#6B4E00", "#4A3500", "#2A1F00",
+      "#FFFBEB", "#FEF3C7", "#FDE68A", "#FCD34D", "#FBBF24",
+      "#F59E0B", "#D97706", "#B45309", "#92400E", "#78350F",
     ],
-    // Semantic "problem" = pink. Index 7 = #9A1F3E, index 2 = #FFD2DB.
+    // Semantic "problem" = rose. Index 7 = #BE123C, index 2 = #FECDD3.
     problem: [
-      "#FFF5F7", "#FFE0E6", "#FFD2DB", "#FFB0BF", "#FF8DA2",
-      "#F06080", "#C93F5F", "#9A1F3E", "#6E1428", "#420B18",
+      "#FFF1F2", "#FFE4E6", "#FECDD3", "#FDA4AF", "#FB7185",
+      "#F43F5E", "#E11D48", "#BE123C", "#9F1239", "#881337",
     ],
-    // Semantic "info" = lavender. Index 7 = #3B2F9E, index 2 = #DAD5FF.
+    // Semantic "info" = violet. Index 7 = #6D28D9, index 2 = #DDD6FE.
     info: [
-      "#F8F7FF", "#EDE9FF", "#DAD5FF", "#C0B8FF", "#A096FF",
-      "#7C6EEB", "#5B4DCA", "#3B2F9E", "#2A2178", "#1A134E",
+      "#F5F3FF", "#EDE9FE", "#DDD6FE", "#C4B5FD", "#A78BFA",
+      "#8B5CF6", "#7C3AED", "#6D28D9", "#5B21B6", "#4C1D95",
     ],
-    // Accent kept for backwards-compat with colors.accent references.
+    // Accent kept for backwards-compat.
     accent: [
-      "#FFF5EB", "#FDE5C8", "#F8CC9A", "#F0B070", "#E89345",
-      "#D97624", "#C45F22", "#A84E1B", "#7A3A14", "#4E250D",
+      "#FFF7ED", "#FFEDD5", "#FED7AA", "#FDBA74", "#FB923C",
+      "#F97316", "#EA580C", "#C2410C", "#9A3412", "#7C2D12",
     ],
   },
   radius: {
@@ -86,15 +88,13 @@ export const theme = createTheme({
     xl: "9999px",
   },
   shadows: {
-    xs: "0 1px 2px rgba(15,42,36,0.04)",
-    sm: "0 1px 2px rgba(15,42,36,0.06)",
-    md: "0 2px 6px rgba(15,42,36,0.05)",
-    lg: "0 4px 12px rgba(15,42,36,0.06)",
+    xs: "0 1px 2px rgba(15,23,42,0.04)",
+    sm: "0 1px 2px rgba(15,23,42,0.06)",
+    md: "0 2px 6px rgba(15,23,42,0.05)",
+    lg: "0 4px 12px rgba(15,23,42,0.06)",
   },
   components: {
-    Button: {
-      defaultProps: { radius: "xl" },
-    },
+    Button: { defaultProps: { radius: "xl" } },
     Card: {
       defaultProps: { withBorder: true, radius: "md" },
       styles: {
@@ -106,9 +106,7 @@ export const theme = createTheme({
     },
     Paper: {
       defaultProps: { radius: "md" },
-      styles: {
-        root: { borderColor: tokens.hairline },
-      },
+      styles: { root: { borderColor: tokens.hairline } },
     },
     Table: {
       defaultProps: {
@@ -126,9 +124,7 @@ export const theme = createTheme({
           letterSpacing: 0.3,
           borderBottom: `1px solid ${tokens.hairline}`,
         },
-        td: {
-          borderBottom: `1px solid ${tokens.hairline}`,
-        },
+        td: { borderBottom: `1px solid ${tokens.hairline}` },
         tr: {
           "&:hover": {
             backgroundColor: `${tokens.pageBg} !important`,
@@ -136,15 +132,9 @@ export const theme = createTheme({
         },
       },
     },
-    Badge: {
-      defaultProps: { radius: "sm" },
-    },
-    Modal: {
-      defaultProps: { radius: "md", centered: true },
-    },
-    Alert: {
-      defaultProps: { radius: "md" },
-    },
+    Badge: { defaultProps: { radius: "sm" } },
+    Modal: { defaultProps: { radius: "md", centered: true } },
+    Alert: { defaultProps: { radius: "md" } },
     TextInput: { defaultProps: { radius: "md" } },
     Textarea: { defaultProps: { radius: "md" } },
     Select: { defaultProps: { radius: "md" } },
@@ -155,11 +145,21 @@ export const theme = createTheme({
       styles: {
         tab: {
           "&[data-active]": {
-            backgroundColor: tokens.tile.mint.bg,
-            color: tokens.tile.mint.text,
+            backgroundColor: tokens.tile.lavender.bg,
+            color: tokens.tile.lavender.text,
           },
         },
       },
     },
   },
+});
+
+// Global body background — makes login page and any page outside AppShell
+// pick up the cream page colour.
+export const cssVariablesResolver = () => ({
+  variables: {
+    "--mantine-color-body": tokens.pageBg,
+  },
+  light: {},
+  dark: {},
 });

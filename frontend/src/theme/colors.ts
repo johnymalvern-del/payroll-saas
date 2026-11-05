@@ -1,13 +1,13 @@
-// Semantic colour aliases. Names resolve to Mantine palettes defined in theme.ts.
-// Pages import this map; no page writes a literal hex again.
+// Semantic colour aliases (resolve to Mantine palettes in theme.ts).
+// Pages import this map; no page writes a literal hex.
 export const colors = {
-  approved: "approved",
-  pending: "pending",
-  problem: "problem",
+  approved: "approved",   // teal
+  pending: "pending",     // honey
+  problem: "problem",     // rose
   inactive: "gray",
-  info: "info",
+  info: "info",           // violet
   warning: "pending",
-  accent: "accent",
+  accent: "accent",       // orange
 } as const;
 
 export type SemanticColor = (typeof colors)[keyof typeof colors];

@@ -56,16 +56,17 @@ export function AppShell() {
               <Group gap="xs" wrap="nowrap">
                 <Box
                   style={{
-                    width: 30,
-                    height: 30,
-                    borderRadius: 8,
-                    backgroundColor: tokens.tile.mint.bg,
-                    color: tokens.tile.mint.text,
+                    width: 32,
+                    height: 32,
+                    borderRadius: 10,
+                    background: `linear-gradient(135deg, ${tokens.logoFrom} 0%, ${tokens.logoTo} 100%)`,
+                    color: "#FFFFFF",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    fontWeight: 600,
-                    fontSize: 14,
+                    fontWeight: 700,
+                    fontSize: 15,
+                    letterSpacing: 0.5,
                   }}
                 >
                   {strings.appName.charAt(0)}
@@ -99,7 +100,7 @@ export function AppShell() {
       <MantineAppShell.Navbar
         p="md"
         style={{
-          backgroundColor: tokens.menuBg,
+          background: `linear-gradient(180deg, ${tokens.menuBgFrom} 0%, ${tokens.menuBgTo} 100%)`,
           borderRight: "none",
         }}
       >
@@ -116,7 +117,8 @@ export function AppShell() {
                     py={4}
                     style={{
                       color: tokens.menuMutedText,
-                      letterSpacing: 0.5,
+                      letterSpacing: 0.6,
+                      fontSize: 10,
                     }}
                   >
                     {group.label}
@@ -135,10 +137,10 @@ export function AppShell() {
                       onClick={close}
                       style={{
                         display: "block",
-                        padding: "10px 14px",
+                        padding: "10px 16px",
                         borderRadius: 999,
-                        backgroundColor: active
-                          ? tokens.menuActiveBg
+                        background: active
+                          ? `linear-gradient(135deg, ${tokens.menuActiveFrom} 0%, ${tokens.menuActiveTo} 100%)`
                           : "transparent",
                         color: active
                           ? tokens.menuActiveText
@@ -146,6 +148,9 @@ export function AppShell() {
                         fontWeight: active ? 600 : 400,
                         fontSize: 14,
                         transition: "background-color 120ms ease",
+                        boxShadow: active
+                          ? "0 2px 8px rgba(99,102,241,0.35)"
+                          : "none",
                       }}
                     >
                       {item.label}
