@@ -22,6 +22,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.pool import NullPool
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # backend/
 REPO_ROOT = BASE_DIR.parent
@@ -117,6 +118,36 @@ def _assert_subscriber_table(engine: Engine) -> None:
         )
 
 @pytest.fixture(scope="session", autouse=True)
+def _purge_stale_test_dbs() -> Iterator[None]:
+    """Drop leftover test DBs + orphan backends before any test runs.
+
+    A crashed prior pytest run can leave payroll_test_* / tenant-demo /
+    tenant_demo* / tenant-test-* / tenant_test_* alive. Next run's
+    provision_tenant / seed_demo then errors with schema-exists or
+    connection-slot exhaustion.
+    """
+    engine = create_engine(
+        _admin_url("postgres"), isolation_level="AUTOCOMMIT", future=True,
+    )
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT datname FROM pg_database "
+                "WHERE datname LIKE 'payroll_test_%'"
+            )).fetchall()
+            for (name,) in rows:
+                conn.execute(text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :d AND pid <> pg_backend_pid()"
+                ), {"d": name})
+                conn.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
+                print(f"purged stale test DB: {name}")
+    finally:
+        engine.dispose()
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _control_test_database() -> Iterator[None]:
     """Create payroll_control_test, migrate it, yield, drop it on exit."""
     _create_database(TEST_CONTROL_DB, owner="payroll_app")
@@ -159,7 +190,7 @@ def tenant_engine_admin(tenant_db_name: str) -> Iterator[Engine]:
         f"postgresql+psycopg://payroll_test:payroll_test_dev_password"
         f"@localhost:5432/{tenant_db_name}"
     )
-    engine = create_engine(url, future=True)
+    engine = create_engine(url, future=True, poolclass=NullPool)
     try:
         yield engine
     finally:
@@ -171,7 +202,7 @@ def tenant_engine_app(tenant_db_name: str) -> Iterator[Engine]:
         f"postgresql+psycopg://payroll_app:payroll_app_dev_password"
         f"@localhost:5432/{tenant_db_name}"
     )
-    engine = create_engine(url, future=True)
+    engine = create_engine(url, future=True, poolclass=NullPool)
     try:
         yield engine
     finally:

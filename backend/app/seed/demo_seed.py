@@ -555,11 +555,31 @@ def _backfill_exceptions(
         "duplicate", "device_clock_gap", "employee_query",
         "absent_expected", "too_long",
     ]
+    # Skip any cell whose (employee, work_date, type) is already open —
+    # the attendance engine creates open exceptions during recompute and
+    # uq_exception_item_open forbids duplicates.
+    existing: set[tuple] = {
+        (eid, d, t) for eid, d, t in db.execute(
+            select(
+                ExceptionItem.employee_id,
+                ExceptionItem.work_date,
+                ExceptionItem.type,
+            ).where(ExceptionItem.status == "open")
+        ).all()
+    }
     idx = 0
     for t in types_missing:
-        for _ in range(2):
+        placed = 0
+        attempts = 0
+        while placed < 2 and attempts < 10:
             emp = employees[idx % len(employees)]
             d = start_date + timedelta(days=idx % 10)
+            key = (emp.id, d, t)
+            idx += 1
+            attempts += 1
+            if key in existing:
+                continue
+            existing.add(key)
             db.add(ExceptionItem(
                 id=uuid.uuid4(),
                 employee_id=emp.id,
@@ -569,7 +589,7 @@ def _backfill_exceptions(
                 suggested_fix={},
                 status="open",
             ))
-            idx += 1
+            placed += 1
     db.commit()
 
 
