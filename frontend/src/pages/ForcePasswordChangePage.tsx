@@ -13,6 +13,7 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import { useMe } from "../auth/useMe";
 import { strings } from "../lib/strings";
+import { colors } from "../theme/colors";
 
 export function ForcePasswordChangePage() {
   const { loginError, busy, changePassword } = useAuth();
@@ -57,9 +58,9 @@ export function ForcePasswordChangePage() {
       <form onSubmit={onSubmit}>
         <Stack>
           <Title order={2}>{strings.changePassword.title}</Title>
-          <Alert color="blue">{strings.changePassword.intro}</Alert>
-          {loginError ? <Alert color="red">{loginError}</Alert> : null}
-          {localError ? <Alert color="red">{localError}</Alert> : null}
+          <Alert color={colors.info}>{strings.changePassword.intro}</Alert>
+          {loginError ? <Alert color={colors.problem}>{loginError}</Alert> : null}
+          {localError ? <Alert color={colors.problem}>{localError}</Alert> : null}
           <PasswordInput
             label={strings.changePassword.currentLabel}
             value={current}

@@ -14,6 +14,7 @@ import {
 } from "../Adjustments/AdjustmentForm";
 import type { ExceptionRow, ResolveRequest } from "../../api/exceptions";
 import { strings } from "../../lib/strings";
+import { colors } from "../../theme/colors";
 
 type Action = "custom" | "dismiss";
 
@@ -102,8 +103,8 @@ export function ResolveModal({
             { label: strings.exceptions.dismissAction, value: "dismiss" },
           ]}
         />
-        {serverError ? <Alert color="red">{serverError}</Alert> : null}
-        {localError ? <Alert color="red">{localError}</Alert> : null}
+        {serverError ? <Alert color={colors.problem}>{serverError}</Alert> : null}
+        {localError ? <Alert color={colors.problem}>{localError}</Alert> : null}
         {action === "custom" ? (
           <AdjustmentForm
             workDate={exception.work_date}

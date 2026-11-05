@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Alert, Button, Group, Loader, Modal, Stack, Table, TextInput, Title } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { publicHolidaysApi, type PublicHoliday } from "../../api/publicHolidays";
+import { colors } from "../../theme/colors";
 
 export function PublicHolidaysPage() {
   const qc = useQueryClient();
@@ -23,14 +24,14 @@ export function PublicHolidaysPage() {
 
   return (
     <Stack>
-      <Alert color="blue">Country-level ZA holidays load via the loader CLI. This list is for tenant overrides (site/department-specific).</Alert>
+      <Alert color={colors.info}>Country-level ZA holidays load via the loader CLI. This list is for tenant overrides (site/department-specific).</Alert>
       <Group justify="space-between">
         <Title order={3}>Public holidays</Title>
         <Button onClick={() => { setErr(null); setOpen(true); }} data-testid="ph-add">Add override</Button>
       </Group>
-      {err && <Alert color="red" data-testid="ph-error">{err}</Alert>}
+      {err && <Alert color={colors.problem} data-testid="ph-error">{err}</Alert>}
       {list.isLoading ? <Loader /> : list.isError ? (
-        <Alert color="red">Could not load public holidays.</Alert>
+        <Alert color={colors.problem}>Could not load public holidays.</Alert>
       ) : (
         <Table data-testid="ph-table">
           <Table.Thead><Table.Tr><Table.Th>Date</Table.Th><Table.Th>Name</Table.Th><Table.Th>Active</Table.Th><Table.Th /></Table.Tr></Table.Thead>

@@ -32,6 +32,7 @@ import { fetchReasonCodes } from "../api/reasonCodes";
 import { mapErrorCode } from "../api/errors";
 import { getSiteTz } from "../lib/config";
 import { strings } from "../lib/strings";
+import { colors } from "../theme/colors";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -257,7 +258,7 @@ export function AdjustmentsPage() {
       <Title order={2}>{strings.adjustments.bulk.title}</Title>
       {error ? (
         <Alert
-          color="red"
+          color={colors.problem}
           withCloseButton
           onClose={() => setError(null)}
           data-testid="adjustments-bulk-error"
@@ -266,7 +267,7 @@ export function AdjustmentsPage() {
         </Alert>
       ) : null}
       {codesQuery.isError ? (
-        <Alert color="red" data-testid="adjustments-reason-error">
+        <Alert color={colors.problem} data-testid="adjustments-reason-error">
           {strings.adjustments.reasonCodeError}
         </Alert>
       ) : null}
@@ -380,7 +381,7 @@ export function AdjustmentsPage() {
             </Group>
           </Group>
           {overCap ? (
-            <Alert color="yellow" data-testid="adjustments-bulk-over-cap">
+            <Alert color={colors.warning} data-testid="adjustments-bulk-over-cap">
               {strings.adjustments.bulk.overCapWarning}
             </Alert>
           ) : null}

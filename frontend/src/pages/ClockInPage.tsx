@@ -23,6 +23,7 @@ import {
   type EmployeeLookup,
 } from "../api/clockIn";
 import { strings } from "../lib/strings";
+import { colors } from "../theme/colors";
 
 type Phase = "need_key" | "ready" | "submitting" | "success" | "error";
 
@@ -151,7 +152,7 @@ export function ClockInPage() {
         <Card withBorder>
           <Stack>
             <Title order={3}>{strings.clockIn.title}</Title>
-            <Alert color="blue">{strings.clockIn.intro}</Alert>
+            <Alert color={colors.info}>{strings.clockIn.intro}</Alert>
             <PasswordInput
               label={strings.clockIn.deviceKeyLabel}
               value={keyInput}
@@ -183,12 +184,12 @@ export function ClockInPage() {
           </Button>
         </Group>
         {errorMsg && (
-          <Alert color="red" data-testid="clockin-error">
+          <Alert color={colors.problem} data-testid="clockin-error">
             {errorMsg}
           </Alert>
         )}
         {successMsg && (
-          <Alert color="green" data-testid="clockin-success">
+          <Alert color={colors.approved} data-testid="clockin-success">
             {successMsg}
           </Alert>
         )}
@@ -233,14 +234,14 @@ export function ClockInPage() {
               </Button>
             ) : (
               <Button
-                color="gray"
+                color={colors.inactive}
                 onClick={stopCamera}
                 data-testid="clockin-stop-camera"
               >
                 {strings.clockIn.stopCamera}
               </Button>
             )}
-            {cameraError && <Alert color="orange">{cameraError}</Alert>}
+            {cameraError && <Alert color={colors.pending}>{cameraError}</Alert>}
             <Button
               onClick={clockIn}
               disabled={!employee || !cameraOn || phase === "submitting"}

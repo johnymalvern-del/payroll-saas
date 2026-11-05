@@ -13,7 +13,7 @@ if (!rootEl) throw new Error("root element not found");
 
 createRoot(rootEl).render(
   <StrictMode>
-    <MantineProvider theme={theme} defaultColorScheme="auto">
+    <MantineProvider theme={theme} defaultColorScheme="light">
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
           <App />

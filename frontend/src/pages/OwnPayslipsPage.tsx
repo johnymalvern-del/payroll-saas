@@ -23,6 +23,7 @@ import {
 import { useMe } from "../auth/useMe";
 import { mapErrorCode } from "../api/errors";
 import { strings } from "../lib/strings";
+import { colors } from "../theme/colors";
 
 const PAGE_SIZE = 100;
 
@@ -94,7 +95,7 @@ export function OwnPayslipsPage() {
     return (
       <Stack gap="md">
         <Title order={2}>{strings.payslips.title}</Title>
-        <Alert color="blue" data-testid="payslips-auditor-notice">
+        <Alert color={colors.info} data-testid="payslips-auditor-notice">
           {strings.payslips.auditorNotAllowed}
         </Alert>
       </Stack>
@@ -106,7 +107,7 @@ export function OwnPayslipsPage() {
       <Title order={2}>{strings.payslips.title}</Title>
       {pdfError ? (
         <Alert
-          color="red"
+          color={colors.problem}
           withCloseButton
           onClose={() => setPdfError(null)}
           data-testid="payslips-pdf-error"
@@ -216,7 +217,7 @@ export function OwnPayslipsPage() {
             <Loader />
           </Group>
         ) : entry.isError || !entry.data ? (
-          <Alert color="red" data-testid="payslip-detail-error">
+          <Alert color={colors.problem} data-testid="payslip-detail-error">
             {strings.payslips.detailError}
           </Alert>
         ) : (

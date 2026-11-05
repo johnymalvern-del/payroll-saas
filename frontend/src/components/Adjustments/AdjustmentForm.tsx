@@ -20,6 +20,7 @@ import {
 import { fetchReasonCodes } from "../../api/reasonCodes";
 import { getSiteTz } from "../../lib/config";
 import { strings } from "../../lib/strings";
+import { colors } from "../../theme/colors";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -128,9 +129,9 @@ export function AdjustmentForm({
 
   return (
     <Stack gap="sm">
-      {error ? <Alert color="red">{error}</Alert> : null}
+      {error ? <Alert color={colors.problem}>{error}</Alert> : null}
       {codesQuery.isError ? (
-        <Alert color="red" data-testid="adj-reason-error">
+        <Alert color={colors.problem} data-testid="adj-reason-error">
           {strings.adjustments.reasonCodeError}
         </Alert>
       ) : null}

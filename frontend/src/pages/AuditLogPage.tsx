@@ -24,6 +24,7 @@ import {
 } from "../api/auditLog";
 import { mapErrorCode } from "../api/errors";
 import { strings } from "../lib/strings";
+import { colors } from "../theme/colors";
 
 const PAGE_SIZE = 100;
 
@@ -152,7 +153,7 @@ export function AuditLogPage() {
       <Title order={2}>{strings.auditLog.title}</Title>
 
       {log.isError ? (
-        <Alert color="red" data-testid="audit-log-error">
+        <Alert color={colors.problem} data-testid="audit-log-error">
           {log.error instanceof AuditLogApiError
             ? mapErrorCode(log.error.code)
             : strings.auditLog.error}
@@ -165,7 +166,7 @@ export function AuditLogPage() {
             {strings.auditLog.filtersHeader}
           </Text>
           {filterError ? (
-            <Alert color="red" data-testid="audit-log-filter-error">
+            <Alert color={colors.problem} data-testid="audit-log-filter-error">
               {filterError}
             </Alert>
           ) : null}
@@ -338,7 +339,7 @@ export function AuditLogPage() {
             <Loader />
           </Group>
         ) : detail.isError || !detail.data ? (
-          <Alert color="red" data-testid="audit-log-detail-error">
+          <Alert color={colors.problem} data-testid="audit-log-detail-error">
             {strings.auditLog.detailError}
           </Alert>
         ) : (

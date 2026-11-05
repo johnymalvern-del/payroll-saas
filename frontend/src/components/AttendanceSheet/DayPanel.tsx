@@ -11,6 +11,7 @@ import {
 import dayjs from "dayjs";
 import { fetchDay } from "../../api/attendance";
 import { strings } from "../../lib/strings";
+import { colors } from "../../theme/colors";
 
 type Props = {
   employeeId: string;
@@ -58,18 +59,18 @@ export function DayPanel({ employeeId, workDate, onClose }: Props) {
             {day.data.status ? (
               <Badge variant="light">{day.data.status}</Badge>
             ) : (
-              <Badge variant="light" color="gray">
+              <Badge variant="light" color={colors.inactive}>
                 {strings.attendance.dayPanel.noStatus}
               </Badge>
             )}
             {day.data.locked ? (
-              <Badge color="gray">{strings.attendance.dayPanel.locked}</Badge>
+              <Badge color={colors.inactive}>{strings.attendance.dayPanel.locked}</Badge>
             ) : null}
             {day.data.reviewed ? (
-              <Badge color="blue">{strings.attendance.dayPanel.reviewed}</Badge>
+              <Badge color={colors.info}>{strings.attendance.dayPanel.reviewed}</Badge>
             ) : null}
             {day.data.open_exception_count > 0 ? (
-              <Badge color="red">
+              <Badge color={colors.problem}>
                 {day.data.open_exception_count} {strings.attendance.dayPanel.openExceptions}
               </Badge>
             ) : null}
@@ -117,7 +118,7 @@ export function DayPanel({ employeeId, workDate, onClose }: Props) {
               </Text>
               <Group gap="xs">
                 {day.data.flags.map((f) => (
-                  <Badge key={f} variant="light" color="orange">
+                  <Badge key={f} variant="light" color={colors.pending}>
                     {f}
                   </Badge>
                 ))}

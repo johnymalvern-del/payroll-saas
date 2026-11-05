@@ -25,6 +25,7 @@ import {
 } from "../api/changeRequests";
 import { mapErrorCode } from "../api/errors";
 import { strings } from "../lib/strings";
+import { colors } from "../theme/colors";
 
 const PAGE_SIZE = 100;
 
@@ -169,7 +170,7 @@ export function ChangeRequestsPage() {
 
       {pageError ? (
         <Alert
-          color="red"
+          color={colors.problem}
           withCloseButton
           onClose={() => setPageError(null)}
           data-testid="change-requests-error"

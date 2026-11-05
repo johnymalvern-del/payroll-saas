@@ -32,6 +32,7 @@ import {
 import { mapErrorCode } from "../api/errors";
 import { getSiteTz } from "../lib/config";
 import { strings } from "../lib/strings";
+import { colors } from "../theme/colors";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -176,7 +177,7 @@ export function PayPeriodsPage() {
 
       {pageError ? (
         <Alert
-          color="red"
+          color={colors.problem}
           withCloseButton
           onClose={() => setPageError(null)}
           data-testid="pay-periods-error"
@@ -277,7 +278,7 @@ export function PayPeriodsPage() {
       >
         <Stack gap="sm">
           {formError ? (
-            <Alert color="red" data-testid="pay-periods-create-error">
+            <Alert color={colors.problem} data-testid="pay-periods-create-error">
               {formError}
             </Alert>
           ) : null}

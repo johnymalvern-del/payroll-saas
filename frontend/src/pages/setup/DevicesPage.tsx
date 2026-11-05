@@ -20,6 +20,7 @@ import {
   type DeviceOut,
 } from "../../api/devices";
 import { strings } from "../../lib/strings";
+import { colors } from "../../theme/colors";
 
 export function DevicesPage() {
   const qc = useQueryClient();
@@ -70,13 +71,13 @@ export function DevicesPage() {
         </Button>
       </Group>
       {error && (
-        <Alert color="red" data-testid="devices-error">
+        <Alert color={colors.problem} data-testid="devices-error">
           {error}
         </Alert>
       )}
       {createdKey && (
         <Alert
-          color="green"
+          color={colors.approved}
           data-testid="devices-created-key"
           title={strings.devices.keyOnce}
         >
@@ -88,7 +89,7 @@ export function DevicesPage() {
       )}
       {rotated && (
         <Alert
-          color="blue"
+          color={colors.info}
           data-testid="devices-rotated-key"
           title={strings.devices.keyRotated}
         >
@@ -100,7 +101,7 @@ export function DevicesPage() {
       {list.isLoading ? (
         <Loader />
       ) : list.isError ? (
-        <Alert color="red">{strings.devices.loadFailed}</Alert>
+        <Alert color={colors.problem}>{strings.devices.loadFailed}</Alert>
       ) : (
         <Table data-testid="devices-table">
           <Table.Thead>

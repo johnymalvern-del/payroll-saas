@@ -23,6 +23,7 @@ import {
 import { EmployeeForm } from "../components/Employees/EmployeeForm";
 import { mapErrorCode } from "../api/errors";
 import { strings } from "../lib/strings";
+import { colors } from "../theme/colors";
 
 const PAGE_SIZE = 100;
 
@@ -235,7 +236,7 @@ export function EmployeesPage() {
                       <Button
                         size="xs"
                         variant="default"
-                        color="red"
+                        color={colors.problem}
                         onClick={() => confirmTerminate(emp)}
                         loading={terminating}
                         disabled={emp.status === "terminated"}

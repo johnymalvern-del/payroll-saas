@@ -29,6 +29,7 @@ import { fetchBranches, fetchDepartments, fetchSites } from "../../api/attendanc
 import { absoluteUrl, wrappedFetch } from "../../api/client";
 import { mapErrorCode } from "../../api/errors";
 import { strings } from "../../lib/strings";
+import { colors } from "../../theme/colors";
 
 const STATUSES = [
   { value: "active", label: strings.employees.statusActive },
@@ -445,7 +446,7 @@ export function EmployeeForm({
       <ScrollArea.Autosize mah="75vh">
         <Stack gap="sm">
           {error ? (
-            <Alert color="red" data-testid="employee-form-error">
+            <Alert color={colors.problem} data-testid="employee-form-error">
               {error}
             </Alert>
           ) : null}

@@ -3,6 +3,7 @@ import { Alert, Button, Group, Loader, Modal, Stack, Table, TextInput, Title } f
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { branchesApi, type Branch } from "../../api/branches";
 import { sitesApi, type Site } from "../../api/sites";
+import { colors } from "../../theme/colors";
 
 export function SitesPage() {
   const qc = useQueryClient();
@@ -29,9 +30,9 @@ export function SitesPage() {
         <Title order={3}>Sites</Title>
         <Button onClick={() => { setErr(null); setOpen(true); }} data-testid="sites-add">Add site</Button>
       </Group>
-      {err && <Alert color="red" data-testid="sites-error">{err}</Alert>}
+      {err && <Alert color={colors.problem} data-testid="sites-error">{err}</Alert>}
       {sites.isLoading ? <Loader /> : sites.isError ? (
-        <Alert color="red">Could not load sites.</Alert>
+        <Alert color={colors.problem}>Could not load sites.</Alert>
       ) : (
         <Table data-testid="sites-table">
           <Table.Thead><Table.Tr>

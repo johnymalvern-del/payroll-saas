@@ -42,6 +42,7 @@ import {
   exceptionTypeLabel,
   strings,
 } from "../lib/strings";
+import { colors } from "../theme/colors";
 
 const PAGE_SIZE = 100;
 
@@ -275,7 +276,7 @@ export function ExceptionsPage() {
         </Button>
       </Group>
       {employees.isError ? (
-        <Alert color="red" data-testid="employees-error">
+        <Alert color={colors.problem} data-testid="employees-error">
           <Group justify="space-between" align="center">
             <Text size="sm">{strings.exceptions.employeesError}</Text>
             <Button
@@ -291,7 +292,7 @@ export function ExceptionsPage() {
       ) : null}
       {serverError ? (
         <Alert
-          color="red"
+          color={colors.problem}
           withCloseButton
           onClose={() => setServerError(null)}
           data-testid="direct-error"
@@ -382,7 +383,7 @@ export function ExceptionsPage() {
               </Button>
             </Group>
             {bulkError ? (
-              <Alert color="red" data-testid="exceptions-bulk-error">
+              <Alert color={colors.problem} data-testid="exceptions-bulk-error">
                 {bulkError}
               </Alert>
             ) : null}

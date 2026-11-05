@@ -29,6 +29,7 @@ import {
 } from "../api/payPeriods";
 import { mapErrorCode } from "../api/errors";
 import { strings } from "../lib/strings";
+import { colors } from "../theme/colors";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -152,7 +153,7 @@ export function PayPeriodDetailPage() {
 
   if (periodQuery.isError || !period) {
     return (
-      <Alert color="red" data-testid="pay-period-detail-error">
+      <Alert color={colors.problem} data-testid="pay-period-detail-error">
         {strings.payPeriods.detailLoadError}
       </Alert>
     );
@@ -254,7 +255,7 @@ export function PayPeriodDetailPage() {
       </Paper>
 
       {previewError ? (
-        <Alert color="red" data-testid="pay-period-preview-error">
+        <Alert color={colors.problem} data-testid="pay-period-preview-error">
           {previewError}
         </Alert>
       ) : null}
@@ -264,7 +265,7 @@ export function PayPeriodDetailPage() {
           <Stack gap="sm">
             <Text fw={600}>{strings.payPeriods.previewTitle}</Text>
             {previewData.unacknowledged_formulas.length > 0 ? (
-              <Alert color="yellow">
+              <Alert color={colors.warning}>
                 Unacknowledged formulas:{" "}
                 {previewData.unacknowledged_formulas.join(", ")}
               </Alert>
@@ -345,7 +346,7 @@ export function PayPeriodDetailPage() {
         <Stack gap="sm">
           <Text size="sm">{strings.payPeriods.finaliseBody}</Text>
           {finaliseError ? (
-            <Alert color="red" data-testid="pay-period-finalise-error">
+            <Alert color={colors.problem} data-testid="pay-period-finalise-error">
               {finaliseError}
             </Alert>
           ) : null}
@@ -396,7 +397,7 @@ export function PayPeriodDetailPage() {
         <Stack gap="sm">
           <Text size="sm">{strings.payPeriods.reopenBody}</Text>
           {reopenError ? (
-            <Alert color="red" data-testid="pay-period-reopen-error">
+            <Alert color={colors.problem} data-testid="pay-period-reopen-error">
               {reopenError}
             </Alert>
           ) : null}

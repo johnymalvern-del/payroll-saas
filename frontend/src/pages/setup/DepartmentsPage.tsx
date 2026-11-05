@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Alert, Button, Group, Loader, Modal, Stack, Table, TextInput, Title } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { departmentsApi, type Department } from "../../api/departments";
+import { colors } from "../../theme/colors";
 
 export function DepartmentsPage() {
   const qc = useQueryClient();
@@ -22,9 +23,9 @@ export function DepartmentsPage() {
         <Title order={3}>Departments</Title>
         <Button onClick={() => { setErr(null); setOpen(true); }} data-testid="departments-add">Add department</Button>
       </Group>
-      {err && <Alert color="red" data-testid="departments-error">{err}</Alert>}
+      {err && <Alert color={colors.problem} data-testid="departments-error">{err}</Alert>}
       {list.isLoading ? <Loader /> : list.isError ? (
-        <Alert color="red">Could not load departments.</Alert>
+        <Alert color={colors.problem}>Could not load departments.</Alert>
       ) : (
         <Table data-testid="departments-table">
           <Table.Thead><Table.Tr><Table.Th>Code</Table.Th><Table.Th>Name</Table.Th></Table.Tr></Table.Thead>

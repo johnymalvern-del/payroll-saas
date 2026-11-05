@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Alert, Button, Group, Loader, Modal, Stack, Table, TextInput, Title } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { branchesApi, type Branch } from "../../api/branches";
+import { colors } from "../../theme/colors";
 
 export function BranchesPage() {
   const qc = useQueryClient();
@@ -22,9 +23,9 @@ export function BranchesPage() {
         <Title order={3}>Branches</Title>
         <Button onClick={() => { setErr(null); setOpen(true); }} data-testid="branches-add">Add branch</Button>
       </Group>
-      {err && <Alert color="red" data-testid="branches-error">{err}</Alert>}
+      {err && <Alert color={colors.problem} data-testid="branches-error">{err}</Alert>}
       {list.isLoading ? <Loader /> : list.isError ? (
-        <Alert color="red">Could not load branches.</Alert>
+        <Alert color={colors.problem}>Could not load branches.</Alert>
       ) : (
         <Table data-testid="branches-table">
           <Table.Thead><Table.Tr><Table.Th>Code</Table.Th><Table.Th>Name</Table.Th></Table.Tr></Table.Thead>

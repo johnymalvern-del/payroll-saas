@@ -12,6 +12,7 @@ import {
 } from "@mantine/core";
 import { markReviewed, type MarkReviewedOut } from "../../api/attendance";
 import { strings } from "../../lib/strings";
+import { colors } from "../../theme/colors";
 
 type Props = {
   opened: boolean;
@@ -64,7 +65,7 @@ export function MarkReviewedModal({
       <Stack gap="md">
         <Text size="sm">{strings.attendance.markReviewed.body}</Text>
         {mutation.isError ? (
-          <Alert color="red">{strings.attendance.markReviewed.error}</Alert>
+          <Alert color={colors.problem}>{strings.attendance.markReviewed.error}</Alert>
         ) : null}
         {result ? (
           <Alert color={result.refused_days.length === 0 ? "green" : "orange"}>
@@ -89,7 +90,7 @@ export function MarkReviewedModal({
                   <Table.Td>{r.employee_name ?? r.employee_id}</Table.Td>
                   <Table.Td>{r.work_date}</Table.Td>
                   <Table.Td>
-                    <Badge color="orange" variant="light">
+                    <Badge color={colors.pending} variant="light">
                       {r.reason}
                     </Badge>
                   </Table.Td>

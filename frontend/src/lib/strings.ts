@@ -29,6 +29,28 @@ export function exceptionTypeLabel(code: string): string {
 }
 
 export const strings = {
+  nav: {
+    home: "Home",
+    attendanceSheet: "Attendance sheet",
+    exceptions: "Exceptions",
+    adjustments: "Adjustments",
+    clockIn: "Clock in",
+    employees: "Employees",
+    payPeriods: "Pay periods",
+    changeRequests: "Change requests",
+    payslips: "My payslips",
+    setup: "Setup",
+    auditLog: "Audit log",
+    sectionAttendance: "Attendance",
+    sectionPeople: "People",
+    sectionPayroll: "Payroll",
+    sectionSetup: "Setup",
+    sectionAudit: "Audit",
+  },
+  empty: {
+    default: "Nothing here yet.",
+    noRows: "No rows to show.",
+  },
 
   clockIn: {
     title: "Clock in",

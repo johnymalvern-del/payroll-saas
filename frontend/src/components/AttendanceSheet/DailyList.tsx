@@ -2,6 +2,7 @@ import { Badge, ScrollArea, Table, Text } from "@mantine/core";
 import dayjs from "dayjs";
 import type { DailyRow } from "../../api/attendance";
 import { strings } from "../../lib/strings";
+import { colors } from "../../theme/colors";
 
 type Props = {
   rows: DailyRow[];
@@ -83,7 +84,7 @@ export function DailyList({ rows, onRowClick }: Props) {
               <Table.Td>{r.overtime_minutes ?? "\u2014"}</Table.Td>
               <Table.Td>
                 {r.open_exception_count > 0 ? (
-                  <Badge size="xs" color="red">
+                  <Badge size="xs" color={colors.problem}>
                     {r.open_exception_count}
                   </Badge>
                 ) : (

@@ -12,6 +12,7 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import { strings } from "../lib/strings";
 import { getTenantSlug, setTenantSlug } from "../api/tenant";
+import { colors } from "../theme/colors";
 
 export function LoginPage() {
   const { status, loginError, busy, login } = useAuth();
@@ -38,7 +39,7 @@ export function LoginPage() {
       <form onSubmit={onSubmit}>
         <Stack>
           <Title order={2}>{strings.login.title}</Title>
-          {loginError ? <Alert color="red">{loginError}</Alert> : null}
+          {loginError ? <Alert color={colors.problem}>{loginError}</Alert> : null}
           {isDev ? (
             <TextInput
               label={strings.login.tenantLabel}

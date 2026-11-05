@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Alert, Button, Checkbox, Group, Loader, Modal, NumberInput, Stack, Table, Text, TextInput, Title } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { workPatternsApi, type WorkPatternDayIn } from "../../api/workPatterns";
+import { colors } from "../../theme/colors";
 
 export function WorkPatternsPage() {
   const qc = useQueryClient();
@@ -25,9 +26,9 @@ export function WorkPatternsPage() {
         <Title order={3}>Work patterns</Title>
         <Button onClick={() => { setErr(null); setOpen(true); }} data-testid="wp-add">Add work pattern</Button>
       </Group>
-      {err && <Alert color="red" data-testid="wp-error">{err}</Alert>}
+      {err && <Alert color={colors.problem} data-testid="wp-error">{err}</Alert>}
       {list.isLoading ? <Loader /> : list.isError ? (
-        <Alert color="red">Could not load work patterns.</Alert>
+        <Alert color={colors.problem}>Could not load work patterns.</Alert>
       ) : (
         <Table data-testid="wp-table">
           <Table.Thead><Table.Tr><Table.Th>Name</Table.Th><Table.Th>Cycle</Table.Th><Table.Th>Anchor</Table.Th><Table.Th>Active</Table.Th></Table.Tr></Table.Thead>

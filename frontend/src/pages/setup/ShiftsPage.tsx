@@ -3,6 +3,7 @@ import { Alert, Button, Group, Loader, Modal, Stack, Table, TextInput, Title, Nu
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { rateRulesApi, type ShiftRateRule } from "../../api/rateRules";
 import { shiftsApi, type Shift } from "../../api/shifts";
+import { colors } from "../../theme/colors";
 
 export function ShiftsPage() {
   const qc = useQueryClient();
@@ -37,9 +38,9 @@ export function ShiftsPage() {
         <Title order={3}>Shifts</Title>
         <Button onClick={() => { setErr(null); setOpen(true); }} data-testid="shifts-add">Add shift</Button>
       </Group>
-      {err && <Alert color="red" data-testid="shifts-error">{err}</Alert>}
+      {err && <Alert color={colors.problem} data-testid="shifts-error">{err}</Alert>}
       {list.isLoading ? <Loader /> : list.isError ? (
-        <Alert color="red">Could not load shifts.</Alert>
+        <Alert color={colors.problem}>Could not load shifts.</Alert>
       ) : (
         <Table data-testid="shifts-table">
           <Table.Thead><Table.Tr>
@@ -71,7 +72,7 @@ export function ShiftsPage() {
       </Modal>
       <Modal opened={!!selShift} onClose={() => setSelShift(null)} title={`Rate table — ${selShift?.name ?? ""}`} size="lg">
         <Stack>
-          {rates.isLoading ? <Loader /> : rates.isError ? <Alert color="red">Could not load rate rules.</Alert> : (
+          {rates.isLoading ? <Loader /> : rates.isError ? <Alert color={colors.problem}>Could not load rate rules.</Alert> : (
             <Table data-testid="rate-rules-table">
               <Table.Thead><Table.Tr>
                 <Table.Th>Day type</Table.Th><Table.Th>Kind</Table.Th><Table.Th>Tier</Table.Th><Table.Th>Method</Table.Th><Table.Th>Value</Table.Th><Table.Th>From</Table.Th>
