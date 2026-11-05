@@ -6,6 +6,13 @@ import { AdjustmentsPage } from "./pages/AdjustmentsPage";
 import { AttendanceSheetPage } from "./pages/AttendanceSheetPage";
 import { ClockInPage } from "./pages/ClockInPage";
 import { DevicesPage } from "./pages/setup/DevicesPage";
+import { PublicHolidaysPage } from "./pages/setup/PublicHolidaysPage";
+import { WorkPatternsPage } from "./pages/setup/WorkPatternsPage";
+import { ShiftsPage } from "./pages/setup/ShiftsPage";
+import { DepartmentsPage } from "./pages/setup/DepartmentsPage";
+import { BranchesPage } from "./pages/setup/BranchesPage";
+import { SitesPage } from "./pages/setup/SitesPage";
+import { SetupLayout } from "./pages/setup/SetupLayout";
 import { AuditLogPage } from "./pages/AuditLogPage";
 import { ChangeRequestsPage } from "./pages/ChangeRequestsPage";
 import { EmployeesPage } from "./pages/EmployeesPage";
@@ -16,7 +23,6 @@ import { LoginPage } from "./pages/LoginPage";
 import { PayPeriodsPage } from "./pages/PayPeriodsPage";
 import { OwnPayslipsPage } from "./pages/OwnPayslipsPage";
 import { PayPeriodDetailPage } from "./pages/PayPeriodDetailPage";
-import { PlaceholderPage } from "./pages/PlaceholderPage";
 
 export default function App() {
   return (
@@ -50,7 +56,16 @@ export default function App() {
           <Route path="payroll/pay-periods/:id" element={<PayPeriodDetailPage />} />
           <Route path="payroll/change-requests" element={<ChangeRequestsPage />} />
           <Route path="audit-log" element={<AuditLogPage />} />
-          <Route path="setup" element={<PlaceholderPage title="Setup" phase="F-5" />} />
+          <Route path="setup" element={<SetupLayout />}>
+            <Route index element={<SitesPage />} />
+            <Route path="sites" element={<SitesPage />} />
+            <Route path="branches" element={<BranchesPage />} />
+            <Route path="departments" element={<DepartmentsPage />} />
+            <Route path="shifts" element={<ShiftsPage />} />
+            <Route path="work-patterns" element={<WorkPatternsPage />} />
+            <Route path="public-holidays" element={<PublicHolidaysPage />} />
+            <Route path="devices" element={<DevicesPage />} />
+          </Route>
           <Route path="payslips" element={<OwnPayslipsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
