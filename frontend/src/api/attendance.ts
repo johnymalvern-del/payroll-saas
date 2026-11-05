@@ -61,6 +61,22 @@ export type DayOut = {
   reviewed: boolean;
   punches: Punch[];
   exceptions: ExceptionRow[];
+  segments: SegmentOut[];
+  shift_id: string | null;
+};
+
+export type SegmentOut = {
+  id: string;
+  attendance_day_id: string;
+  local_date: string;
+  day_type: string;
+  kind: string;
+  tier: number;
+  minutes: number;
+  rate_method: string;
+  rate_value: string;
+  overtime_status: string | null;
+  source_refs: unknown[];
 };
 
 export type DailyRow = {
@@ -157,6 +173,8 @@ function normaliseDayOut(data: unknown): DayOut {
     reviewed: obj.reviewed === true,
     punches: Array.isArray(obj.punches) ? (obj.punches as Punch[]) : [],
     exceptions: Array.isArray(obj.exceptions) ? (obj.exceptions as ExceptionRow[]) : [],
+    segments: Array.isArray(obj.segments) ? (obj.segments as SegmentOut[]) : [],
+    shift_id: typeof obj.shift_id === "string" ? obj.shift_id : null,
   };
 }
 
@@ -220,6 +238,47 @@ export async function fetchDaily(params: {
   const data = await res.json();
   warn("daily response", data, ["items"]);
   return normaliseDailyOut(data);
+}
+
+export async function fetchEmployeeById(
+  id: string,
+): Promise<{
+  id: string;
+  first_name: string;
+  last_name: string;
+  employee_code: string;
+} | null> {
+  const res = await wrappedFetch(
+    new Request(absoluteUrl(`/api/v1/employees/${id}`), { credentials: "include" }),
+  );
+  if (!res.ok) return null;
+  const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!data) return null;
+  return {
+    id: String(data.id ?? ""),
+    first_name: String(data.first_name ?? ""),
+    last_name: String(data.last_name ?? ""),
+    employee_code: String(data.employee_code ?? ""),
+  };
+}
+
+export async function fetchExceptionsForDay(
+  employeeId: string,
+  workDate: string,
+): Promise<ExceptionRow[]> {
+  const qs = new URLSearchParams();
+  qs.set("employee_id", employeeId);
+  qs.set("from_date", workDate);
+  qs.set("to_date", workDate);
+  qs.set("limit", "100");
+  const res = await wrappedFetch(
+    new Request(absoluteUrl(`/api/v1/attendance/exceptions?${qs.toString()}`), {
+      credentials: "include",
+    }),
+  );
+  if (!res.ok) return [];
+  const data = (await res.json().catch(() => null)) as { items?: unknown } | null;
+  return Array.isArray(data?.items) ? (data!.items as ExceptionRow[]) : [];
 }
 
 export async function fetchDay(employeeId: string, workDate: string): Promise<DayOut> {
