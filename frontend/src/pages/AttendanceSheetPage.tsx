@@ -24,6 +24,7 @@ import { FilterBar } from "../components/AttendanceSheet/FilterBar";
 import { MarkReviewedModal } from "../components/AttendanceSheet/MarkReviewedModal";
 import { MonthlyGrid } from "../components/AttendanceSheet/MonthlyGrid";
 import { strings } from "../lib/strings";
+import { toCsv, downloadCsv } from "../lib/csv";
 
 const PAGE_SIZE = 50;
 type View = "monthly" | "daily";
@@ -98,10 +99,59 @@ export function AttendanceSheetPage() {
     setSelectedDay({ employeeId, workDate });
   };
 
+  const exportCsv = () => {
+    const data = sheet.data;
+    if (!data || data.items.length === 0) return;
+    const headers = [
+      "employee_code",
+      "employee_name",
+      "work_date",
+      "status",
+      "worked_minutes",
+      "normal_minutes",
+      "overtime_minutes",
+      "flags",
+      "open_exception_count",
+      "locked",
+      "reviewed",
+    ];
+    const rows: string[][] = [headers];
+    for (const emp of data.items) {
+      for (const d of emp.days) {
+        rows.push([
+          emp.employee_code,
+          emp.employee_name,
+          d.work_date,
+          d.status ?? "",
+          d.worked_minutes == null ? "" : String(d.worked_minutes),
+          d.normal_minutes == null ? "" : String(d.normal_minutes),
+          d.overtime_minutes == null ? "" : String(d.overtime_minutes),
+          (d.flags ?? []).join(";"),
+          String(d.open_exception_count),
+          d.locked ? "true" : "false",
+          d.reviewed ? "true" : "false",
+        ]);
+      }
+    }
+    const csv = toCsv(rows);
+    const month = fromDate
+      ? dayjs(fromDate).format("YYYY-MM")
+      : dayjs().format("YYYY-MM");
+    downloadCsv(`attendance-sheet-${month}.csv`, csv);
+  };
+
   return (
     <Stack gap="md">
       <Group justify="space-between" align="center">
         <Title order={2}>{strings.attendance.title}</Title>
+        <Button
+          variant="default"
+          disabled={!sheet.data || sheet.data.items.length === 0}
+          onClick={exportCsv}
+          data-testid="attendance-export-csv"
+        >
+          Export CSV
+        </Button>
         <SegmentedControl
           value={view}
           onChange={(v) => {
