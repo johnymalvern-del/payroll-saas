@@ -37,7 +37,12 @@ from app.db.tenant.models.pay import (
     PayPeriod, PayrollRun, Payslip, PayslipLine, PeriodReopenLog,
 )
 from app.db.tenant.models.people import Employee
-from app.services.payroll_runner import finalise, reopen, run_preview
+from app.services.payroll_runner import (
+    finalise,
+    reopen,
+    run_preview,
+    run_preview_for_employee_as_of,
+)
 
 router = APIRouter(prefix="/payroll/pay-periods", tags=["payroll-pay-periods"])
 
@@ -181,13 +186,42 @@ def preview_pay_period(
     )
 
 
+def _preview_as_of(
+    db,
+    user,
+    period_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    as_of: date | None = None,
+) -> PreviewEmployeeOut:
+    """Read-only payslip-so-far for one employee, as of `as_of`.
+
+    Used by GET .../preview/{employee_id}?as_of=YYYY-MM-DD. Does not
+    persist anything (no PayrollRun, no Payslip, no audit). Delegates to
+    payroll_runner.run_preview_for_employee_as_of.
+    """
+    pay_period = db.get(PayPeriod, period_id)
+    if pay_period is None:
+        raise AppError("record_not_found", "Pay period not found", 404)
+    employee = db.get(Employee, employee_id)
+    if employee is None:
+        raise AppError("record_not_found", "Employee not found", 404)
+    try:
+        assert_in_scope(user, employee_id, db)
+    except ScopeViolation:
+        raise AppError("record_not_found", "Employee not found", 404) from None
+    data = run_preview_for_employee_as_of(
+        db, user, pay_period, employee, as_of,
+    )
+    return PreviewEmployeeOut(**data)
+
+
 @router.get("/{period_id}/preview/{employee_id}", response_model=PreviewEmployeeOut)
 def preview_employee(
     period_id: uuid.UUID,
     employee_id: uuid.UUID,
     db: TenantDbDep,
     user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
-    as_of: date | None = Query(None),
+    as_of: date | None = None,
 ) -> PreviewEmployeeOut:
     if as_of is not None:
         return _preview_as_of(db, user, period_id, employee_id, as_of)
