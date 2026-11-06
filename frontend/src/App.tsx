@@ -6,6 +6,7 @@ import { AdjustmentsPage } from "./pages/AdjustmentsPage";
 import { AttendanceSheetPage } from "./pages/AttendanceSheetPage";
 import { ClockInPage } from "./pages/ClockInPage";
 import { DevicesPage } from "./pages/setup/DevicesPage";
+import { IntelligenceSettingsPage } from "./pages/setup/IntelligenceSettingsPage";
 import { PublicHolidaysPage } from "./pages/setup/PublicHolidaysPage";
 import { WorkPatternsPage } from "./pages/setup/WorkPatternsPage";
 import { ShiftsPage } from "./pages/setup/ShiftsPage";
@@ -67,6 +68,7 @@ export default function App() {
             <Route path="work-patterns" element={<WorkPatternsPage />} />
             <Route path="public-holidays" element={<PublicHolidaysPage />} />
             <Route path="devices" element={<DevicesPage />} />
+            <Route path="intelligence" element={<IntelligenceSettingsPage />} />
           </Route>
           <Route path="payslips" element={<OwnPayslipsPage />} />
         </Route>

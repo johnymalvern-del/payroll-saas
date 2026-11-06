@@ -29,6 +29,10 @@ export function exceptionTypeLabel(code: string): string {
 }
 
 export const strings = {
+  intelligence: {
+    title: "Intelligence settings",
+    subtitle: "Configure how much authority the system has over HR decisions.",
+  },
   nav: {
     home: "Home",
     attendanceSheet: "Attendance sheet",

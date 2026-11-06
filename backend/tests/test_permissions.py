@@ -101,6 +101,8 @@ SECTION_6_MATRIX: dict[Permission, dict[str, bool]] = {
     Permission.ORG_VIEW: {"employee": True, "manager": True, "hr": True, "payroll_admin": True, "auditor": True},
     Permission.ORG_MANAGE: {"employee": False, "manager": False, "hr": True, "payroll_admin": True, "auditor": False},
     Permission.ATTENDANCE_VIEW: {"employee": True, "manager": True, "hr": True, "payroll_admin": True, "auditor": False},
+    Permission.INTELLIGENCE_VIEW: {"employee": False, "manager": False, "hr": True, "payroll_admin": True, "auditor": True},
+    Permission.INTELLIGENCE_MANAGE: {"employee": False, "manager": False, "hr": False, "payroll_admin": True, "auditor": False},
 }
 
 

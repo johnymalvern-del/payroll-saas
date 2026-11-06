@@ -72,6 +72,8 @@ class Permission(str, Enum):
     ORG_MANAGE = "org_manage"
 
     ATTENDANCE_VIEW = "attendance_view"
+    INTELLIGENCE_VIEW = "intelligence_view"
+    INTELLIGENCE_MANAGE = "intelligence_manage"
 
 
 # Role -> set of permissions. Mirrors section 6 of the master brief.
@@ -114,6 +116,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.ORG_VIEW,
         Permission.ORG_MANAGE,
         Permission.ATTENDANCE_VIEW,
+        Permission.INTELLIGENCE_VIEW,
     }),
     "payroll_admin": frozenset({
         Permission.SELF_VIEW,
@@ -138,6 +141,8 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.ORG_VIEW,
         Permission.ORG_MANAGE,
         Permission.ATTENDANCE_VIEW,
+        Permission.INTELLIGENCE_VIEW,
+        Permission.INTELLIGENCE_MANAGE,
     }),
     # Auditor: read-only audit and payslip viewing. No SELF_VIEW (auditors
     # are not employees of the company they audit), no SELF_SUBMIT.
@@ -147,6 +152,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.AUDIT_VIEW,
         Permission.ORG_VIEW,
         Permission.PAY_RATE_VIEW,
+        Permission.INTELLIGENCE_VIEW,
     }),
 }
 

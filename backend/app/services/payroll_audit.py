@@ -23,14 +23,23 @@ def write_audit(
     old_value: dict | None = None,
     new_value: dict | None = None,
     reason: str | None = None,
-) -> None:
+    actor_system: bool = False,
+) -> "AuditLog":
+    """Append an audit row.
+
+    If actor_system=True, actor_role is set to 'system' and actor_user_id is
+    None. That satisfies Phase 1A's "service identity distinguishable from
+    humans" requirement without a schema change (Phase 1E may add an
+    explicit actor_system column). The created AuditLog row is returned so
+    callers can link downstream records (e.g. intelligence_mode_change_log).
+    """
     from app.db.tenant.models.platform import AuditLog
 
     cols = {c.name for c in AuditLog.__table__.columns}
     kwargs: dict[str, Any] = {}
     for k, v in (
-        ("actor_user_id", getattr(user, "id", None)),
-        ("actor_role", getattr(user, "role", None)),
+        ("actor_user_id", None if actor_system else getattr(user, "id", None)),
+        ("actor_role", "system" if actor_system else getattr(user, "role", None)),
         ("entity_type", entity_type),
         ("entity_id", entity_id),
         ("action", action),
@@ -41,6 +50,8 @@ def write_audit(
     ):
         if k in cols:
             kwargs[k] = v
-    db.add(AuditLog(**kwargs))
+    row = AuditLog(**kwargs)
+    db.add(row)
+    return row
 
 # END OF FILE

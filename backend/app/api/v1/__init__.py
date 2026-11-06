@@ -38,6 +38,7 @@ from app.api.v1.leave_types import router as leave_types_router
 from app.api.v1.leave_balances import router as leave_balances_router
 from app.api.v1.leave_accruals import router as leave_accruals_router
 from app.api.v1.leave_requests import router as leave_requests_router
+from app.api.v1.intelligence_settings import router as intelligence_settings_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(register_router)
@@ -68,6 +69,7 @@ api_router.include_router(leave_types_router)
 api_router.include_router(leave_balances_router)
 api_router.include_router(leave_accruals_router)
 api_router.include_router(leave_requests_router)
+api_router.include_router(intelligence_settings_router)
 api_router.include_router(payroll_settings_router)
 api_router.include_router(payroll_types_router)
 api_router.include_router(payroll_employees_router)

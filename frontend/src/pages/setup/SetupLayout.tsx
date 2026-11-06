@@ -10,6 +10,7 @@ const TABS = [
   { value: "work-patterns", label: "Work patterns", path: "/setup/work-patterns" },
   { value: "public-holidays", label: "Public holidays", path: "/setup/public-holidays" },
   { value: "devices", label: strings.devices.title, path: "/setup/devices" },
+  { value: "intelligence", label: "Intelligence", path: "/setup/intelligence" },
 ];
 
 export function SetupLayout() {
