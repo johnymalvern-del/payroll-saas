@@ -45,6 +45,8 @@ const PERMISSION_NAV: Array<{
     item: { label: "My payslips", to: "/payslips", icon: "file" } },
   { permission: "org_manage", group: "Setup",
     item: { label: "Setup", to: "/setup", icon: "settings" } },
+  { permission: "intelligence_view", group: "Audit",
+    item: { label: "Decision records", to: "/intelligence/decisions", icon: "audit" } },
   { permission: "audit_view", group: "Audit",
     item: { label: "Audit log", to: "/audit-log", icon: "audit" } },
 ];

@@ -191,6 +191,37 @@ class IntelligenceDecision(Base):
         UUID(as_uuid=True), ForeignKey("audit_log.id", ondelete="SET NULL"),
         nullable=True,
     )
+    decision_type: Mapped[str] = mapped_column(
+        String(20), nullable=False,
+        default="recommendation",
+        server_default=text("'recommendation'"),
+    )
+    initiator_type: Mapped[str] = mapped_column(
+        String(20), nullable=False,
+        default="human", server_default=text("'human'"),
+    )
+    initiator_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    company_default_mode: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    effective_workflow_mode: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    workflow_override_mode: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(120), nullable=True
+    )
+    evidence_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("intelligence_evidence_snapshot.id",
+                   ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -210,3 +241,26 @@ class IntelligenceDecisionOverrideReason(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+class IntelligenceEvidenceSnapshot(Base):
+    """Immutable snapshot of the evidence used to create a decision.
+
+    Append-only at both app-role (REVOKE UPDATE, DELETE) and DB-trigger
+    level (BEFORE UPDATE/DELETE raises). Same pattern as audit_log.
+    """
+    __tablename__ = "intelligence_evidence_snapshot"
+
+    id: Mapped[uuid.UUID] = _pk()
+    decision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("intelligence_decision.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    sha256_hex: Mapped[str] = mapped_column(String(64), nullable=False)

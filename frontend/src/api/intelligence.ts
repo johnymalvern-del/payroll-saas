@@ -85,4 +85,69 @@ export const intelligenceApi = {
   ) => req<WorkflowMode>("PATCH", `/settings/workflows/${workflow}`, body),
   getChangeLog: () =>
     req<{ items: ModeChangeLog[] }>("GET", "/settings/change-log?limit=50"),
+  listDecisions: (params?: {
+    workflow?: string;
+    employee_id?: string;
+    status?: string;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.workflow) qs.set("workflow", params.workflow);
+    if (params?.employee_id) qs.set("employee_id", params.employee_id);
+    if (params?.status) qs.set("status", params.status);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return req<DecisionListOut>("GET", `/decisions${suffix}`);
+  },
+  getDecision: (id: string) =>
+    req<DecisionDetail>("GET", `/decisions/${id}`),
+  verifyDecisionSnapshot: (id: string) =>
+    req<{ valid: boolean; decision_id: string }>(
+      "GET",
+      `/decisions/${id}/verify`,
+    ),
 };
+
+// ---- Phase 1B — decision records (read-only) ----
+
+export type DecisionSummary = {
+  id: string;
+  employee_id: string;
+  workflow: string;
+  source_type: string;
+  source_id: string | null;
+  decision_type: string;
+  initiator_type: string;
+  initiator_user_id: string | null;
+  company_default_mode: string | null;
+  effective_workflow_mode: string | null;
+  workflow_override_mode: string | null;
+  execution_status: string;
+  created_at: string;
+};
+
+export type DecisionSnapshot = {
+  id: string;
+  decision_id: string;
+  created_at: string;
+  schema_version: number;
+  payload: Record<string, unknown>;
+  sha256_hex: string;
+};
+
+export type DecisionDetail = DecisionSummary & {
+  policy_version: string | null;
+  statutory_version: string | null;
+  recommendation: Record<string, unknown> | null;
+  explanation: string | null;
+  audit_id: string | null;
+  evidence_snapshot_id: string | null;
+  snapshot: DecisionSnapshot | null;
+};
+
+export type DecisionListOut = {
+  items: DecisionSummary[];
+  next_cursor: string | null;
+  total: number | null;
+};
+

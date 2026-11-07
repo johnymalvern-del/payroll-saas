@@ -7,6 +7,7 @@ import { AttendanceSheetPage } from "./pages/AttendanceSheetPage";
 import { ClockInPage } from "./pages/ClockInPage";
 import { DevicesPage } from "./pages/setup/DevicesPage";
 import { IntelligenceSettingsPage } from "./pages/setup/IntelligenceSettingsPage";
+import { IntelligenceDecisionsPage } from "./pages/IntelligenceDecisionsPage";
 import { PublicHolidaysPage } from "./pages/setup/PublicHolidaysPage";
 import { WorkPatternsPage } from "./pages/setup/WorkPatternsPage";
 import { ShiftsPage } from "./pages/setup/ShiftsPage";
@@ -69,6 +70,8 @@ export default function App() {
             <Route path="public-holidays" element={<PublicHolidaysPage />} />
             <Route path="devices" element={<DevicesPage />} />
             <Route path="intelligence" element={<IntelligenceSettingsPage />} />
+            <Route path="intelligence/decisions" element={<IntelligenceDecisionsPage />} />
+
           </Route>
           <Route path="payslips" element={<OwnPayslipsPage />} />
         </Route>
