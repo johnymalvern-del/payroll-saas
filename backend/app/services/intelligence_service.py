@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
@@ -289,8 +290,53 @@ def create_decision_record(
         execution_status="pending",
         created_at=datetime.now(timezone.utc),
     )
-    db.add(decision)
-    db.flush()
+    # Wrap the decision insert in a savepoint so a concurrent duplicate
+    # (same workflow + idempotency_key) is caught and handled without
+    # rolling back the caller's surrounding transaction.
+    _sp = db.begin_nested()
+    try:
+        db.add(decision)
+        db.flush()
+        _sp.commit()
+    except IntegrityError as exc:
+        _sp.rollback()
+        _msg = (
+            str(exc.orig) if getattr(exc, "orig", None) else str(exc)
+        ).lower()
+        if idempotency_key is not None and (
+            "uq_intelligence_decision_idempotency" in _msg
+            or ("unique" in _msg and "idempotency" in _msg)
+        ):
+            _existing = db.scalar(
+                select(IntelligenceDecision).where(
+                    IntelligenceDecision.workflow == workflow,
+                    IntelligenceDecision.idempotency_key == idempotency_key,
+                )
+            )
+            if _existing is not None:
+                if _existing.evidence_snapshot_id is not None:
+                    _snap = db.get(
+                        IntelligenceEvidenceSnapshot,
+                        _existing.evidence_snapshot_id,
+                    )
+                    try:
+                        _candidate_hash = _sha256_hex(
+                            _canonical_serialise(
+                                _sanitise_snapshot(evidence_payload)
+                            )
+                        )
+                    except AppError:
+                        _candidate_hash = None
+                    if _snap is not None and _candidate_hash == _snap.sha256_hex:
+                        return _existing
+                raise AppError(
+                    "idempotency_key_conflict",
+                    f"Idempotency key {idempotency_key!r} already used "
+                    f"with different payload",
+                    409,
+                )
+        # Not an idempotency conflict — re-raise untouched
+        raise
 
     # Insert snapshot
     snapshot = IntelligenceEvidenceSnapshot(
