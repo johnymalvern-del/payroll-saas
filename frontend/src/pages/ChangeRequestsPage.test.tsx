@@ -60,6 +60,7 @@ const REQ = {
   decided_at: null,
   decision_note: null,
   applied_entity_id: null,
+  assignment_id: null,
   row_version: 1,
 };
 
@@ -353,5 +354,74 @@ describe("ChangeRequestsPage", () => {
       const withCursor = calls.filter((c) => c.url.includes("cursor=abc"));
       expect(withCursor.length).toBeGreaterThanOrEqual(1);
     });
+  });
+
+  // ---- assignment-link filter (M3.5 item 4) ----
+
+  it("filters assignment-linked change requests out of the queue", async () => {
+    const REQ_CHILD = {
+      ...REQ,
+      id: "cr2",
+      assignment_id: "a1",
+    };
+    const REQ_INDIV = {
+      ...REQ,
+      id: "cr3",
+      assignment_id: null,
+    };
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.includes("/api/v1/employees")) {
+        return jr({ items: [EMP], next_cursor: null });
+      }
+      if (url.includes("/payroll/change-requests")) {
+        return jr({ items: [REQ_CHILD, REQ_INDIV], next_cursor: null });
+      }
+      return jr({}, 200);
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    // The individual request renders.
+    await screen.findByTestId("change-request-cr3");
+    // The assignment-linked request does not.
+    expect(screen.queryByTestId("change-request-cr2")).toBeNull();
+    // And the individual row has its action buttons.
+    expect(screen.getByTestId("change-request-approve-cr3")).toBeInTheDocument();
+  });
+
+  it("load-more preserves the filter across pages", async () => {
+    const PAGE1_CHILD = { ...REQ, id: "cr10", assignment_id: "a1" };
+    const PAGE1_INDIV = { ...REQ, id: "cr11", assignment_id: null };
+    const PAGE2_CHILD = { ...REQ, id: "cr20", assignment_id: "a2" };
+    const PAGE2_INDIV = { ...REQ, id: "cr21", assignment_id: null };
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.includes("/api/v1/employees")) {
+        return jr({ items: [EMP], next_cursor: null });
+      }
+      if (url.includes("/payroll/change-requests")) {
+        if (url.includes("cursor=page2")) {
+          return jr({ items: [PAGE2_CHILD, PAGE2_INDIV], next_cursor: null });
+        }
+        return jr({
+          items: [PAGE1_CHILD, PAGE1_INDIV],
+          next_cursor: "page2",
+        });
+      }
+      return jr({}, 200);
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    await screen.findByTestId("change-request-cr11");
+    expect(screen.queryByTestId("change-request-cr10")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("change-requests-load-more"));
+    await screen.findByTestId("change-request-cr21");
+
+    // Both individuals visible; both children still hidden.
+    expect(screen.getByTestId("change-request-cr11")).toBeInTheDocument();
+    expect(screen.getByTestId("change-request-cr21")).toBeInTheDocument();
+    expect(screen.queryByTestId("change-request-cr10")).toBeNull();
+    expect(screen.queryByTestId("change-request-cr20")).toBeNull();
   });
 });

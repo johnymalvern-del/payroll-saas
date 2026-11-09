@@ -11,6 +11,7 @@ export type ChangeRequestOut = {
   decided_at: string | null;
   decision_note: string | null;
   applied_entity_id: string | null;
+  assignment_id: string | null;
   row_version: number;
 };
 
@@ -111,3 +112,5 @@ export async function cancelChangeRequest(id: string): Promise<ChangeRequestOut>
   }
   return (await res.json()) as ChangeRequestOut;
 }
+
+// END OF FILE

@@ -91,7 +91,13 @@ export function ChangeRequestsPage() {
     });
   }
 
-  const items = requests.data?.pages.flatMap((p) => p.items) ?? [];
+  // Assignment-linked change requests are audit envelopes controlled by the
+  // salary-assignment service; they are not part of the standalone queue.
+  // Filter client-side because the backend list endpoint has no
+  // include_assignment_children toggle today. Records remain queryable via
+  // GET /payroll/change-requests/{id} and via the salary assignment detail.
+  const allItems = requests.data?.pages.flatMap((p) => p.items) ?? [];
+  const items = allItems.filter((r) => r.assignment_id == null);
 
   const applyMutation = useMutation({
     mutationFn: async (vars: {
