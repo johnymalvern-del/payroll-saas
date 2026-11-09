@@ -308,8 +308,6 @@ def _seed_shift_rate_rules(db, shift: Shift) -> int:
         added += 1
     db.flush()
     return added
-
-
 def _seed_work_pattern(db, shift: Shift) -> WorkPattern:
     wp = WorkPattern(
         name="Mon-Fri Day",
@@ -551,7 +549,7 @@ def _backfill_exceptions(
     db, employees: list[Employee], start_date: date,
 ) -> None:
     types_missing = [
-        "missing_in", "low_confidence", "overtime_unapproved",
+        "missing_in", "no_shift_match", "low_confidence", "overtime_unapproved",
         "duplicate", "device_clock_gap", "employee_query",
         "absent_expected", "too_long",
     ]
