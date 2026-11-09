@@ -93,7 +93,7 @@ otherwise delegates to `mapErrorCode` (so `day_locked`,
   (`Africa/Johannesburg`) in `frontend/src/lib/config.ts`.
 - **B-6**: multi-value type filter on `GET /attendance/exceptions`.
 - **B-11**: per-employee site timezone on list endpoints (or
-  `GET /sites?ids=…`) — needed to compute adjustment times in each
+  `GET /sites?ids=...`) — needed to compute adjustment times in each
   employee's site tz rather than a single constant.
 - **B-12**: `GET /attendance/adjustments/reason-codes` (or embed the
   current allowed list in some settings response) so the reason_code
@@ -201,6 +201,7 @@ otherwise delegates to `mapErrorCode` (so `day_locked`,
 - Times shown with `dayjs(...).format(...)` (browser tz); follow-up to route through `getSiteTz()` as part of a global display pass.
 - No bulk PDF download; per-row only.
 - Employee-facing screen shows `status` (`current` | `superseded`) verbatim, uncoloured; no status-specific messaging for `superseded` beyond the raw value.
+
 ## Attendance end-to-end (shipped)
 
 Bundles shipped against the "attendance usable today" goal:
@@ -309,3 +310,48 @@ Bundles shipped against the "attendance usable today" goal:
   endpoint (backend gap, out of P1 scope).
 - `PageHeader` adoption in individual pages is a P2/P3 concern — the
   theme overrides apply without markup changes.
+
+## F-9 Salary structures (M3 Stage F, committed)
+
+Three pages + three API modules. Routes: `/payroll/salary-structures` (list),
+`/payroll/salary-structures/:groupId` (detail), `/payroll/employee-payroll`
+and `/payroll/employee-payroll/:employeeId` (index / detail). Nav: two
+`pay_rate_view`-gated items under People ("Employee payroll") and Payroll
+("Salary structures"); `nav.test.ts` expected path lists refreshed for hr
+and auditor.
+
+API modules: `salaryStructures.ts` (7 functions, `StructureApiError`),
+`payrollTypes.ts` (`fetchEarningTypes`, `fetchDeductionTypes`),
+`salaryAssignments.ts` (7 functions, `AssignmentApiError`).
+
+### F-9a SalaryStructuresPage
+List current structures; create modal (name, description, pay_basis,
+base_rate, dynamic components). Earning component requires exactly one of
+amount/rate; deduction requires amount. Deactivate per row via
+`window.confirm`. Earning/deduction dropdowns filter `is_system`,
+`BASE_MONTHLY`, `is_active=false`. 10 tests.
+
+### F-9b SalaryStructureDetailPage
+Header (name, version, current, active badges), component table, version
+history, Edit modal (name, description, base_rate — submits version_number +
+row_version), Deactivate. Component editing is deferred. 10 tests.
+
+### F-9c EmployeePayrollPage
+Index (employee list, each links to detail). Detail (assignment history,
+submit form: structure select, effective date, "Check overlaps"). Collision
+pre-check renders manual rows as checkboxes (`requires_override` only
+selectable) plus structure-owned rows in a blue notice. Submit builds
+`override_manual_ids: [{kind, id}]`. 8 tests.
+
+### Known limitations
+- No approve / reject / cancel UI in `EmployeePayrollPage`. API functions
+  exist (`approveAssignment`, `rejectAssignment`, `cancelAssignment`);
+  F-9d will surface them.
+- Edit modal does not touch components.
+- No list pagination on salary-structures / assignments.
+- Strings inlined per page — M3 pages do not consume `strings.ts`.
+- `check-collisions` submits with empty `override_manual_ids`; user toggles
+  overrides after seeing candidates.
+- Individual change-request children (`assignment_id IS NOT NULL`) not
+  filtered from `ChangeRequestsPage` — backend guard refuses individual
+  actions. F-9e.
