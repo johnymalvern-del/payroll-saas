@@ -17,6 +17,12 @@ from app.api.v1.payroll_employees import router as payroll_employees_router
 from app.api.v1.payroll_formulas import router as payroll_formulas_router
 from app.api.v1.payroll_pay_periods import router as payroll_pay_periods_router
 from app.api.v1.payroll_payslips import router as payroll_payslips_router
+from app.api.v1.payroll_salary_assignments import (
+    employee_history_router as payroll_salary_assignments_history_router,
+)
+from app.api.v1.payroll_salary_assignments import (
+    router as payroll_salary_assignments_router,
+)
 from app.api.v1.payroll_salary_structures import router as payroll_salary_structures_router
 from app.api.v1.payroll_settings import router as payroll_settings_router
 from app.api.v1.payroll_system_types import router as payroll_system_types_router
@@ -83,3 +89,5 @@ api_router.include_router(payroll_system_types_router)
 api_router.include_router(payroll_pay_periods_router)
 api_router.include_router(payroll_payslips_router)
 api_router.include_router(payroll_salary_structures_router)
+api_router.include_router(payroll_salary_assignments_router)
+api_router.include_router(payroll_salary_assignments_history_router)

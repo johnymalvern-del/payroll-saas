@@ -8,6 +8,11 @@ Approval writes through in the same transaction as the status flip.
   - payload requires row_version + at least one mutable field
   - _apply checks row_version at approval time (stale request -> record_changed)
   - _apply refuses if no field was actually written (defence in depth)
+
+M3 Stage C: individual approve / reject / cancel refuse to act on any
+change request whose assignment_id IS NOT NULL. These children are audit
+envelopes controlled exclusively by the salary-assignment service
+(design §5.11 Rule 1).
 """
 from __future__ import annotations
 
@@ -109,6 +114,39 @@ SUBMIT_SCHEMAS: dict[str, type[BaseModel]] = {
 
 
 # ---------------------------------------------------------------------------
+# Assignment-child guard (design §5.11 Rule 1)
+# ---------------------------------------------------------------------------
+
+_ASSIGNMENT_CHILD_GUARD: dict[str, str] = {
+    "approve": "assignment_requires_batch_approve",
+    "reject": "assignment_requires_batch_reject",
+    "cancel": "assignment_requires_batch_cancel",
+}
+
+
+def _guard_not_assignment_child(
+    db: Session, request_id: uuid.UUID, action: str,
+) -> None:
+    """Refuse if the target change request is controlled by an assignment.
+
+    Runs before _load_pending so a terminal assignment-linked child also
+    refuses with the batch-specific code, not `not_pending`.
+    """
+    row = db.scalar(select(PayrollChangeRequest).where(
+        PayrollChangeRequest.id == request_id,
+    ))
+    if row is None:
+        raise AppError("not_found", "Change request not found", 404)
+    if row.assignment_id is not None:
+        raise AppError(
+            _ASSIGNMENT_CHILD_GUARD[action],
+            f"This change request is controlled by salary assignment "
+            f"{row.assignment_id}; use the assignment {action} endpoint",
+            409,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Submit / approve / reject / cancel
 # ---------------------------------------------------------------------------
 
@@ -170,6 +208,7 @@ def submit_change_request(
 def approve_change_request(
     db: Session, user: Any, request_id: uuid.UUID,
 ) -> tuple[PayrollChangeRequest, uuid.UUID]:
+    _guard_not_assignment_child(db, request_id, "approve")
     request = _load_pending(db, request_id)
     _reject_self_approval(request, user)
 
@@ -192,6 +231,7 @@ def approve_change_request(
 def reject_change_request(
     db: Session, user: Any, request_id: uuid.UUID, note: str,
 ) -> PayrollChangeRequest:
+    _guard_not_assignment_child(db, request_id, "reject")
     request = _load_pending(db, request_id)
     _reject_self_approval(request, user)
     request.status = "rejected"
@@ -212,6 +252,7 @@ def reject_change_request(
 def cancel_change_request(
     db: Session, user: Any, request_id: uuid.UUID,
 ) -> PayrollChangeRequest:
+    _guard_not_assignment_child(db, request_id, "cancel")
     request = _load_pending(db, request_id)
     if request.requested_by_user_id != getattr(user, "id", None):
         raise AppError(

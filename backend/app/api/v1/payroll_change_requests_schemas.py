@@ -38,6 +38,7 @@ class ChangeRequestOut(BaseModel):
     decided_at: datetime | None = None
     decision_note: str | None = None
     applied_entity_id: uuid.UUID | None = None
+    assignment_id: uuid.UUID | None = None
     row_version: int
 
 
