@@ -78,6 +78,11 @@ class PayrollChangeRequest(Base):
     applied_entity_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True,
     )
+    assignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("employee_salary_structure_assignment.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     row_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1,
     )

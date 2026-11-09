@@ -24,12 +24,14 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
     true,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -98,6 +100,14 @@ class Employee(Base, TimestampMixin):
 
 class EmployeePayHistory(Base, TimestampMixin):
     __tablename__ = "employee_pay_history"
+    __table_args__ = (
+        Index(
+            "ix_employee_pay_history_employee_approved_rate",
+            "employee_id",
+            text("effective_from DESC"),
+            postgresql_where=text("status = 'approved'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     employee_id: Mapped[uuid.UUID] = mapped_column(
@@ -124,6 +134,11 @@ class EmployeePayHistory(Base, TimestampMixin):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str | None] = mapped_column(String(20), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    source_assignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("employee_salary_structure_assignment.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
 
 
 class User(Base, TimestampMixin):
@@ -210,6 +225,7 @@ class BiometricEnrolment(Base, TimestampMixin):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 # END OF FILE
+
 # _4A_BIS_011 people
 
 # _4A_BIS_012 people
