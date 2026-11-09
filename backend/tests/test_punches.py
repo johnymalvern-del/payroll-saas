@@ -27,6 +27,24 @@ from app.db.tenant.models.organisation import Branch, Site
 from app.db.tenant.models.people import Employee
 from app.db.tenant.session import get_tenant_engine
 
+# Tiny valid JPEG (1x1 pixel) base64-encoded. Used in Milestone 2 regression
+# test that previously failed with HTTP 500 because punches.py called
+# storage.put() on a Storage class that only implements save/load/delete/
+# exists/signed_url.
+_TINY_JPEG_B64 = (
+    "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8U"
+    "HRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAARCAABAAEDASIA"
+    "AhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA"
+    "/9oADAMBAAIQAxAAAAEf/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QA"
+    "FBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAA"
+    "AP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBAB"
+    "AAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABD/xAAUEQEAAAAA"
+    "AAAAAAAAAAAAAAAA/9oACAEDAQE/EH//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEC"
+    "AQE/EH//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/EH//2Q=="
+)
+
+
+
 
 @dataclass
 class _DisposableTenant:
@@ -358,3 +376,48 @@ def test_submit_batch_mixed_200(api, db):
     assert out['results'][1]['error']['code'] == 'unknown_employee'
 
 # END OF FILE
+
+# ---------------------------------------------------------------------------
+# Milestone 2 regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_submit_punch_with_valid_photo_persists(api, db):
+    """Punch with valid photo must persist and return photo_object_key.
+
+    Regression: pre-fix, punches.py called storage.put() which does not exist
+    on the Storage base class (only save/load/delete/exists/signed_url). Result
+    was AttributeError -> HTTP 500 for every photo-bearing punch.
+    """
+    client, tenant = api
+    site = _mk_branch_site(db)
+    _dev, raw = _mk_device(db, site.id)
+    emp = _mk_employee(db, 'PHOTO-1', site_id=site.id)
+    payload = _payload(emp.id, photo_base64=_TINY_JPEG_B64)
+    r = _post(client, tenant.slug, raw, payload)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body['photo_object_key'] is not None, body
+    assert body['photo_object_key'].startswith('punches/')
+
+
+def test_submit_punch_surfaces_recompute_warning(api, db):
+    """When attendance recompute fails, punch must persist (201) and the
+    response must carry 'attendance_recompute_failed' in warnings.
+
+    Regression: pre-fix, _process_punch caught every recompute exception,
+    rolled back, printed to stderr, returned (punch, True). The caller
+    discarded the bool and returned 201 with no signal that attendance was
+    not built. In production this silently dropped attendance days.
+    """
+    client, tenant = api
+    site = _mk_branch_site(db)
+    _dev, raw = _mk_device(db, site.id)
+    emp = _mk_employee(db, 'RECOMP-1', site_id=site.id)
+    r = _post(client, tenant.slug, raw, _payload(emp.id))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body['id'] is not None
+    assert body['employee_id'] == str(emp.id)
+    assert 'warnings' in body, body
+    assert 'attendance_recompute_failed' in body['warnings'], body['warnings']

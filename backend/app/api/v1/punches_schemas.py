@@ -70,6 +70,7 @@ class PunchOut(BaseModel):
     flags: list[str]
     raw_payload: dict[str, Any]
     created_at: datetime
+    warnings: list[str] = []
 
 
 class PunchBatchItemOut(BaseModel):

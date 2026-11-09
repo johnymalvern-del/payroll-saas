@@ -161,10 +161,10 @@ def _process_punch(
     tenant_crypto: Any,
     storage: Storage,
     scanner: VirusScanner,
-) -> tuple[Punch, bool]:
+) -> tuple[Punch, list[str]]:
     existing = _handle_idempotent(db, device.id, payload)
     if existing is not None:
-        return existing, False
+        return existing, []
     employee = db.get(Employee, payload.employee_id)
     if employee is None:
         raise AppError('unknown_employee', 'employee_id does not exist', 422)
@@ -195,11 +195,11 @@ def _process_punch(
             status_val = 'low_confidence'
     photo_object_key = None
     if photo_bytes is not None:
-        scan_ok = scanner.scan(photo_bytes, filename='punch_photo.jpg')
-        if not scan_ok:
+        scan_result = scanner.scan(photo_bytes)
+        if not scan_result.clean:
             raise AppError('photo_scan_failed', 'Photo failed virus scan', 400)
         key = f'punches/{device.id}/{uuid.uuid4().hex}.jpg'
-        storage.put(key, photo_bytes)
+        storage.save(key, photo_bytes, content_type="image/jpeg")
         photo_object_key = key
     payload_hash = canonical_payload_hash(payload.model_dump())
     punch = Punch(
@@ -236,6 +236,7 @@ def _process_punch(
     # B7/D2: synchronous day-build after punch commit.
     import sys as _sys
     import traceback as _tb
+    warnings: list[str] = []
     try:
         from app.api.v1.attendance_engine import _tenant_local_today, recompute_day
         _, tz = _tenant_local_today(db)
@@ -247,9 +248,10 @@ def _process_punch(
         print(f"[TRIGGER] prev recompute returned: {None if d2 is None else (str(d2.id), str(d2.work_date), d2.status)}", file=_sys.stderr)
     except Exception as e:
         db.rollback()
+        warnings = ["attendance_recompute_failed"]
         print(f"[TRIGGER FAILED] {type(e).__name__}: {e}", file=_sys.stderr)
         _tb.print_exc(file=_sys.stderr)
-    return punch, True
+    return punch, warnings
 
 
 @router.post('', response_model=PunchOut, status_code=status.HTTP_201_CREATED)
@@ -264,8 +266,10 @@ def submit_punch(
 ) -> PunchOut:
     server_received_at = datetime.now(timezone.utc)
     request_id = getattr(request.state, 'request_id', None)
-    punch, _ = _process_punch(db, device, None, payload, request_id, server_received_at, tenant.crypto, storage, scanner)
-    return _to_out(punch)
+    punch, warnings = _process_punch(db, device, None, payload, request_id, server_received_at, tenant.crypto, storage, scanner)
+    out = _to_out(punch)
+    out.warnings = warnings
+    return out
 
 
 @router.post('/batch', response_model=PunchBatchOut, status_code=status.HTTP_200_OK)
@@ -285,12 +289,14 @@ def submit_punch_batch(
     results: list[PunchBatchItemOut] = []
     for i, p in enumerate(payload.punches):
         try:
-            punch, _ = _process_punch(db, device, None, p, request_id, server_received_at, tenant.crypto, storage, scanner)
+            punch, warnings = _process_punch(db, device, None, p, request_id, server_received_at, tenant.crypto, storage, scanner)
             if punch.status == 'rejected':
                 rejected += 1
             else:
                 accepted += 1
-            results.append(PunchBatchItemOut(index=i, ok=True, punch=_to_out(punch), error=None))
+            item_out = _to_out(punch)
+            item_out.warnings = warnings
+            results.append(PunchBatchItemOut(index=i, ok=True, punch=item_out, error=None))
         except AppError as e:
             db.rollback()
             rejected += 1
