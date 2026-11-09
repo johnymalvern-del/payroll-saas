@@ -2,13 +2,18 @@ import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Alert, Badge, Button, Group, Loader, Modal, Stack, Table,
+  Alert, Badge, Button, Group, Loader, Modal, Select, Stack, Table,
   Text, TextInput, Title,
 } from "@mantine/core";
 import {
   deactivateStructure, editStructure, getCurrentStructure,
-  listVersions, type StructureOut,
+  listVersions,
+  type ComponentKind, type StructureComponentIn, type StructureOut,
 } from "../api/salaryStructures";
+import {
+  fetchDeductionTypes, fetchEarningTypes,
+  type DeductionTypeOut, type EarningTypeOut,
+} from "../api/payrollTypes";
 
 function mapError(code: string): string {
   switch (code) {
@@ -16,9 +21,96 @@ function mapError(code: string): string {
       return "This structure was changed by another user. Reload and try again.";
     case "structure_inactive":
       return "This structure is inactive.";
+    case "system_earning_type_not_allowed_in_structure":
+      return "System earning types cannot be used in salary structures.";
+    case "base_monthly_component_not_allowed":
+      return "BASE_MONTHLY cannot be a component; use the structure base rate.";
+    case "inactive_earning_type_not_allowed":
+      return "Inactive earning types cannot be used.";
+    case "system_deduction_not_allowed_in_structure":
+      return "System deduction types cannot be used.";
+    case "inactive_deduction_type_not_allowed":
+      return "Inactive deduction types cannot be used.";
+    case "invalid_component":
+      return "One or more components are invalid.";
     default:
       return "Something went wrong. Please try again.";
   }
+}
+
+type ComponentDraft = {
+  key: string;
+  id: string | null;
+  kind: ComponentKind;
+  earning_type_id: string | null;
+  deduction_type_id: string | null;
+  amount: string;
+  rate: string;
+};
+
+function _newKey(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function _draftFromComponents(
+  comps: StructureOut["components"],
+): ComponentDraft[] {
+  return comps.map((c) => ({
+    key: _newKey(),
+    id: c.id,
+    kind: c.kind === "deduction" ? "deduction" : "earning",
+    earning_type_id: c.earning_type_id,
+    deduction_type_id: c.deduction_type_id,
+    amount: c.amount ?? "",
+    rate: c.rate ?? "",
+  }));
+}
+
+function _emptyEarningDraft(): ComponentDraft {
+  return {
+    key: _newKey(), id: null, kind: "earning",
+    earning_type_id: null, deduction_type_id: null,
+    amount: "", rate: "",
+  };
+}
+
+function _emptyDeductionDraft(): ComponentDraft {
+  return {
+    key: _newKey(), id: null, kind: "deduction",
+    earning_type_id: null, deduction_type_id: null,
+    amount: "", rate: "",
+  };
+}
+
+function _draftToInput(d: ComponentDraft): StructureComponentIn {
+  return {
+    kind: d.kind,
+    earning_type_id: d.kind === "earning" ? d.earning_type_id : null,
+    deduction_type_id: d.kind === "deduction" ? d.deduction_type_id : null,
+    amount: d.amount || null,
+    rate: d.rate || null,
+  };
+}
+
+function _validateComponents(components: ComponentDraft[]): string | null {
+  for (const c of components) {
+    if (c.kind === "earning") {
+      if (!c.earning_type_id) {
+        return "Each earning component needs a type.";
+      }
+      if ((!c.amount && !c.rate) || (c.amount && c.rate)) {
+        return "Each earning component needs exactly one of amount or rate.";
+      }
+    } else {
+      if (!c.deduction_type_id) {
+        return "Each deduction component needs a type.";
+      }
+      if (!c.amount) {
+        return "Each deduction component needs an amount.";
+      }
+    }
+  }
+  return null;
 }
 
 export function SalaryStructureDetailPage() {
@@ -28,6 +120,9 @@ export function SalaryStructureDetailPage() {
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const [editBaseRate, setEditBaseRate] = useState("");
+  const [editComponents, setEditComponents] = useState<ComponentDraft[]>([]);
+  const [componentsDirty, setComponentsDirty] = useState(false);
+  const [componentsExpanded, setComponentsExpanded] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -41,15 +136,28 @@ export function SalaryStructureDetailPage() {
     queryFn: () => listVersions(groupId!),
     enabled: !!groupId,
   });
+  const earningTypes = useQuery({
+    queryKey: ["payroll_earning_types"],
+    queryFn: fetchEarningTypes,
+    staleTime: 5 * 60 * 1000,
+  });
+  const deductionTypes = useQuery({
+    queryKey: ["payroll_deduction_types"],
+    queryFn: fetchDeductionTypes,
+    staleTime: 5 * 60 * 1000,
+  });
 
   const save = useMutation({
     mutationFn: (body: {
       version_number: number; row_version: number;
       name: string; description: string | null; base_rate: string;
+      components?: StructureComponentIn[];
     }) => editStructure(groupId!, body),
     onSuccess: () => {
       setEditOpen(false);
       setEditError(null);
+      setComponentsDirty(false);
+      setComponentsExpanded(false);
       qc.invalidateQueries({ queryKey: ["salary_structure", groupId] });
       qc.invalidateQueries({ queryKey: ["salary_structure_versions", groupId] });
       qc.invalidateQueries({ queryKey: ["salary_structures"] });
@@ -91,12 +199,80 @@ export function SalaryStructureDetailPage() {
   }
   const s: StructureOut = structure.data;
 
+  const earningOptions = (earningTypes.data?.items ?? [])
+    .filter((et: EarningTypeOut) =>
+      !et.is_system && et.code !== "BASE_MONTHLY" && et.is_active)
+    .map((et) => ({ value: et.id, label: `${et.code} — ${et.name}` }));
+  const deductionOptions = (deductionTypes.data?.items ?? [])
+    .filter((dt: DeductionTypeOut) => !dt.is_system && dt.is_active)
+    .map((dt) => ({ value: dt.id, label: `${dt.code} — ${dt.name}` }));
+
   const openEdit = () => {
     setEditName(s.name);
     setEditDesc(s.description ?? "");
     setEditBaseRate(s.base_rate);
+    setEditComponents(_draftFromComponents(s.components));
+    setComponentsDirty(false);
+    setComponentsExpanded(false);
     setEditError(null);
     setEditOpen(true);
+  };
+
+  const closeEdit = () => {
+    if (save.isPending) return;
+    setEditOpen(false);
+    setEditError(null);
+    setComponentsDirty(false);
+    setComponentsExpanded(false);
+  };
+
+  const markDirty = () => { if (!componentsDirty) setComponentsDirty(true); };
+
+  const updateComponent = (i: number, patch: Partial<ComponentDraft>) => {
+    const next = [...editComponents];
+    next[i] = { ...next[i], ...patch };
+    setEditComponents(next);
+    markDirty();
+  };
+
+  const addEarning = () => {
+    setEditComponents([...editComponents, _emptyEarningDraft()]);
+    markDirty();
+  };
+  const addDeduction = () => {
+    setEditComponents([...editComponents, _emptyDeductionDraft()]);
+    markDirty();
+  };
+  const removeComponent = (i: number) => {
+    setEditComponents(editComponents.filter((_, j) => j !== i));
+    markDirty();
+  };
+
+  const submitEdit = () => {
+    setEditError(null);
+    if (!editName.trim()) {
+      setEditError("Name is required.");
+      return;
+    }
+    if (!editBaseRate) {
+      setEditError("Base rate is required.");
+      return;
+    }
+    if (componentsDirty) {
+      const v = _validateComponents(editComponents);
+      if (v) { setEditError(v); return; }
+    }
+    const body: Parameters<typeof save.mutate>[0] = {
+      version_number: s.version_number,
+      row_version: s.row_version,
+      name: editName,
+      description: editDesc || null,
+      base_rate: editBaseRate,
+    };
+    if (componentsDirty) {
+      body.components = editComponents.map(_draftToInput);
+    }
+    save.mutate(body);
   };
 
   return (
@@ -229,8 +405,9 @@ export function SalaryStructureDetailPage() {
 
       <Modal
         opened={editOpen}
-        onClose={() => setEditOpen(false)}
+        onClose={closeEdit}
         title="Edit salary structure (creates new version)"
+        size="xl"
       >
         <Stack gap="sm">
           <TextInput
@@ -251,34 +428,104 @@ export function SalaryStructureDetailPage() {
             onChange={(e) => setEditBaseRate(e.currentTarget.value)}
             data-testid="edit-base-rate"
           />
+
+          <Group justify="space-between" align="center" mt="sm">
+            <Text fw={500}>
+              Components ({editComponents.length})
+            </Text>
+            <Button
+              size="xs"
+              variant="default"
+              data-testid="toggle-components"
+              onClick={() => setComponentsExpanded((v) => !v)}
+            >
+              {componentsExpanded ? "Hide components" : "Modify components"}
+            </Button>
+          </Group>
+          <Text size="xs" c="dimmed">
+            Editing components creates a new immutable version. Historical
+            versions are never modified.
+          </Text>
+
+          {componentsExpanded && (
+            <Stack gap="xs" data-testid="edit-components-editor">
+              {editComponents.map((c, i) => (
+                <Group key={c.key} data-testid={`edit-component-row-${i}`} align="end">
+                  {c.kind === "earning" ? (
+                    <Select
+                      label="Type"
+                      data={earningOptions}
+                      value={c.earning_type_id}
+                      onChange={(v) =>
+                        updateComponent(i, { earning_type_id: v })}
+                      searchable
+                      data-testid={`edit-component-type-${i}`}
+                      style={{ minWidth: 220 }}
+                    />
+                  ) : (
+                    <Select
+                      label="Type"
+                      data={deductionOptions}
+                      value={c.deduction_type_id}
+                      onChange={(v) =>
+                        updateComponent(i, { deduction_type_id: v })}
+                      searchable
+                      data-testid={`edit-component-type-${i}`}
+                      style={{ minWidth: 220 }}
+                    />
+                  )}
+                  <TextInput
+                    label="Amount"
+                    value={c.amount}
+                    onChange={(e) =>
+                      updateComponent(i, { amount: e.currentTarget.value })}
+                    data-testid={`edit-component-amount-${i}`}
+                    style={{ width: 120 }}
+                  />
+                  {c.kind === "earning" && (
+                    <TextInput
+                      label="Rate"
+                      value={c.rate}
+                      onChange={(e) =>
+                        updateComponent(i, { rate: e.currentTarget.value })}
+                      data-testid={`edit-component-rate-${i}`}
+                      style={{ width: 120 }}
+                    />
+                  )}
+                  <Button variant="default" color="red" size="xs"
+                    data-testid={`edit-component-remove-${i}`}
+                    onClick={() => removeComponent(i)}>
+                    Remove
+                  </Button>
+                </Group>
+              ))}
+              <Group>
+                <Button variant="default" size="xs"
+                  data-testid="edit-add-earning"
+                  onClick={addEarning}>
+                  Add earning
+                </Button>
+                <Button variant="default" size="xs"
+                  data-testid="edit-add-deduction"
+                  onClick={addDeduction}>
+                  Add deduction
+                </Button>
+              </Group>
+            </Stack>
+          )}
+
           {editError && (
             <Alert color="red" data-testid="edit-error">{editError}</Alert>
           )}
           <Group justify="flex-end">
-            <Button variant="default" onClick={() => setEditOpen(false)}>
+            <Button variant="default" onClick={closeEdit}
+              disabled={save.isPending}>
               Cancel
             </Button>
             <Button
               data-testid="edit-submit"
               loading={save.isPending}
-              onClick={() => {
-                setEditError(null);
-                if (!editName.trim()) {
-                  setEditError("Name is required.");
-                  return;
-                }
-                if (!editBaseRate) {
-                  setEditError("Base rate is required.");
-                  return;
-                }
-                save.mutate({
-                  version_number: s.version_number,
-                  row_version: s.row_version,
-                  name: editName,
-                  description: editDesc || null,
-                  base_rate: editBaseRate,
-                });
-              }}
+              onClick={submitEdit}
             >
               Save
             </Button>
