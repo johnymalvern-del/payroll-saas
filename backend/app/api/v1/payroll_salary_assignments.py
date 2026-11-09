@@ -1,9 +1,4 @@
-"""Salary structure assignment endpoints (Stage C of Milestone 3).
-
-Submit / reject / cancel / read / attempts / employee history /
-collision pre-check. Approve (with batch inserts, closures, attempt
-rows) is Stage D and lives in a separate module.
-"""
+"""Salary structure assignment endpoints (Stages C + D of Milestone 3)."""
 from __future__ import annotations
 
 import uuid
@@ -28,6 +23,7 @@ from app.api.v1.payroll_salary_assignments_schemas import (
 )
 from app.core.permissions import Permission, require_permission
 from app.services import salary_assignment_service as svc
+from app.services.salary_assignment_approve_service import approve_assignment
 
 router = APIRouter(
     prefix="/payroll/employee-salary-assignments",
@@ -100,6 +96,23 @@ def get_attempts(
     return AttemptListOut(items=[AttemptOut.model_validate(r) for r in rows])
 
 
+@router.post("/{assignment_id}/approve", response_model=AssignmentDetailOut)
+def approve(
+    assignment_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_APPROVE))],
+) -> AssignmentDetailOut:
+    # Service commits internally (design §5.12 Phase D); router does NOT
+    # call db.commit() again.
+    a = approve_assignment(db, user, assignment_id)
+    children = svc.list_children(db, a.id)
+    base = AssignmentOut.model_validate(a).model_dump()
+    return AssignmentDetailOut(
+        **base,
+        children=[ChangeRequestChildOut.model_validate(c) for c in children],
+    )
+
+
 @router.post("/{assignment_id}/reject", response_model=AssignmentOut)
 def reject(
     assignment_id: uuid.UUID,
@@ -123,7 +136,7 @@ def cancel(
     return AssignmentOut.model_validate(a)
 
 
-# Employee history endpoint uses a different prefix, mounted separately.
+# Employee history endpoint uses a different prefix.
 employee_history_router = APIRouter(
     prefix="/payroll/employees",
     tags=["payroll-salary-assignments"],

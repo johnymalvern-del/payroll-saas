@@ -1,34 +1,14 @@
-"""Salary structure assignment service (Stage C of Milestone 3).
+"""Salary structure assignment service (Stage C + D of Milestone 3).
 
-Submit / reject / cancel + read helpers. Approve (with batch inserts,
-closures, attempt rows, recovery) is Stage D.
+Submit / reject / cancel + read helpers in this module.
+Approve (batch work, closures, attempt rows, recovery) lives in
+salary_assignment_approve_service.py, importing shared helpers from here.
 
 Advisory lock on the employee serialises concurrent submit / approve /
 reject / cancel for the same employee. Key derivation is namespace-
-isolated from attendance_engine._advisory_lock_key (which uses
-(emp_uuid[:4] & 0x7FFFFFFF, days_since_epoch)); here we use a fixed
-odd int32 for k1 and a SHA-256 derived int32 for k2, giving provable
-namespace separation.
-
-Design points enforced here at submit:
-  1. effective_from > today (backdating_not_permitted 422)
-  2. at least one pay_period exists (no_pay_periods_configured 409)
-  3. effective_from is not affected by any open pay period
-     (effective_date_affects_open_period 409)
-  4. effective_from is a period boundary (effective_date_not_period_boundary 409)
-  5. employee.pay_basis == structure.pay_basis (pay_basis_mismatch 409)
-  6. structure.is_current == True (structure_not_current 409)
-  7. structure.is_active == True (structure_inactive 409)
-  8. no existing pending assignment for employee
-     (pending_salary_structure_assignment_exists 409)
-  9. no pending individual change requests for employee
-     (pending_individual_change_requests_block_assignment 409)
- 10. every override_manual_id is a valid manual row of the right kind,
-     right employee, right component type, overlapping the effective date
-     (invalid_override_manual_id 422 with reason)
- 11. no unselected earlier-start manual collision
-     (manual_component_type_collision 409)
- 12. no same-start manual collision (manual_component_same_start_date 409)
+isolated from attendance_engine._advisory_lock_key by using a fixed
+odd int32 for k1 (vs. emp_uuid[:4] for the attendance engine) and a
+SHA-256 derived int32 for k2.
 """
 from __future__ import annotations
 
@@ -55,12 +35,7 @@ from app.db.tenant.models.salary_structure import (
 from app.services.payroll_audit import write_audit
 
 
-# Namespace prefix + odd int32 salt. Both k1 and k2 are within [0, 2^31)
-# so they fit PostgreSQL's int4 (positive range) and cannot be confused
-# with attendance_engine's (emp_uuid[:4], days_since_epoch) tuple for any
-# realistic employee UUID because k1 is a fixed constant that only an
-# astronomically unlucky emp_uuid[:4] could coincidentally match.
-_SALT_ASSIGN: int = 0x5A5A7C7D & 0x7FFFFFFF  # 1515879037 (odd)
+_SALT_ASSIGN: int = 0x5A5A7C7D & 0x7FFFFFFF  # 1515879037
 _NS_ASSIGN = b"payroll.salary_assignment.v1"
 
 
@@ -79,10 +54,6 @@ def _acquire_employee_lock(db: Session, employee_id: uuid.UUID) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Inputs / structural helpers
-# ---------------------------------------------------------------------------
-
 def _load_employee(db: Session, employee_id: uuid.UUID) -> Employee:
     emp = db.get(Employee, employee_id)
     if emp is None:
@@ -100,11 +71,6 @@ def _load_structure(db: Session, structure_id: uuid.UUID) -> SalaryStructure:
 def _structure_type_pairs(
     db: Session, structure: SalaryStructure,
 ) -> dict[tuple[str, uuid.UUID], str]:
-    """Return {(component_kind, type_id): component_kind} for structure.
-
-    component_kind is 'earning' or 'deduction' — the same discriminator
-    used in employee_earning.earning_type_id / employee_deduction.deduction_type_id.
-    """
     pairs: dict[tuple[str, uuid.UUID], str] = {}
     comps = db.scalars(select(SalaryStructureComponent).where(
         SalaryStructureComponent.structure_id == structure.id,
@@ -117,10 +83,6 @@ def _structure_type_pairs(
     return pairs
 
 
-# ---------------------------------------------------------------------------
-# Date / period rules
-# ---------------------------------------------------------------------------
-
 def _validate_date_rules(db: Session, effective_from: date) -> None:
     if effective_from <= date.today():
         raise AppError(
@@ -128,7 +90,6 @@ def _validate_date_rules(db: Session, effective_from: date) -> None:
             "effective_from must be later than today",
             422,
         )
-
     pay_periods = db.execute(text(
         "SELECT period_key, start_date, end_date, pay_date, status "
         "FROM pay_period"
@@ -139,7 +100,6 @@ def _validate_date_rules(db: Session, effective_from: date) -> None:
             "No pay periods exist; create a pay-period calendar first",
             409,
         )
-
     open_affecting = [
         {"period_key": row[0], "pay_date": row[3].isoformat()}
         for row in pay_periods
@@ -152,12 +112,10 @@ def _validate_date_rules(db: Session, effective_from: date) -> None:
             409,
             {"open_periods": open_affecting},
         )
-
     boundaries: set[date] = set()
     for row in pay_periods:
-        boundaries.add(row[1])           # start_date
-        boundaries.add(row[2] + timedelta(days=1))  # end_date + 1 day
-
+        boundaries.add(row[1])
+        boundaries.add(row[2] + timedelta(days=1))
     if effective_from not in boundaries:
         prior = sorted(b for b in boundaries if b < effective_from)
         nxt = sorted(b for b in boundaries if b > effective_from)
@@ -172,10 +130,6 @@ def _validate_date_rules(db: Session, effective_from: date) -> None:
             },
         )
 
-
-# ---------------------------------------------------------------------------
-# Structure / employee business rules
-# ---------------------------------------------------------------------------
 
 def _validate_structure_state(structure: SalaryStructure) -> None:
     if not structure.is_active:
@@ -229,22 +183,11 @@ def _check_no_blocking_individual_crs(
         )
 
 
-# ---------------------------------------------------------------------------
-# Manual-overlap classifier
-# ---------------------------------------------------------------------------
-
 def _overlap_universe(
     db: Session, employee_id: uuid.UUID,
     structure_type_pairs: dict[tuple[str, uuid.UUID], str],
     effective_from: date,
 ) -> list[dict]:
-    """Return all active manual rows touching effective_from with a
-    component type that appears in the structure.
-
-    Each row carries: kind ('employee_earning'|'employee_deduction'),
-    id, effective_from, effective_to, component_kind ('earning'|'deduction'),
-    component_type_id.
-    """
     rows: list[dict] = []
 
     earn_q = select(EmployeeEarning).where(
@@ -256,8 +199,6 @@ def _overlap_universe(
     for r in db.scalars(earn_q).all():
         if ("earning", r.earning_type_id) not in structure_type_pairs:
             continue
-        # Overlap: earlier start always overlaps; same start overlaps.
-        # Exclude if effective_to already fully precedes the assignment.
         if r.effective_to is not None and r.effective_to < effective_from:
             continue
         rows.append({
@@ -297,11 +238,6 @@ def _classify_overlaps(
     selected_set: set[tuple[str, uuid.UUID]],
     effective_from: date,
 ) -> tuple[list[dict], list[dict], list[dict]]:
-    """Split universe into (same_start, earlier_selected, earlier_unselected).
-
-    Later-starting rows are not in the universe (query bounds by
-    effective_from >= 0 via effective_from <= effective_from filter).
-    """
     same_start: list[dict] = []
     earlier_selected: list[dict] = []
     earlier_unselected: list[dict] = []
@@ -317,29 +253,16 @@ def _classify_overlaps(
     return same_start, earlier_selected, earlier_unselected
 
 
-# ---------------------------------------------------------------------------
-# override_manual_ids per-item validation
-# ---------------------------------------------------------------------------
-
 def _validate_override_manual_ids(
     db: Session, employee_id: uuid.UUID,
     structure_type_pairs: dict[tuple[str, uuid.UUID], str],
     raw_ids: list[dict], effective_from: date,
 ) -> tuple[set[tuple[str, uuid.UUID]], list[dict]]:
-    """Validate each entry; return (selected_set, resolved_rows).
-
-    Raises AppError('invalid_override_manual_id', ..., details={'reason': ...})
-    on any structural or ownership failure. Temporal failures are surfaced
-    here too: same-start is 409 manual_component_same_start_date; later-
-    start or fully-before-range is invalid_override_manual_id reason
-    'not_overlapping'.
-    """
     selected_set: set[tuple[str, uuid.UUID]] = set()
     resolved: list[dict] = []
     for item in raw_ids:
-        kind = item["kind"]            # 'employee_earning' | 'employee_deduction'
+        kind = item["kind"]
         rid = item["id"]
-
         if kind == "employee_earning":
             row = db.get(EmployeeEarning, rid)
             comp_kind = "earning"
@@ -350,50 +273,39 @@ def _validate_override_manual_ids(
             type_id = row.deduction_type_id if row is not None else None
         else:
             raise AppError(
-                "invalid_override_manual_id",
-                "Unknown override kind",
-                422,
+                "invalid_override_manual_id", "Unknown override kind", 422,
                 {"reason": "bad_kind"},
             )
-
         if row is None:
             raise AppError(
                 "invalid_override_manual_id",
-                "Referenced manual row does not exist",
-                422,
+                "Referenced manual row does not exist", 422,
                 {"reason": "not_found"},
             )
         if row.employee_id != employee_id:
             raise AppError(
                 "invalid_override_manual_id",
-                "Referenced manual row belongs to a different employee",
-                422,
+                "Referenced manual row belongs to a different employee", 422,
                 {"reason": "wrong_employee"},
             )
         if not row.is_active:
             raise AppError(
                 "invalid_override_manual_id",
-                "Referenced manual row is inactive",
-                422,
+                "Referenced manual row is inactive", 422,
                 {"reason": "not_active"},
             )
         if row.source_assignment_id is not None:
             raise AppError(
                 "invalid_override_manual_id",
-                "Referenced row was created by a prior salary structure",
-                422,
+                "Referenced row was created by a prior salary structure", 422,
                 {"reason": "not_manual"},
             )
         if (comp_kind, type_id) not in structure_type_pairs:
             raise AppError(
                 "invalid_override_manual_id",
                 "Referenced manual row's component type is not in the structure",
-                422,
-                {"reason": "type_not_in_structure"},
+                422, {"reason": "type_not_in_structure"},
             )
-
-        # Temporal classification (per design §5.6): same-start is
-        # its own 409, later-start or fully-before is not_overlapping 422.
         if row.effective_from == effective_from:
             raise AppError(
                 "manual_component_same_start_date",
@@ -404,33 +316,24 @@ def _validate_override_manual_ids(
             raise AppError(
                 "invalid_override_manual_id",
                 "Referenced manual row starts after the assignment date",
-                422,
-                {"reason": "not_overlapping"},
+                422, {"reason": "not_overlapping"},
             )
         if row.effective_to is not None and row.effective_to < effective_from:
             raise AppError(
                 "invalid_override_manual_id",
                 "Referenced manual row ends before the assignment date",
-                422,
-                {"reason": "not_overlapping"},
+                422, {"reason": "not_overlapping"},
             )
-
         selected_set.add((kind, rid))
         resolved.append({
-            "kind": kind,
-            "id": rid,
+            "kind": kind, "id": rid,
             "component_kind": comp_kind,
             "component_type_id": type_id,
             "effective_from": row.effective_from,
             "effective_to": row.effective_to,
         })
-
     return selected_set, resolved
 
-
-# ---------------------------------------------------------------------------
-# Public: submit
-# ---------------------------------------------------------------------------
 
 def submit_assignment(
     db: Session, user: Any, *,
@@ -440,7 +343,6 @@ def submit_assignment(
     idempotency_key: str | None,
     override_manual_ids: list[dict],
 ) -> EmployeeSalaryStructureAssignment:
-    # Idempotency short-circuit (before any lock, so retries are cheap).
     if idempotency_key is not None:
         existing = db.scalar(select(EmployeeSalaryStructureAssignment).where(
             EmployeeSalaryStructureAssignment.idempotency_key == idempotency_key,
@@ -473,24 +375,17 @@ def submit_assignment(
     same_start, _, earlier_unselected = _classify_overlaps(
         universe, selected_set, effective_from,
     )
-
-    # Precedence per design §5.6/§D.6: same-start first, then unselected
-    # earlier-start.
     if same_start:
         raise AppError(
             "manual_component_same_start_date",
             "One or more manual components start on the same day as the assignment",
             409,
-            {
-                "collisions": [
-                    {
-                        "kind": r["kind"], "id": str(r["id"]),
-                        "component_kind": r["component_kind"],
-                        "component_type_id": str(r["component_type_id"]),
-                    }
-                    for r in same_start
-                ],
-            },
+            {"collisions": [
+                {"kind": r["kind"], "id": str(r["id"]),
+                 "component_kind": r["component_kind"],
+                 "component_type_id": str(r["component_type_id"])}
+                for r in same_start
+            ]},
         )
     if earlier_unselected:
         raise AppError(
@@ -498,17 +393,13 @@ def submit_assignment(
             "Manual components overlap the assignment; add them to "
             "override_manual_ids to close them",
             409,
-            {
-                "collisions": [
-                    {
-                        "kind": r["kind"], "id": str(r["id"]),
-                        "component_kind": r["component_kind"],
-                        "component_type_id": str(r["component_type_id"]),
-                        "effective_from": r["effective_from"].isoformat(),
-                    }
-                    for r in earlier_unselected
-                ],
-            },
+            {"collisions": [
+                {"kind": r["kind"], "id": str(r["id"]),
+                 "component_kind": r["component_kind"],
+                 "component_type_id": str(r["component_type_id"]),
+                 "effective_from": r["effective_from"].isoformat()}
+                for r in earlier_unselected
+            ]},
         )
 
     assignment = EmployeeSalaryStructureAssignment(
@@ -540,10 +431,6 @@ def submit_assignment(
     )
     return assignment
 
-
-# ---------------------------------------------------------------------------
-# Public: reject / cancel
-# ---------------------------------------------------------------------------
 
 def _load_pending_assignment(
     db: Session, assignment_id: uuid.UUID,
@@ -580,10 +467,9 @@ def reject_assignment(
 
     a.status = "rejected"
     a.decided_by_user_id = getattr(user, "id", None)
-    a.decided_at = datetime.utcnow()
+    a.decided_at = datetime.now()
     a.decision_note = note
     a.row_version += 1
-
     db.add(EmployeeSalaryStructureAssignmentAttempt(
         assignment_id=a.id,
         attempted_by_user_id=getattr(user, "id", None),
@@ -619,7 +505,6 @@ def cancel_assignment(
 
     a.status = "cancelled"
     a.row_version += 1
-
     db.add(EmployeeSalaryStructureAssignmentAttempt(
         assignment_id=a.id,
         attempted_by_user_id=getattr(user, "id", None),
@@ -636,10 +521,6 @@ def cancel_assignment(
     db.flush()
     return a
 
-
-# ---------------------------------------------------------------------------
-# Public: read helpers
-# ---------------------------------------------------------------------------
 
 def get_assignment(
     db: Session, user: Any, assignment_id: uuid.UUID,
@@ -665,7 +546,7 @@ def list_children(
 def list_attempts(
     db: Session, user: Any, assignment_id: uuid.UUID,
 ) -> list[EmployeeSalaryStructureAssignmentAttempt]:
-    get_assignment(db, user, assignment_id)  # raises if out of scope
+    get_assignment(db, user, assignment_id)
     return list(db.scalars(select(EmployeeSalaryStructureAssignmentAttempt).where(
         EmployeeSalaryStructureAssignmentAttempt.assignment_id == assignment_id,
     ).order_by(EmployeeSalaryStructureAssignmentAttempt.attempted_at.desc())).all())
@@ -683,10 +564,6 @@ def list_for_employee(
     ).order_by(EmployeeSalaryStructureAssignment.submitted_at.desc())).all())
 
 
-# ---------------------------------------------------------------------------
-# Public: collision pre-check (read-only)
-# ---------------------------------------------------------------------------
-
 def check_collisions(
     db: Session, user: Any, *,
     employee_id: uuid.UUID,
@@ -702,8 +579,6 @@ def check_collisions(
     structure = _load_structure(db, structure_id)
     type_pairs = _structure_type_pairs(db, structure)
 
-    # Do not raise on bad override_manual_ids here — pre-check is a hint
-    # generator, so tolerate missing / mismatched ids and just skip them.
     selected_set: set[tuple[str, uuid.UUID]] = set()
     for item in override_manual_ids:
         selected_set.add((item["kind"], item["id"]))
@@ -734,8 +609,6 @@ def check_collisions(
     for r in same_start:
         manual.append(_row_payload(r, "cannot_close_same_start"))
 
-    # Structure-owned rows (created by a prior assignment). They close
-    # automatically — the frontend displays them for transparency.
     structure_owned: list[dict] = []
     for model, kind, type_attr in (
         (EmployeeEarning, "employee_earning", "earning_type_id"),
@@ -770,5 +643,16 @@ def check_collisions(
         "manual": manual,
         "structure_owned": structure_owned,
     }
+
+# Public aliases for use by salary_assignment_approve_service.
+acquire_employee_lock = _acquire_employee_lock
+employee_lock_key = _employee_lock_key
+structure_type_pairs = _structure_type_pairs
+overlap_universe = _overlap_universe
+classify_overlaps = _classify_overlaps
+load_pending_assignment = _load_pending_assignment
+validate_date_rules = _validate_date_rules
+validate_structure_state = _validate_structure_state
+validate_pay_basis = _validate_pay_basis
 
 # END OF FILE
