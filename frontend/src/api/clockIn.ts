@@ -26,6 +26,7 @@ export type PunchOut = {
   effective_time: string;
   status: string;
   flags: string[];
+  warnings?: string[];
 };
 
 function baseHeaders(): Record<string, string> {

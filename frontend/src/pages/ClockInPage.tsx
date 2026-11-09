@@ -40,6 +40,7 @@ export function ClockInPage() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [warningMsg, setWarningMsg] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraRef = useRef<CameraHandle | null>(null);
 
@@ -84,6 +85,7 @@ export function ClockInPage() {
     setEmployee(null);
     stopCamera();
     setSuccessMsg(null);
+    setWarningMsg(null);
     setErrorMsg(null);
   };
 
@@ -112,6 +114,7 @@ export function ClockInPage() {
     setPhase("submitting");
     setErrorMsg(null);
     setSuccessMsg(null);
+    setWarningMsg(null);
     try {
       const photo = cameraRef.current.captureJpegBase64(0.7);
       const now = new Date().toISOString();
@@ -127,7 +130,11 @@ export function ClockInPage() {
         deviceKey,
       );
       const t = new Date(out.effective_time).toLocaleTimeString();
-      setSuccessMsg(strings.clockIn.success.replace("{time}", t));
+      if (out.warnings && out.warnings.length > 0) {
+        setWarningMsg(strings.clockIn.recomputeWarning);
+      } else {
+        setSuccessMsg(strings.clockIn.success.replace("{time}", t));
+      }
       setPhase("success");
       setEmployee(null);
       setEmployeeCode("");
@@ -191,6 +198,14 @@ export function ClockInPage() {
         {successMsg && (
           <Alert color={colors.approved} data-testid="clockin-success">
             {successMsg}
+          </Alert>
+        )}
+        {warningMsg && (
+          <Alert
+            color={colors.pending}
+            data-testid="clockin-recompute-warning"
+          >
+            {warningMsg}
           </Alert>
         )}
         <Card withBorder>

@@ -136,4 +136,61 @@ describe("ClockInPage", () => {
       expect(screen.getByTestId("clockin-error")).toBeInTheDocument(),
     );
   });
+
+  it("shows warning when punch succeeds but attendance recompute fails", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/employees?employee_code=")) {
+        return jr({
+          items: [
+            {
+              id: "e1",
+              employee_code: "E1",
+              first_name: "A",
+              last_name: "B",
+            },
+          ],
+        });
+      }
+      if (url.includes("/punches")) {
+        return jr(
+          {
+            id: "p1",
+            effective_time: "2026-11-10T08:00:00Z",
+            status: "accepted",
+            flags: [],
+            warnings: ["attendance_recompute_failed"],
+          },
+          201,
+        );
+      }
+      return jr({});
+    });
+    renderPage();
+    fireEvent.change(screen.getByTestId("clockin-device-key"), {
+      target: { value: "k" },
+    });
+    fireEvent.click(screen.getByTestId("clockin-save-key"));
+    fireEvent.change(screen.getByTestId("clockin-code"), {
+      target: { value: "E1" },
+    });
+    fireEvent.click(screen.getByTestId("clockin-lookup"));
+    await waitFor(() =>
+      expect(screen.getByTestId("clockin-emp")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("clockin-start-camera"));
+    await waitFor(() =>
+      expect(screen.getByTestId("clockin-stop-camera")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("clockin-submit"));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("clockin-recompute-warning"),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/punch was recorded, but attendance/i))
+      .toBeInTheDocument();
+    expect(screen.queryByTestId("clockin-success")).not.toBeInTheDocument();
+  });
+
 });

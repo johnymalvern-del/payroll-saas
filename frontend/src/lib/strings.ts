@@ -75,6 +75,7 @@ export const strings = {
     submitFailed: "Clock-in failed.",
     needPhoto: "Start the camera before clocking in.",
     cameraDenied: "Camera access denied or unavailable.",
+    recomputeWarning: "Your punch was recorded, but attendance could not be updated. Please notify your administrator.",
   },
   devices: {
     title: "Devices",
