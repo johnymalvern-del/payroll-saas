@@ -41,6 +41,8 @@ const PERMISSION_NAV: Array<{
     item: { label: "Pay periods", to: "/payroll/pay-periods", icon: "dollar" } },
   { permission: "payroll_preview", group: "Payroll",
     item: { label: "Change requests", to: "/payroll/change-requests", icon: "check" } },
+  { permission: "pay_rate_view", group: "Payroll",
+    item: { label: "Salary structures", to: "/payroll/salary-structures", icon: "dollar" } },
   { permission: "payslip_view", group: "Payroll",
     item: { label: "My payslips", to: "/payslips", icon: "file" } },
   { permission: "org_manage", group: "Setup",
