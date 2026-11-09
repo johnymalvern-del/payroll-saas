@@ -40,8 +40,10 @@ describe("buildNav", () => {
       "/attendance/adjustments",
       "/clock-in",
       "/employees",
+      "/payroll/employee-payroll",
       "/payroll/pay-periods",
       "/payroll/change-requests",
+      "/payroll/salary-structures",
       "/setup",
     ]);
   });
@@ -58,10 +60,15 @@ describe("buildNav", () => {
     ]);
   });
 
-  it("auditor sees only payslips and audit log", () => {
+  it("auditor sees employee payroll, salary structures, payslips and audit log", () => {
     expect(
       flat(["audit_view", "org_view", "payslip_view", "pay_rate_view"]),
-    ).toEqual(["/payslips", "/audit-log"]);
+    ).toEqual([
+      "/payroll/employee-payroll",
+      "/payroll/salary-structures",
+      "/payslips",
+      "/audit-log",
+    ]);
   });
 
   it("grouped output preserves group order and labels", () => {
