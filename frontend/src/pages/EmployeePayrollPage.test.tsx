@@ -7,6 +7,10 @@ import { MantineProvider } from "@mantine/core";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { EmployeePayrollPage } from "./EmployeePayrollPage";
 
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function () {};
+}
+
 function jr(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -33,6 +37,12 @@ function setupMock(opts: {
   collisions?: unknown;
   submitResponse?: unknown;
   submitStatus?: number;
+  approveResponse?: unknown;
+  approveStatus?: number;
+  rejectResponse?: unknown;
+  rejectStatus?: number;
+  cancelResponse?: unknown;
+  cancelStatus?: number;
 }): { calls: Call[] } {
   const calls: Call[] = [];
   global.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -48,6 +58,34 @@ function setupMock(opts: {
     }
     calls.push({ url, method, body });
 
+    if (method === "POST" && url.endsWith("/approve")) {
+      return jr(
+        opts.approveResponse ?? {
+          ...(opts.assignments && (opts.assignments[0] as object) || {}),
+          status: "approved",
+          children: [],
+        },
+        opts.approveStatus ?? 200,
+      );
+    }
+    if (method === "POST" && url.endsWith("/reject")) {
+      return jr(
+        opts.rejectResponse ?? {
+          ...(opts.assignments && (opts.assignments[0] as object) || {}),
+          status: "rejected",
+        },
+        opts.rejectStatus ?? 200,
+      );
+    }
+    if (method === "POST" && url.endsWith("/cancel")) {
+      return jr(
+        opts.cancelResponse ?? {
+          ...(opts.assignments && (opts.assignments[0] as object) || {}),
+          status: "cancelled",
+        },
+        opts.cancelStatus ?? 200,
+      );
+    }
     if (url.includes("/check-collisions")) {
       return jr(
         opts.collisions ?? {
@@ -94,7 +132,7 @@ function setupMock(opts: {
 
 function renderPage(path: string) {
   const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <MantineProvider>
@@ -139,6 +177,7 @@ const ASSIGN_PENDING = {
   created_at: "2026-11-09T10:00:00Z",
   updated_at: "2026-11-09T10:00:00Z",
 };
+const ASSIGN_APPROVED = { ...ASSIGN_PENDING, id: "a2", status: "approved" };
 
 beforeEach(() => { vi.restoreAllMocks(); });
 afterEach(() => { cleanup(); });
@@ -336,5 +375,146 @@ describe("EmployeePayrollPage — detail", () => {
         { kind: "employee_earning", id: "me1" },
       ]);
     });
+  });
+});
+
+describe("EmployeePayrollPage — approval actions", () => {
+  it("shows action buttons for pending assignments", async () => {
+    setupMock({ employees: [EMP], assignments: [ASSIGN_PENDING] });
+    renderPage("/payroll/employee-payroll/e1");
+    await waitFor(() =>
+      expect(screen.getByTestId("assignment-row-a1")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("assignment-approve-a1")).toBeInTheDocument();
+    expect(screen.getByTestId("assignment-reject-a1")).toBeInTheDocument();
+    expect(screen.getByTestId("assignment-cancel-a1")).toBeInTheDocument();
+  });
+
+  it("does not show action buttons for non-pending assignments", async () => {
+    setupMock({ employees: [EMP], assignments: [ASSIGN_APPROVED] });
+    renderPage("/payroll/employee-payroll/e1");
+    await waitFor(() =>
+      expect(screen.getByTestId("assignment-row-a2")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("assignment-approve-a2")).toBeNull();
+    expect(screen.queryByTestId("assignment-reject-a2")).toBeNull();
+    expect(screen.queryByTestId("assignment-cancel-a2")).toBeNull();
+  });
+
+  it("approve confirms and posts to /approve", async () => {
+    const { calls } = setupMock({
+      employees: [EMP], assignments: [ASSIGN_PENDING],
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderPage("/payroll/employee-payroll/e1");
+    await waitFor(() =>
+      expect(screen.getByTestId("assignment-approve-a1")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("assignment-approve-a1"));
+    await waitFor(() => {
+      expect(confirmSpy).toHaveBeenCalled();
+      expect(
+        calls.some(
+          (c) => c.method === "POST" && c.url.endsWith("/a1/approve"),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it("approve does nothing when confirm is cancelled", async () => {
+    const { calls } = setupMock({
+      employees: [EMP], assignments: [ASSIGN_PENDING],
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderPage("/payroll/employee-payroll/e1");
+    await waitFor(() =>
+      expect(screen.getByTestId("assignment-approve-a1")).toBeInTheDocument(),
+    );
+    const before = calls.filter((c) => c.method === "POST").length;
+    fireEvent.click(screen.getByTestId("assignment-approve-a1"));
+    await new Promise((r) => setTimeout(r, 50));
+    const after = calls.filter((c) => c.method === "POST").length;
+    expect(after).toBe(before);
+  });
+
+  it("reject opens a modal with required note", async () => {
+    setupMock({ employees: [EMP], assignments: [ASSIGN_PENDING] });
+    renderPage("/payroll/employee-payroll/e1");
+    await waitFor(() =>
+      expect(screen.getByTestId("assignment-reject-a1")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("assignment-reject-a1"));
+    const note = await screen.findByTestId("assignment-reject-note");
+    expect(note).toBeInTheDocument();
+    const submit = screen.getByTestId("assignment-reject-submit") as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.change(note, { target: { value: "wrong salary" } });
+    await waitFor(() => {
+      const btn = screen.getByTestId("assignment-reject-submit") as HTMLButtonElement;
+      expect(btn.disabled).toBe(false);
+    });
+  });
+
+  it("reject posts with note", async () => {
+    const { calls } = setupMock({
+      employees: [EMP], assignments: [ASSIGN_PENDING],
+    });
+    renderPage("/payroll/employee-payroll/e1");
+    await waitFor(() =>
+      expect(screen.getByTestId("assignment-reject-a1")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("assignment-reject-a1"));
+    await screen.findByTestId("assignment-reject-note");
+    fireEvent.change(screen.getByTestId("assignment-reject-note"), {
+      target: { value: "wrong salary" },
+    });
+    fireEvent.click(screen.getByTestId("assignment-reject-submit"));
+    await waitFor(() => {
+      const post = calls.find(
+        (c) => c.method === "POST" && c.url.endsWith("/a1/reject"),
+      );
+      expect(post).toBeDefined();
+      const body = JSON.parse(post!.body);
+      expect(body.note).toBe("wrong salary");
+    });
+  });
+
+  it("cancel confirms and posts to /cancel", async () => {
+    const { calls } = setupMock({
+      employees: [EMP], assignments: [ASSIGN_PENDING],
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderPage("/payroll/employee-payroll/e1");
+    await waitFor(() =>
+      expect(screen.getByTestId("assignment-cancel-a1")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("assignment-cancel-a1"));
+    await waitFor(() => {
+      expect(confirmSpy).toHaveBeenCalled();
+      expect(
+        calls.some(
+          (c) => c.method === "POST" && c.url.endsWith("/a1/cancel"),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it("surfaces backend error on approve failure", async () => {
+    setupMock({
+      employees: [EMP], assignments: [ASSIGN_PENDING],
+      approveStatus: 409,
+      approveResponse: { error: { code: "self_approval_forbidden" } },
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderPage("/payroll/employee-payroll/e1");
+    await waitFor(() =>
+      expect(screen.getByTestId("assignment-approve-a1")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("assignment-approve-a1"));
+    await waitFor(() =>
+      expect(screen.getByTestId("assignment-action-error")).toHaveTextContent(
+        /cannot approve an assignment you submitted/i,
+      ),
+    );
   });
 });

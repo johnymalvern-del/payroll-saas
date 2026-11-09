@@ -2,11 +2,12 @@ import { useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Alert, Badge, Button, Group, Loader, Stack, Table, Text,
-  TextInput, Title,
+  Alert, Badge, Button, Group, Loader, Modal, Stack, Table, Text,
+  Textarea, TextInput, Title,
 } from "@mantine/core";
 import {
-  checkCollisions, fetchEmployeeAssignments, submitAssignment,
+  approveAssignment, cancelAssignment, checkCollisions,
+  fetchEmployeeAssignments, rejectAssignment, submitAssignment,
   type AssignmentOut, type CheckCollisionsOut, type ManualOverlapOut,
   type OverrideManualIdIn,
 } from "../api/salaryAssignments";
@@ -48,6 +49,26 @@ function mapAssignmentError(code: string): string {
       return "A manual component starts on the same day as this assignment.";
     case "invalid_override_manual_id":
       return "One or more selected overrides are not valid.";
+    case "not_found":
+      return "Assignment not found.";
+    case "not_pending":
+      return "This assignment is no longer pending.";
+    case "self_approval_forbidden":
+      return "You cannot approve an assignment you submitted.";
+    case "not_requester":
+      return "Only the original requester may cancel this assignment.";
+    case "assignment_effective_date_not_after_latest_approved":
+      return "Effective date is not later than the latest approved assignment.";
+    case "assignment_state_conflict":
+      return "Assignment state changed. Reload and retry.";
+    case "approval_batch_failed":
+      return "Approval failed. Reload and retry.";
+    case "approval_unexpected_error":
+      return "Unexpected error during approval. Contact support.";
+    case "close_set_mismatch":
+      return "Manual overrides changed since submission. Reload and resubmit.";
+    case "record_changed":
+      return "Assignment was changed by another user. Reload.";
     default:
       return "Something went wrong. Please try again.";
   }
@@ -112,6 +133,8 @@ function EmployeePayrollIndex() {
 
 // ---------------------------- Detail view ----------------------------
 
+type ActionKind = "approve" | "reject" | "cancel";
+
 function EmployeePayrollDetail({ employeeId }: { employeeId: string }) {
   const qc = useQueryClient();
   const [formOpen, setFormOpen] = useState(false);
@@ -120,6 +143,10 @@ function EmployeePayrollDetail({ employeeId }: { employeeId: string }) {
   const [collisions, setCollisions] = useState<CheckCollisionsOut | null>(null);
   const [selectedOverrides, setSelectedOverrides] = useState<Set<string>>(new Set());
   const [formError, setFormError] = useState<string | null>(null);
+
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [rejectTarget, setRejectTarget] = useState<AssignmentOut | null>(null);
+  const [rejectNote, setRejectNote] = useState("");
 
   const assignments = useQuery({
     queryKey: ["employee_assignments", employeeId],
@@ -169,6 +196,54 @@ function EmployeePayrollDetail({ employeeId }: { employeeId: string }) {
     },
   });
 
+  const action = useMutation({
+    mutationFn: async (vars: { kind: ActionKind; id: string; note?: string }) => {
+      if (vars.kind === "approve") return approveAssignment(vars.id);
+      if (vars.kind === "reject") return rejectAssignment(vars.id, vars.note ?? "");
+      return cancelAssignment(vars.id);
+    },
+    onSuccess: () => {
+      setActionError(null);
+      setRejectTarget(null);
+      setRejectNote("");
+      qc.invalidateQueries({ queryKey: ["employee_assignments", employeeId] });
+    },
+    onError: (err) => {
+      const code = err instanceof Error ? err.message : "unknown";
+      setActionError(mapAssignmentError(code));
+      setRejectTarget(null);
+      setRejectNote("");
+    },
+  });
+
+  const busyId =
+    action.isPending
+      ? ((action.variables as { id: string } | undefined)?.id ?? null)
+      : null;
+
+  const onApprove = (a: AssignmentOut) => {
+    setActionError(null);
+    if (!window.confirm(
+      `Approve salary structure assignment effective ${a.effective_from}? ` +
+      `This will apply the structure and cannot be undone.`,
+    )) return;
+    action.mutate({ kind: "approve", id: a.id });
+  };
+
+  const onCancel = (a: AssignmentOut) => {
+    setActionError(null);
+    if (!window.confirm(
+      `Cancel salary structure assignment effective ${a.effective_from}?`,
+    )) return;
+    action.mutate({ kind: "cancel", id: a.id });
+  };
+
+  const onReject = (a: AssignmentOut) => {
+    setActionError(null);
+    setRejectNote("");
+    setRejectTarget(a);
+  };
+
   const toggleOverride = (key: string) => {
     setSelectedOverrides((prev) => {
       const next = new Set(prev);
@@ -195,6 +270,8 @@ function EmployeePayrollDetail({ employeeId }: { employeeId: string }) {
     setSelectedOverrides(new Set());
     setFormError(null);
   };
+
+  const rejectNoteOk = rejectNote.trim().length > 0;
 
   return (
     <Stack gap="md" data-testid="employee-payroll-detail-page">
@@ -227,6 +304,13 @@ function EmployeePayrollDetail({ employeeId }: { employeeId: string }) {
         </Button>
       </Group>
 
+      {actionError && (
+        <Alert color="red" data-testid="assignment-action-error" withCloseButton
+          onClose={() => setActionError(null)}>
+          {actionError}
+        </Alert>
+      )}
+
       {assignments.isLoading && <Loader data-testid="assignments-loading" />}
       {assignments.isError && (
         <Alert color="red" data-testid="assignments-error">
@@ -246,19 +330,58 @@ function EmployeePayrollDetail({ employeeId }: { employeeId: string }) {
               <Table.Th>Effective to</Table.Th>
               <Table.Th>Status</Table.Th>
               <Table.Th>Submitted</Table.Th>
+              <Table.Th />
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
-            {assignments.data.items.map((a: AssignmentOut) => (
-              <Table.Tr key={a.id} data-testid={`assignment-row-${a.id}`}>
-                <Table.Td>{a.effective_from}</Table.Td>
-                <Table.Td>{a.effective_to ?? "—"}</Table.Td>
-                <Table.Td>
-                  <Badge color={statusColor(a.status)}>{a.status}</Badge>
-                </Table.Td>
-                <Table.Td>{a.submitted_at}</Table.Td>
-              </Table.Tr>
-            ))}
+            {assignments.data.items.map((a: AssignmentOut) => {
+              const rowBusy = busyId === a.id;
+              return (
+                <Table.Tr key={a.id} data-testid={`assignment-row-${a.id}`}>
+                  <Table.Td>{a.effective_from}</Table.Td>
+                  <Table.Td>{a.effective_to ?? "—"}</Table.Td>
+                  <Table.Td>
+                    <Badge color={statusColor(a.status)}>{a.status}</Badge>
+                  </Table.Td>
+                  <Table.Td>{a.submitted_at}</Table.Td>
+                  <Table.Td>
+                    {a.status === "pending" ? (
+                      <Group gap="xs">
+                        <Button
+                          size="xs"
+                          data-testid={`assignment-approve-${a.id}`}
+                          loading={rowBusy}
+                          disabled={rowBusy}
+                          onClick={() => onApprove(a)}
+                        >
+                          Approve
+                        </Button>
+                        <Button
+                          size="xs"
+                          variant="default"
+                          data-testid={`assignment-reject-${a.id}`}
+                          loading={rowBusy}
+                          disabled={rowBusy}
+                          onClick={() => onReject(a)}
+                        >
+                          Reject
+                        </Button>
+                        <Button
+                          size="xs"
+                          variant="default"
+                          data-testid={`assignment-cancel-${a.id}`}
+                          loading={rowBusy}
+                          disabled={rowBusy}
+                          onClick={() => onCancel(a)}
+                        >
+                          Cancel
+                        </Button>
+                      </Group>
+                    ) : null}
+                  </Table.Td>
+                </Table.Tr>
+              );
+            })}
           </Table.Tbody>
         </Table>
       )}
@@ -385,6 +508,64 @@ function EmployeePayrollDetail({ employeeId }: { employeeId: string }) {
           </Group>
         </Stack>
       )}
+
+      <Modal
+        opened={rejectTarget !== null}
+        onClose={() => {
+          if (action.isPending) return;
+          setRejectTarget(null);
+          setRejectNote("");
+        }}
+        title="Reject salary structure assignment"
+      >
+        <Stack gap="sm">
+          <Text size="sm">
+            Reject assignment effective {rejectTarget?.effective_from}? The
+            submitter will need to create a new assignment.
+          </Text>
+          <Textarea
+            label="Rejection reason"
+            value={rejectNote}
+            onChange={(e) => setRejectNote(e.currentTarget.value)}
+            minRows={3}
+            required
+            data-testid="assignment-reject-note"
+            error={
+              rejectNote !== "" && !rejectNoteOk
+                ? "A reason is required."
+                : undefined
+            }
+          />
+          <Group justify="flex-end">
+            <Button
+              variant="default"
+              onClick={() => {
+                setRejectTarget(null);
+                setRejectNote("");
+              }}
+              disabled={action.isPending}
+              data-testid="assignment-reject-modal-cancel"
+            >
+              Cancel
+            </Button>
+            <Button
+              data-testid="assignment-reject-submit"
+              loading={action.isPending}
+              disabled={!rejectNoteOk || action.isPending}
+              onClick={() => {
+                if (!rejectTarget) return;
+                action.mutate({
+                  kind: "reject",
+                  id: rejectTarget.id,
+                  note: rejectNote.trim(),
+                });
+              }}
+            >
+              Reject
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
     </Stack>
   );
 }
