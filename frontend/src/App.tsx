@@ -27,6 +27,8 @@ import { OwnPayslipsPage } from "./pages/OwnPayslipsPage";
 import { PayPeriodDetailPage } from "./pages/PayPeriodDetailPage";
 import { PayslipSoFarPage } from "./pages/PayslipSoFarPage";
 import { SalaryStructuresPage } from "./pages/SalaryStructuresPage";
+import { SalaryStructureDetailPage } from "./pages/SalaryStructureDetailPage";
+import { EmployeePayrollPage } from "./pages/EmployeePayrollPage";
 
 export default function App() {
   return (
@@ -61,6 +63,9 @@ export default function App() {
           <Route path="payroll/pay-periods/:id/payslip-so-far/:employeeId" element={<PayslipSoFarPage />} />
           <Route path="payroll/change-requests" element={<ChangeRequestsPage />} />
           <Route path="payroll/salary-structures" element={<SalaryStructuresPage />} />
+          <Route path="payroll/salary-structures/:groupId" element={<SalaryStructureDetailPage />} />
+          <Route path="payroll/employee-payroll" element={<EmployeePayrollPage />} />
+          <Route path="payroll/employee-payroll/:employeeId" element={<EmployeePayrollPage />} />
           <Route path="audit-log" element={<AuditLogPage />} />
           <Route path="setup" element={<SetupLayout />}>
             <Route index element={<SitesPage />} />
