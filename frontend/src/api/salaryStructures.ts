@@ -54,7 +54,10 @@ export type StructureOut = {
   components: StructureComponentOut[];
 };
 
-export type StructureListOut = { items: StructureOut[] };
+export type StructureListOut = {
+  items: StructureOut[];
+  next_cursor?: string | null;
+};
 export type DeactivateOut = { deactivated: boolean; structure_group_id: string };
 
 export class StructureApiError extends Error {
@@ -98,12 +101,24 @@ export async function createStructure(
   return _handle<StructureOut>(res);
 }
 
-export async function listStructures(): Promise<StructureListOut> {
+export async function listStructures(
+  params?: { limit?: number; cursor?: string | null } | null,
+): Promise<StructureListOut> {
+  // Tolerate React Query calling this as `queryFn: listStructures` — the
+  // QueryFunctionContext object has no limit/cursor fields, so both checks
+  // fall through and the request is unpaginated (first page).
+  const qs = new URLSearchParams();
+  if (params && typeof params === "object") {
+    const p = params as { limit?: unknown; cursor?: unknown };
+    if (typeof p.limit === "number") qs.set("limit", String(p.limit));
+    if (typeof p.cursor === "string" && p.cursor) qs.set("cursor", p.cursor);
+  }
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
   const res = await wrappedFetch(
-    new Request(absoluteUrl("/api/v1/payroll/salary-structures"), {
-      method: "GET",
-      credentials: "include",
-    }),
+    new Request(
+      absoluteUrl(`/api/v1/payroll/salary-structures${suffix}`),
+      { method: "GET", credentials: "include" },
+    ),
   );
   return _handle<StructureListOut>(res);
 }

@@ -6,6 +6,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MantineProvider } from "@mantine/core";
 import { SalaryStructuresPage } from "./SalaryStructuresPage";
 
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function () {};
+}
+
 function jr(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -35,6 +39,11 @@ function setupMock(opts: {
   createStatus?: number;
   deactivateResponse?: unknown;
   listStatus?: number;
+  // Pagination mocks. When provided, the first call returns the first page
+  // and a follow-up call whose URL includes "cursor=<cursor>" returns the
+  // second page.
+  listFirstPage?: { items: unknown[]; next_cursor: string | null };
+  listSecondPage?: { items: unknown[]; next_cursor: string | null } | { status: number };
 }): { calls: Call[] } {
   const calls: Call[] = [];
   global.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -86,6 +95,21 @@ function setupMock(opts: {
       return jr({ items: opts.deductionTypes ?? [] });
     }
     if (url.includes("/payroll/salary-structures")) {
+      // Pagination path
+      if (opts.listFirstPage) {
+        if (url.includes("cursor=")) {
+          const second = opts.listSecondPage;
+          if (second && "status" in second && typeof second.status === "number") {
+            return jr({ error: { code: "invalid_cursor" } }, second.status);
+          }
+          return jr(
+            (second as { items: unknown[]; next_cursor: string | null })
+              ?? { items: [], next_cursor: null },
+          );
+        }
+        return jr(opts.listFirstPage);
+      }
+      // Legacy path (no pagination mocks configured)
       return jr({ items: opts.structures ?? [] }, opts.listStatus ?? 200);
     }
     return jr({}, 200);
@@ -95,7 +119,7 @@ function setupMock(opts: {
 
 function renderPage() {
   const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <MantineProvider>
@@ -121,6 +145,8 @@ const S1 = {
   updated_at: "2026-01-01T00:00:00Z",
   components: [],
 };
+
+const S2 = { ...S1, id: "s2", structure_group_id: "g2", name: "Hourly Basic" };
 
 beforeEach(() => {
   vi.restoreAllMocks();
@@ -269,5 +295,56 @@ describe("SalaryStructuresPage", () => {
     );
     expect(screen.getByTestId("component-amount-0")).toBeInTheDocument();
     expect(screen.getByTestId("component-rate-0")).toBeInTheDocument();
+  });
+
+  // ---- pagination (M3.5 item 3) ----
+
+  it("hides load-more when next_cursor is null", async () => {
+    setupMock({ structures: [S1] });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("structure-row-s1")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("structures-load-more")).toBeNull();
+  });
+
+  it("load-more fetches the next page and appends items", async () => {
+    const { calls } = setupMock({
+      listFirstPage: { items: [S1], next_cursor: "abc" },
+      listSecondPage: { items: [S2], next_cursor: null },
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("structure-row-s1")).toBeInTheDocument(),
+    );
+    const loadMore = await screen.findByTestId("structures-load-more");
+    fireEvent.click(loadMore);
+    await waitFor(() =>
+      expect(screen.getByTestId("structure-row-s2")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("structure-row-s1")).toBeInTheDocument();
+    // Exactly one follow-up request carried cursor=abc
+    const withCursor = calls.filter((c) => c.url.includes("cursor=abc"));
+    expect(withCursor.length).toBe(1);
+    // After the second page, load-more is gone.
+    await waitFor(() =>
+      expect(screen.queryByTestId("structures-load-more")).toBeNull(),
+    );
+  });
+
+  it("surfaces an error when the next page fails", async () => {
+    setupMock({
+      listFirstPage: { items: [S1], next_cursor: "abc" },
+      listSecondPage: { status: 400 },
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("structure-row-s1")).toBeInTheDocument(),
+    );
+    const loadMore = await screen.findByTestId("structures-load-more");
+    fireEvent.click(loadMore);
+    await waitFor(() =>
+      expect(screen.getByTestId("structures-load-more-error")).toBeInTheDocument(),
+    );
   });
 });

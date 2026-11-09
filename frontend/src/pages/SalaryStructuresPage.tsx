@@ -1,5 +1,7 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery, useMutation, useQuery, useQueryClient,
+} from "@tanstack/react-query";
 import {
   Alert, Badge, Button, Group, Loader, Modal, Select, Stack, Table,
   Text, TextInput, Title,
@@ -13,6 +15,8 @@ import {
   fetchDeductionTypes, fetchEarningTypes,
   type DeductionTypeOut, type EarningTypeOut,
 } from "../api/payrollTypes";
+
+const PAGE_SIZE = 100;
 
 type ComponentDraft = {
   key: string;
@@ -90,6 +94,8 @@ function mapStructureError(code: string): string {
       return "System deduction types cannot be used.";
     case "inactive_deduction_type_not_allowed":
       return "Inactive deduction types cannot be used.";
+    case "invalid_cursor":
+      return "Pagination cursor is invalid. Reload the page.";
     default:
       return "Something went wrong. Please try again.";
   }
@@ -103,9 +109,12 @@ export function SalaryStructuresPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyDeactivate, setBusyDeactivate] = useState<string | null>(null);
 
-  const structures = useQuery({
+  const structures = useInfiniteQuery({
     queryKey: ["salary_structures"],
-    queryFn: listStructures,
+    queryFn: ({ pageParam }) =>
+      listStructures({ limit: PAGE_SIZE, cursor: pageParam }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
   });
 
   const earningTypes = useQuery({
@@ -199,6 +208,9 @@ export function SalaryStructuresPage() {
     setDraft({ ...draft, components: next });
   };
 
+  const items: StructureOut[] =
+    structures.data?.pages.flatMap((p) => p.items) ?? [];
+
   return (
     <Stack gap="md" data-testid="salary-structures-page">
       <Group justify="space-between">
@@ -232,7 +244,7 @@ export function SalaryStructuresPage() {
         </Alert>
       )}
 
-      {structures.isLoading && (
+      {structures.isPending && (
         <Loader data-testid="structures-loading" />
       )}
       {structures.isError && (
@@ -240,12 +252,12 @@ export function SalaryStructuresPage() {
           Could not load salary structures.
         </Alert>
       )}
-      {structures.isSuccess && structures.data.items.length === 0 && (
+      {structures.isSuccess && items.length === 0 && (
         <Text c="dimmed" data-testid="structures-empty">
           No salary structures yet.
         </Text>
       )}
-      {structures.isSuccess && structures.data.items.length > 0 && (
+      {structures.isSuccess && items.length > 0 && (
         <Table data-testid="structures-table">
           <Table.Thead>
             <Table.Tr>
@@ -258,7 +270,7 @@ export function SalaryStructuresPage() {
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
-            {structures.data.items.map((s: StructureOut) => (
+            {items.map((s: StructureOut) => (
               <Table.Tr key={s.id} data-testid={`structure-row-${s.id}`}>
                 <Table.Td>{s.name}</Table.Td>
                 <Table.Td>{s.pay_basis}</Table.Td>
@@ -298,6 +310,24 @@ export function SalaryStructuresPage() {
             ))}
           </Table.Tbody>
         </Table>
+      )}
+
+      {structures.isFetchNextPageError && (
+        <Alert color="red" data-testid="structures-load-more-error">
+          Could not load more salary structures.
+        </Alert>
+      )}
+      {structures.hasNextPage && (
+        <Group justify="center">
+          <Button
+            variant="default"
+            data-testid="structures-load-more"
+            loading={structures.isFetchingNextPage}
+            onClick={() => structures.fetchNextPage()}
+          >
+            Load more
+          </Button>
+        </Group>
       )}
 
       <Modal

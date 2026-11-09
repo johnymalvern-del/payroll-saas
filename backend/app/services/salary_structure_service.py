@@ -10,10 +10,15 @@ of the same group. Key derivation is namespace-prefixed SHA-256,
 provably distinct from attendance_engine's (emp_uuid[:4], days-since-epoch)
 lock key — different byte prefix means different k1/k2 with overwhelming
 probability for any pair of distinct callers.
+
+M3.5 item 3 adds list_current_structures_paginated; the unpaginated
+list_current_structures is preserved for callers that don't need pages.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import uuid
 from decimal import Decimal
 from typing import Any
@@ -313,6 +318,49 @@ def list_current_structures(db: Session) -> list[SalaryStructure]:
     return list(db.scalars(select(SalaryStructure).where(
         SalaryStructure.is_current == True,  # noqa: E712
     ).order_by(SalaryStructure.name.asc())).all())
+
+
+def _encode_cursor(uid: uuid.UUID) -> str:
+    raw = json.dumps({"i": str(uid)}, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> uuid.UUID:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        return uuid.UUID(json.loads(raw)["i"])
+    except Exception:
+        raise AppError(
+            "invalid_cursor", "The pagination cursor is malformed", 400,
+        ) from None
+
+
+def list_current_structures_paginated(
+    db: Session,
+    *,
+    limit: int = 100,
+    cursor: str | None = None,
+) -> tuple[list[SalaryStructure], str | None]:
+    """Cursor-paginated list of current salary structures.
+
+    Ordered by id ASC (stable, cursor-safe). Mirrors the cursor pattern
+    used in payroll_change_requests: opaque base64url of {"i": "<uuid>"}.
+
+    Returns (items, next_cursor). next_cursor is None on the last page.
+    """
+    q = select(SalaryStructure).where(
+        SalaryStructure.is_current == True,  # noqa: E712
+    )
+    if cursor is not None:
+        q = q.where(SalaryStructure.id > _decode_cursor(cursor))
+    q = q.order_by(SalaryStructure.id.asc()).limit(limit + 1)
+    rows = list(db.scalars(q).all())
+    next_cursor: str | None = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_cursor = _encode_cursor(rows[-1].id)
+    return rows, next_cursor
 
 
 def get_current_structure(

@@ -2,13 +2,20 @@
 
 HR creates/edits/deactivates via PAY_RATE_REQUEST.
 List/get via PAY_RATE_VIEW (hr, payroll_admin, auditor).
+
+M3.5 item 3: the list endpoint gains cursor pagination. The response type
+_StructureListPage is defined locally so that the shared StructureListOut
+schema (also used by the /versions endpoints) stays untouched. Additive
+only: existing callers that omit limit/cursor get the first page and
+next_cursor=None.
 """
 from __future__ import annotations
 
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 
 from app.api.deps import TenantDbDep
 from app.api.v1.payroll_salary_structures_schemas import (
@@ -26,6 +33,14 @@ router = APIRouter(
     prefix="/payroll/salary-structures",
     tags=["payroll-salary-structures"],
 )
+
+_DEFAULT_LIMIT = 100
+_MAX_LIMIT = 500
+
+
+class _StructureListPage(BaseModel):
+    items: list[StructureOut]
+    next_cursor: str | None = None
 
 
 def _serialize(db, structure) -> StructureOut:
@@ -75,13 +90,20 @@ def create(
     return _serialize(db, s)
 
 
-@router.get("", response_model=StructureListOut)
+@router.get("", response_model=_StructureListPage)
 def list_structures(
     db: TenantDbDep,
     user: Annotated[Any, Depends(require_permission(Permission.PAY_RATE_VIEW))],
-) -> StructureListOut:
-    rows = svc.list_current_structures(db)
-    return StructureListOut(items=[_serialize(db, s) for s in rows])
+    limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
+    cursor: str | None = Query(None),
+) -> _StructureListPage:
+    rows, next_cursor = svc.list_current_structures_paginated(
+        db, limit=limit, cursor=cursor,
+    )
+    return _StructureListPage(
+        items=[_serialize(db, s) for s in rows],
+        next_cursor=next_cursor,
+    )
 
 
 @router.get("/{group_id}", response_model=StructureOut)
