@@ -39,6 +39,9 @@ export type LeaveRequestOut = {
   captured_by_user_id: string | null;
   days: LeaveRequestDayOut[];
   steps: LeaveApprovalStepOut[];
+  employee_code: string | null;
+  employee_name: string | null;
+  leave_type_name: string | null;
 };
 
 export type LeaveRequestListOut = {
@@ -66,6 +69,7 @@ export async function fetchLeaveRequests(params: {
   status?: string;
   from_date_gte?: string;
   to_date_lte?: string;
+  awaiting_approver_user_id?: string;
   limit?: number;
   cursor?: string | null;
 }): Promise<LeaveRequestListOut> {
@@ -74,6 +78,9 @@ export async function fetchLeaveRequests(params: {
   if (params.status) qs.set("status", params.status);
   if (params.from_date_gte) qs.set("from_date_gte", params.from_date_gte);
   if (params.to_date_lte) qs.set("to_date_lte", params.to_date_lte);
+  if (params.awaiting_approver_user_id) {
+    qs.set("awaiting_approver_user_id", params.awaiting_approver_user_id);
+  }
   qs.set("limit", String(params.limit ?? 50));
   if (params.cursor) qs.set("cursor", params.cursor);
   const res = await wrappedFetch(

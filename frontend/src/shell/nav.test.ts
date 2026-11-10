@@ -77,4 +77,14 @@ describe("buildNav", () => {
     const groups = buildNav(["self_view", "attendance_view", "employee_crud"]);
     expect(groups.map((g) => g.label)).toEqual([null, "Attendance", "People"]);
   });
+
+  it("approver with leave_approve sees My Approvals in the People group", () => {
+    expect(flat(["leave_approve"])).toEqual(["/leave/approvals"]);
+  });
+
+  it("approver also holding self_view sees My Leave before My Approvals", () => {
+    expect(
+      flat(["self_view", "leave_approve"]),
+    ).toEqual(["/", "/leave", "/leave/approvals"]);
+  });
 });
