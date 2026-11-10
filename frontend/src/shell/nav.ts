@@ -43,6 +43,8 @@ const PERMISSION_NAV: Array<{
     item: { label: "My Approvals", to: "/leave/approvals", icon: "check" } },
   { permission: "leave_approve", group: "People",
     item: { label: "Leave Balances", to: "/leave/balances-admin", icon: "dollar" } },
+  { permission: "leave_approve", group: "People",
+    item: { label: "Leave Calendar", to: "/leave/calendar", icon: "calendar" } },
   { permission: "employee_crud", group: "People",
     item: { label: "Leave Admin", to: "/leave/admin", icon: "check" } },
   { permission: "user_manage", group: "People",

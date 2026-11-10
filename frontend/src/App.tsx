@@ -36,6 +36,7 @@ import { LeaveAdminPage } from "./pages/LeaveAdminPage";
 import { MyApprovalsPage } from "./pages/MyApprovalsPage";
 import { LeaveBalancesAdminPage } from "./pages/LeaveBalancesAdminPage";
 import { LeaveTypesAdminPage } from "./pages/LeaveTypesAdminPage";
+import { LeaveCalendarPage } from "./pages/LeaveCalendarPage";
 
 export default function App() {
   return (
@@ -71,6 +72,7 @@ export default function App() {
           <Route path="leave/approvals" element={<MyApprovalsPage />} />
           <Route path="leave/balances-admin" element={<LeaveBalancesAdminPage />} />
           <Route path="leave/types-admin" element={<LeaveTypesAdminPage />} />
+          <Route path="leave/calendar" element={<LeaveCalendarPage />} />
           <Route path="setup/devices" element={<DevicesPage />} />
           <Route path="payroll/pay-periods" element={<PayPeriodsPage />} />
           <Route path="payroll/pay-periods/:id" element={<PayPeriodDetailPage />} />

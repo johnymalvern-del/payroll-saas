@@ -78,10 +78,11 @@ describe("buildNav", () => {
     expect(groups.map((g) => g.label)).toEqual([null, "Attendance", "People"]);
   });
 
-  it("approver with leave_approve sees My Approvals and Leave Balances", () => {
+  it("approver with leave_approve sees My Approvals, Leave Balances and Leave Calendar", () => {
     expect(flat(["leave_approve"])).toEqual([
       "/leave/approvals",
       "/leave/balances-admin",
+      "/leave/calendar",
     ]);
   });
 
@@ -91,6 +92,7 @@ describe("buildNav", () => {
       "/leave",
       "/leave/approvals",
       "/leave/balances-admin",
+      "/leave/calendar",
     ]);
   });
 
