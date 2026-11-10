@@ -23,7 +23,7 @@ describe("buildNav", () => {
     ]);
   });
 
-  it("hr sees attendance group plus employees, payroll, setup", () => {
+  it("hr sees attendance group plus employees, leave admin, payroll, setup", () => {
     expect(
       flat([
         "attendance_view",
@@ -40,6 +40,7 @@ describe("buildNav", () => {
       "/attendance/adjustments",
       "/clock-in",
       "/employees",
+      "/leave/admin",
       "/payroll/employee-payroll",
       "/payroll/pay-periods",
       "/payroll/change-requests",
@@ -48,11 +49,12 @@ describe("buildNav", () => {
     ]);
   });
 
-  it("payroll_admin sees employees, payroll, setup, audit log", () => {
+  it("payroll_admin sees employees, leave admin, payroll, setup, audit log", () => {
     expect(
       flat(["payroll_preview", "audit_view", "employee_crud", "org_manage"]),
     ).toEqual([
       "/employees",
+      "/leave/admin",
       "/payroll/pay-periods",
       "/payroll/change-requests",
       "/setup",

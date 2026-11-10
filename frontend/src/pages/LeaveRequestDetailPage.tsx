@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useLocation } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert, Badge, Button, Card, Grid, Group, Loader, Stack, Text,
@@ -83,11 +83,20 @@ function mapActionError(
 
 export function LeaveRequestDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const location = useLocation();
   const qc = useQueryClient();
   const me = useMe();
   const employeeId = me.data?.employee_id ?? null;
   const [editOpen, setEditOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const returnTo =
+    (location.state as { returnTo?: string } | null)?.returnTo;
+  const backTarget = returnTo ?? "/leave/history";
+  const backLabel =
+    backTarget === "/leave/admin"
+      ? "← Back to Leave Admin"
+      : "← Back to leave history";
 
   const request = useQuery({
     queryKey: ["leave_request", id],
@@ -193,8 +202,8 @@ export function LeaveRequestDetailPage() {
   return (
     <Stack gap="md" data-testid="leave-request-detail-page">
       <Text size="sm" c="dimmed">
-        <Link to="/leave/history" data-testid="leave-request-back-link">
-          ← Back to leave history
+        <Link to={backTarget} data-testid="leave-request-back-link">
+          {backLabel}
         </Link>
       </Text>
 

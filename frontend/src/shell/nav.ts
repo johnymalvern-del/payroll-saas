@@ -39,6 +39,8 @@ const PERMISSION_NAV: Array<{
     item: { label: "Employees", to: "/employees", icon: "users" } },
   { permission: "self_view", group: "People",
     item: { label: "My Leave", to: "/leave", icon: "calendar" } },
+  { permission: "employee_crud", group: "People",
+    item: { label: "Leave Admin", to: "/leave/admin", icon: "check" } },
   { permission: "pay_rate_view", group: "People",
     item: { label: "Employee payroll", to: "/payroll/employee-payroll", icon: "dollar" } },
   { permission: "payroll_preview", group: "Payroll",
