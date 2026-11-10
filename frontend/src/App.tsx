@@ -29,6 +29,8 @@ import { PayslipSoFarPage } from "./pages/PayslipSoFarPage";
 import { SalaryStructuresPage } from "./pages/SalaryStructuresPage";
 import { SalaryStructureDetailPage } from "./pages/SalaryStructureDetailPage";
 import { EmployeePayrollPage } from "./pages/EmployeePayrollPage";
+import { MyLeavePage } from "./pages/MyLeavePage";
+import { MyLeaveHistoryPage } from "./pages/MyLeaveHistoryPage";
 
 export default function App() {
   return (
@@ -57,6 +59,8 @@ export default function App() {
           <Route path="attendance/adjustments" element={<AdjustmentsPage />} />
           <Route path="employees" element={<EmployeesPage />} />
           <Route path="clock-in" element={<ClockInPage />} />
+          <Route path="leave" element={<MyLeavePage />} />
+          <Route path="leave/history" element={<MyLeaveHistoryPage />} />
           <Route path="setup/devices" element={<DevicesPage />} />
           <Route path="payroll/pay-periods" element={<PayPeriodsPage />} />
           <Route path="payroll/pay-periods/:id" element={<PayPeriodDetailPage />} />

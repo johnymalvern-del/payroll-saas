@@ -6,10 +6,10 @@ function flat(perms: string[]) {
 }
 
 describe("buildNav", () => {
-  it("employee sees Home, attendance sheet, clock in", () => {
+  it("employee sees Home, attendance sheet, clock in, my leave", () => {
     expect(
       flat(["self_view", "self_submit", "attendance_view", "org_view"]),
-    ).toEqual(["/", "/attendance", "/clock-in"]);
+    ).toEqual(["/", "/attendance", "/clock-in", "/leave"]);
   });
 
   it("manager sees attendance sheet, exceptions, adjustments, clock in", () => {
