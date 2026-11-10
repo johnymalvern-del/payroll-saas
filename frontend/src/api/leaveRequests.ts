@@ -64,6 +64,11 @@ export type LeaveRequestPatchIn = {
   reason?: string | null;
 };
 
+export type StepDecideIn = {
+  approve: boolean;
+  note?: string | null;
+};
+
 export async function fetchLeaveRequests(params: {
   employee_id?: string;
   status?: string;
@@ -150,6 +155,27 @@ export async function cancelLeaveRequest(
       method: "POST",
       credentials: "include",
     }),
+  );
+  return handleLeaveResponse<LeaveRequestOut>(res);
+}
+
+export async function decideStep(
+  requestId: string,
+  stepId: string,
+  body: StepDecideIn,
+): Promise<LeaveRequestOut> {
+  const res = await wrappedFetch(
+    new Request(
+      absoluteUrl(
+        `/api/v1/leave/requests/${requestId}/steps/${stepId}/decide`,
+      ),
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
   );
   return handleLeaveResponse<LeaveRequestOut>(res);
 }

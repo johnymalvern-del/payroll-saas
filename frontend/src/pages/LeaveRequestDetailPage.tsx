@@ -13,6 +13,7 @@ import {
   type LeaveRequestOut,
 } from "../api/leaveRequests";
 import { ApplyLeaveModal } from "../components/Leave/ApplyLeaveModal";
+import { DecisionModal } from "../components/Leave/DecisionModal";
 
 function fmt(s: string): string {
   const n = Number(s);
@@ -87,8 +88,13 @@ export function LeaveRequestDetailPage() {
   const qc = useQueryClient();
   const me = useMe();
   const employeeId = me.data?.employee_id ?? null;
+  const meId = me.data?.id ?? null;
+  const permissions = me.data?.permissions ?? [];
+  const canApprove = permissions.includes("leave_approve");
   const [editOpen, setEditOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [decisionMode, setDecisionMode] =
+    useState<"approve" | "reject" | null>(null);
 
   const returnTo =
     (location.state as { returnTo?: string } | null)?.returnTo;
@@ -96,6 +102,8 @@ export function LeaveRequestDetailPage() {
   const backLabel =
     backTarget === "/leave/admin"
       ? "← Back to Leave Admin"
+      : backTarget === "/leave/approvals"
+      ? "← Back to My Approvals"
       : "← Back to leave history";
 
   const request = useQuery({
@@ -170,6 +178,13 @@ export function LeaveRequestDetailPage() {
   const isApproved = r.status === "approved";
   const isRejected = r.status === "rejected";
   const isCancelled = r.status === "cancelled";
+
+  const myPendingStep =
+    canApprove && meId
+      ? r.steps.find(
+          (s) => s.status === "pending" && s.approver_user_id === meId,
+        ) ?? null
+      : null;
 
   const onEdit = () => setEditOpen(true);
 
@@ -326,6 +341,24 @@ export function LeaveRequestDetailPage() {
         </Grid.Col>
       </Grid>
 
+      {myPendingStep && (
+        <Group justify="flex-end" data-testid="leave-request-decision-actions">
+          <Button
+            data-testid="leave-request-approve"
+            onClick={() => setDecisionMode("approve")}
+          >
+            Approve
+          </Button>
+          <Button
+            color="red"
+            data-testid="leave-request-reject"
+            onClick={() => setDecisionMode("reject")}
+          >
+            Reject
+          </Button>
+        </Group>
+      )}
+
       {(isDraft || isSubmitted || isApproved) && (
         <Group justify="flex-end" data-testid="leave-request-actions">
           {isDraft && (
@@ -379,6 +412,20 @@ export function LeaveRequestDetailPage() {
           employeeId={employeeId}
           onCreated={() => { /* invalidation done inside modal */ }}
           initialRequest={r}
+        />
+      )}
+
+      {decisionMode && myPendingStep && (
+        <DecisionModal
+          opened
+          onClose={() => setDecisionMode(null)}
+          mode={decisionMode}
+          request={r}
+          step={myPendingStep}
+          onSuccess={() => {
+            setDecisionMode(null);
+            invalidateAll();
+          }}
         />
       )}
     </Stack>

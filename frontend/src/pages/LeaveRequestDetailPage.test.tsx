@@ -6,6 +6,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MantineProvider } from "@mantine/core";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
+const { mockPermsRef } = vi.hoisted(() => ({
+  mockPermsRef: { value: ["self_view", "self_submit"] as string[] },
+}));
+
 vi.mock("../auth/useMe", () => ({
   useMe: () => ({
     data: {
@@ -13,7 +17,7 @@ vi.mock("../auth/useMe", () => ({
       username: "test",
       role: "employee",
       employee_id: "e1",
-      permissions: ["self_view", "self_submit"],
+      permissions: mockPermsRef.value,
       must_change_password: false,
       default_timezone: null,
     },
@@ -58,6 +62,8 @@ function setupMock(opts: {
   submitResponse?: unknown;
   cancelStatus?: number;
   cancelResponse?: unknown;
+  decideStatus?: number;
+  decideResponse?: unknown;
 }): { calls: Call[] } {
   const calls: Call[] = [];
   global.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -73,6 +79,12 @@ function setupMock(opts: {
     }
     calls.push({ url, method, body });
 
+    if (method === "POST" && /\/steps\/[^/]+\/decide$/.test(url)) {
+      return jr(
+        opts.decideResponse ?? { ...(opts.request as object), status: "approved" },
+        opts.decideStatus ?? 200,
+      );
+    }
     if (method === "POST" && url.endsWith("/submit")) {
       return jr(
         opts.submitResponse ?? { ...(opts.request as object), status: "submitted" },
@@ -156,6 +168,11 @@ const STEP_PENDING = {
   created_at: "2026-02-01T10:00:00Z",
 };
 
+const STEP_MINE = {
+  ...STEP_PENDING,
+  approver_user_id: "u1",
+};
+
 const BASE_REQUEST = {
   id: "r1",
   employee_id: "e1",
@@ -177,7 +194,10 @@ const BASE_REQUEST = {
   steps: [],
 };
 
-beforeEach(() => { vi.restoreAllMocks(); });
+beforeEach(() => {
+  mockPermsRef.value = ["self_view", "self_submit"];
+  vi.restoreAllMocks();
+});
 afterEach(() => { cleanup(); });
 
 describe("LeaveRequestDetailPage", () => {
@@ -466,5 +486,104 @@ describe("LeaveRequestDetailPage", () => {
         "/leave/history",
       ),
     );
+  });
+
+  // ── L4b: approve / reject buttons ─────────────────────────────────
+
+  it("shows Approve and Reject when current pending step is mine", async () => {
+    mockPermsRef.value = ["self_view", "self_submit", "leave_approve"];
+    setupMock({
+      request: {
+        ...BASE_REQUEST,
+        status: "submitted",
+        steps: [STEP_MINE],
+      },
+      types: [TYPE_ANNUAL],
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("leave-request-approve")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("leave-request-reject")).toBeInTheDocument();
+  });
+
+  it("hides Approve and Reject when step belongs to another approver", async () => {
+    mockPermsRef.value = ["self_view", "self_submit", "leave_approve"];
+    setupMock({
+      request: {
+        ...BASE_REQUEST,
+        status: "submitted",
+        steps: [STEP_PENDING],
+      },
+      types: [TYPE_ANNUAL],
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("leave-request-cancel")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("leave-request-approve")).toBeNull();
+    expect(screen.queryByTestId("leave-request-reject")).toBeNull();
+  });
+
+  it("hides Approve and Reject when user lacks leave_approve", async () => {
+    setupMock({
+      request: {
+        ...BASE_REQUEST,
+        status: "submitted",
+        steps: [STEP_MINE],
+      },
+      types: [TYPE_ANNUAL],
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("leave-request-cancel")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("leave-request-approve")).toBeNull();
+    expect(screen.queryByTestId("leave-request-reject")).toBeNull();
+  });
+
+  it("clicking Approve opens DecisionModal in approve mode", async () => {
+    mockPermsRef.value = ["self_view", "self_submit", "leave_approve"];
+    setupMock({
+      request: {
+        ...BASE_REQUEST,
+        status: "submitted",
+        steps: [STEP_MINE],
+      },
+      types: [TYPE_ANNUAL],
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("leave-request-approve")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("leave-request-approve"));
+    await waitFor(() =>
+      expect(screen.getByTestId("decision-modal")).toBeInTheDocument(),
+    );
+    const confirm = screen.getByTestId("decision-modal-confirm");
+    expect(confirm).toHaveTextContent("Approve");
+  });
+
+  it("clicking Reject opens DecisionModal in reject mode (note required)", async () => {
+    mockPermsRef.value = ["self_view", "self_submit", "leave_approve"];
+    setupMock({
+      request: {
+        ...BASE_REQUEST,
+        status: "submitted",
+        steps: [STEP_MINE],
+      },
+      types: [TYPE_ANNUAL],
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("leave-request-reject")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("leave-request-reject"));
+    await waitFor(() =>
+      expect(screen.getByTestId("decision-modal")).toBeInTheDocument(),
+    );
+    const confirm = screen.getByTestId("decision-modal-confirm");
+    expect(confirm).toHaveTextContent("Reject");
+    expect(confirm).toBeDisabled();
   });
 });
