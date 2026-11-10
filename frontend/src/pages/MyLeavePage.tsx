@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Alert, Badge, Button, Card, Group, Loader, SimpleGrid, Stack,
@@ -29,6 +29,7 @@ function statusColor(s: string): string {
 
 export function MyLeavePage() {
   const me = useMe();
+  const navigate = useNavigate();
   const [applyOpen, setApplyOpen] = useState(false);
 
   const employeeId = me.data?.employee_id ?? null;
@@ -203,7 +204,12 @@ export function MyLeavePage() {
           </Table.Thead>
           <Table.Tbody>
             {requestItems.map((r: LeaveRequestOut) => (
-              <Table.Tr key={r.id} data-testid={`recent-row-${r.id}`}>
+              <Table.Tr
+                key={r.id}
+                data-testid={`recent-row-${r.id}`}
+                style={{ cursor: "pointer" }}
+                onClick={() => navigate(`/leave/requests/${r.id}`)}
+              >
                 <Table.Td>
                   {typeNameById.get(r.leave_type_id) ?? "—"}
                 </Table.Td>

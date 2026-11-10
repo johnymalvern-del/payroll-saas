@@ -4,7 +4,7 @@ import {
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MantineProvider } from "@mantine/core";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 vi.mock("../auth/useMe", () => ({
   useMe: () => ({
@@ -108,8 +108,14 @@ function renderPage() {
   return render(
     <MantineProvider>
       <QueryClientProvider client={qc}>
-        <MemoryRouter>
-          <MyLeavePage />
+        <MemoryRouter initialEntries={["/leave"]}>
+          <Routes>
+            <Route path="/leave" element={<MyLeavePage />} />
+            <Route
+              path="/leave/requests/:id"
+              element={<div data-testid="detail-target">Detail</div>}
+            />
+          </Routes>
         </MemoryRouter>
       </QueryClientProvider>
     </MantineProvider>,
@@ -321,6 +327,22 @@ describe("MyLeavePage", () => {
     fireEvent.click(screen.getByTestId("my-leave-apply-button"));
     await waitFor(() =>
       expect(screen.getByTestId("apply-leave-type")).toBeInTheDocument(),
+    );
+  });
+
+  it("clicking a recent row navigates to the detail page", async () => {
+    setupMock({
+      types: [TYPE_ANNUAL],
+      balances: [BAL_ANNUAL],
+      recent: [REQ_RECENT],
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("recent-row-r1")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("recent-row-r1"));
+    await waitFor(() =>
+      expect(screen.getByTestId("detail-target")).toBeInTheDocument(),
     );
   });
 });

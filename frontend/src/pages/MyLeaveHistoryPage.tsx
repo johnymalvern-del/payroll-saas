@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import {
   Alert, Badge, Button, Group, Loader, SegmentedControl, Stack,
@@ -38,6 +38,7 @@ function statusColor(s: string): string {
 
 export function MyLeaveHistoryPage() {
   const me = useMe();
+  const navigate = useNavigate();
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const employeeId = me.data?.employee_id ?? null;
 
@@ -136,7 +137,12 @@ export function MyLeaveHistoryPage() {
           </Table.Thead>
           <Table.Tbody>
             {items.map((r) => (
-              <Table.Tr key={r.id} data-testid={`history-row-${r.id}`}>
+              <Table.Tr
+                key={r.id}
+                data-testid={`history-row-${r.id}`}
+                style={{ cursor: "pointer" }}
+                onClick={() => navigate(`/leave/requests/${r.id}`)}
+              >
                 <Table.Td>
                   {typeNameById.get(r.leave_type_id) ?? "—"}
                 </Table.Td>

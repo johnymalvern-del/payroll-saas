@@ -4,7 +4,7 @@ import {
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MantineProvider } from "@mantine/core";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 vi.mock("../auth/useMe", () => ({
   useMe: () => ({
@@ -86,8 +86,14 @@ function renderPage() {
   return render(
     <MantineProvider>
       <QueryClientProvider client={qc}>
-        <MemoryRouter>
-          <MyLeaveHistoryPage />
+        <MemoryRouter initialEntries={["/leave/history"]}>
+          <Routes>
+            <Route path="/leave/history" element={<MyLeaveHistoryPage />} />
+            <Route
+              path="/leave/requests/:id"
+              element={<div data-testid="detail-target">Detail</div>}
+            />
+          </Routes>
         </MemoryRouter>
       </QueryClientProvider>
     </MantineProvider>,
@@ -220,5 +226,20 @@ describe("MyLeaveHistoryPage", () => {
     expect(screen.getByTestId("history-row-r1")).toBeInTheDocument();
     const withCursor = calls.filter((c) => c.url.includes("cursor=abc"));
     expect(withCursor.length).toBe(1);
+  });
+
+  it("clicking a history row navigates to the detail page", async () => {
+    setupMock({
+      types: [TYPE_ANNUAL],
+      firstPage: [REQ("r1", "approved")],
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("history-row-r1")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId("history-row-r1"));
+    await waitFor(() =>
+      expect(screen.getByTestId("detail-target")).toBeInTheDocument(),
+    );
   });
 });

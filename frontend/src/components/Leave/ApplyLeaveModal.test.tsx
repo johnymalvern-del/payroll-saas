@@ -5,6 +5,7 @@ import {
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MantineProvider } from "@mantine/core";
 import { ApplyLeaveModal } from "./ApplyLeaveModal";
+import type { LeaveRequestOut } from "../../api/leaveRequests";
 
 if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = function () {};
@@ -36,6 +37,8 @@ function setupMock(opts: {
   balances?: unknown[];
   createResponse?: unknown;
   createStatus?: number;
+  patchResponse?: unknown;
+  patchStatus?: number;
 }): { calls: Call[] } {
   const calls: Call[] = [];
   global.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -51,6 +54,31 @@ function setupMock(opts: {
     }
     calls.push({ url, method, body });
 
+    if (method === "PATCH" && /\/leave\/requests\/[^/]+$/.test(url)) {
+      return jr(
+        opts.patchResponse ?? {
+          id: "r1",
+          employee_id: "e1",
+          leave_type_id: "lt1",
+          from_date: "2026-03-15",
+          to_date: "2026-03-20",
+          days_requested: "5.00",
+          reason: "Edited reason",
+          status: "draft",
+          submitted_at: null,
+          decided_at: null,
+          decided_by_user_id: null,
+          decision_note: null,
+          row_version: 2,
+          created_at: "2026-02-01T10:00:00Z",
+          updated_at: "2026-02-02T10:00:00Z",
+          captured_by_user_id: null,
+          days: [],
+          steps: [],
+        },
+        opts.patchStatus ?? 200,
+      );
+    }
     if (method === "POST" && url.endsWith("/leave/requests")) {
       return jr(
         opts.createResponse ?? {
@@ -95,6 +123,7 @@ function setupMock(opts: {
 function renderModal(opts?: {
   onClose?: () => void;
   onCreated?: () => void;
+  initialRequest?: LeaveRequestOut;
 }) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -107,6 +136,7 @@ function renderModal(opts?: {
           onClose={opts?.onClose ?? (() => {})}
           employeeId="e1"
           onCreated={opts?.onCreated ?? (() => {})}
+          initialRequest={opts?.initialRequest}
         />
       </QueryClientProvider>
     </MantineProvider>,
@@ -152,10 +182,31 @@ const BAL = {
   updated_at: "2026-01-01T00:00:00Z",
 };
 
+const DRAFT_REQUEST: LeaveRequestOut = {
+  id: "r1",
+  employee_id: "e1",
+  leave_type_id: "lt1",
+  from_date: "2026-03-10",
+  to_date: "2026-03-14",
+  days_requested: "5.00",
+  reason: "Family event",
+  status: "draft",
+  submitted_at: null,
+  decided_at: null,
+  decided_by_user_id: null,
+  decision_note: null,
+  row_version: 1,
+  created_at: "2026-02-01T10:00:00Z",
+  updated_at: "2026-02-01T10:00:00Z",
+  captured_by_user_id: null,
+  days: [],
+  steps: [],
+};
+
 beforeEach(() => { vi.restoreAllMocks(); });
 afterEach(() => { cleanup(); });
 
-describe("ApplyLeaveModal", () => {
+describe("ApplyLeaveModal — create mode", () => {
   it("shows validation error if no leave type is selected", async () => {
     setupMock({ types: [TYPE_ANNUAL], balances: [BAL] });
     renderModal();
@@ -184,8 +235,6 @@ describe("ApplyLeaveModal", () => {
     renderModal();
     await screen.findByTestId("apply-leave-type");
 
-    // Select leave type first so that the modal's validation order
-    // reaches the date check.
     const typeSelect = screen.getByTestId("apply-leave-type");
     fireEvent.click(typeSelect);
     const option = await screen.findByText("Annual Leave (ANNUAL)");
@@ -256,7 +305,7 @@ describe("ApplyLeaveModal", () => {
       types: [TYPE_ANNUAL],
       balances: [BAL],
       createStatus: 422,
-      createResponse: { error: { code: "no_working_days" } },
+      createResponse: { error: { code: "no_working_days_in_range" } },
     });
     renderModal();
     await screen.findByTestId("apply-leave-type");
@@ -296,5 +345,71 @@ describe("ApplyLeaveModal", () => {
         screen.getByTestId("apply-leave-balance-hint"),
       ).toHaveTextContent(/Available: 12\.00 days/),
     );
+  });
+});
+
+describe("ApplyLeaveModal — edit mode", () => {
+  it("prefills fields from initialRequest", async () => {
+    setupMock({ types: [TYPE_ANNUAL] });
+    renderModal({ initialRequest: DRAFT_REQUEST });
+    await waitFor(() => {
+      const from = screen.getByTestId("apply-leave-from") as HTMLInputElement;
+      expect(from.value).toBe("2026-03-10");
+      const to = screen.getByTestId("apply-leave-to") as HTMLInputElement;
+      expect(to.value).toBe("2026-03-14");
+      const reason = screen.getByTestId("apply-leave-reason") as HTMLTextAreaElement;
+      expect(reason.value).toBe("Family event");
+    });
+  });
+
+  it("disables the leave type selector", async () => {
+    setupMock({ types: [TYPE_ANNUAL] });
+    renderModal({ initialRequest: DRAFT_REQUEST });
+    await waitFor(() => {
+      const select = screen.getByTestId("apply-leave-type") as HTMLInputElement;
+      expect(select.disabled).toBe(true);
+    });
+  });
+
+  it("shows 'Save changes' label", async () => {
+    setupMock({ types: [TYPE_ANNUAL] });
+    renderModal({ initialRequest: DRAFT_REQUEST });
+    await waitFor(() =>
+      expect(screen.getByTestId("apply-leave-save-draft")).toHaveTextContent(
+        "Save changes",
+      ),
+    );
+  });
+
+  it("PATCHes with row_version and updated fields", async () => {
+    const { calls } = setupMock({ types: [TYPE_ANNUAL] });
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    renderModal({ initialRequest: DRAFT_REQUEST, onCreated, onClose });
+    await waitFor(() =>
+      expect(screen.getByTestId("apply-leave-to")).toBeInTheDocument(),
+    );
+    fireEvent.change(screen.getByTestId("apply-leave-to"), {
+      target: { value: "2026-03-20" },
+    });
+    fireEvent.change(screen.getByTestId("apply-leave-reason"), {
+      target: { value: "Edited reason" },
+    });
+    fireEvent.click(screen.getByTestId("apply-leave-save-draft"));
+
+    await waitFor(() => {
+      const patch = calls.find((c) => c.method === "PATCH");
+      expect(patch).toBeDefined();
+      expect(patch!.url).toMatch(/\/leave\/requests\/r1$/);
+      const parsed = JSON.parse(patch!.body);
+      expect(parsed.row_version).toBe(1);
+      expect(parsed.to_date).toBe("2026-03-20");
+      expect(parsed.reason).toBe("Edited reason");
+      expect(parsed.from_date).toBe("2026-03-10");
+    });
+    await waitFor(() => {
+      expect(onCreated).toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalled();
+    });
   });
 });

@@ -54,6 +54,13 @@ export type LeaveRequestCreateIn = {
   reason?: string | null;
 };
 
+export type LeaveRequestPatchIn = {
+  row_version: number;
+  from_date?: string;
+  to_date?: string;
+  reason?: string | null;
+};
+
 export async function fetchLeaveRequests(params: {
   employee_id?: string;
   status?: string;
@@ -78,6 +85,16 @@ export async function fetchLeaveRequests(params: {
   return handleLeaveResponse<LeaveRequestListOut>(res);
 }
 
+export async function fetchLeaveRequest(id: string): Promise<LeaveRequestOut> {
+  const res = await wrappedFetch(
+    new Request(absoluteUrl(`/api/v1/leave/requests/${id}`), {
+      method: "GET",
+      credentials: "include",
+    }),
+  );
+  return handleLeaveResponse<LeaveRequestOut>(res);
+}
+
 export async function createLeaveRequest(
   body: LeaveRequestCreateIn,
 ): Promise<LeaveRequestOut> {
@@ -87,6 +104,44 @@ export async function createLeaveRequest(
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    }),
+  );
+  return handleLeaveResponse<LeaveRequestOut>(res);
+}
+
+export async function updateLeaveRequest(
+  id: string, body: LeaveRequestPatchIn,
+): Promise<LeaveRequestOut> {
+  const res = await wrappedFetch(
+    new Request(absoluteUrl(`/api/v1/leave/requests/${id}`), {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  );
+  return handleLeaveResponse<LeaveRequestOut>(res);
+}
+
+export async function submitLeaveRequest(
+  id: string,
+): Promise<LeaveRequestOut> {
+  const res = await wrappedFetch(
+    new Request(absoluteUrl(`/api/v1/leave/requests/${id}/submit`), {
+      method: "POST",
+      credentials: "include",
+    }),
+  );
+  return handleLeaveResponse<LeaveRequestOut>(res);
+}
+
+export async function cancelLeaveRequest(
+  id: string,
+): Promise<LeaveRequestOut> {
+  const res = await wrappedFetch(
+    new Request(absoluteUrl(`/api/v1/leave/requests/${id}/cancel`), {
+      method: "POST",
+      credentials: "include",
     }),
   );
   return handleLeaveResponse<LeaveRequestOut>(res);
