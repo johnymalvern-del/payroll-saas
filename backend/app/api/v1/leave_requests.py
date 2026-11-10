@@ -25,6 +25,12 @@ The employee stays the subject; approval chain applies normally; the
 capturing user MAY approve their own capture but MUST provide a note
 (audited); the employee (subject) can never approve their own request.
 
+Concurrency (B-L4b): _current_step acquires SELECT ... FOR UPDATE on the
+earliest pending LeaveApprovalStep. Prevents double-apply when two
+approvers act on the same step concurrently — the second decider blocks
+until the first commits, then finds the step no longer pending and is
+refused with 409.
+
 Errors:
   not_found                    - request/type/step missing or out of scope
   no_employee_record           - capture-on-behalf body missing employee_id
@@ -275,12 +281,22 @@ def _ensure_no_hour_type(db: Any, request: LeaveRequest) -> LeaveType:
 def _current_step(
     db: Any, request: LeaveRequest,
 ) -> LeaveApprovalStep | None:
+    """Return the earliest pending step for this request, locking the row.
+
+    B-L4b: SELECT ... FOR UPDATE ensures that two concurrent deciders
+    cannot both read this step as 'pending' and both proceed to apply
+    final side effects (balance conversion + attendance adjustments).
+    The second decider blocks on the lock until the first commits, then
+    re-reads the row (no longer 'pending'), finds no matching row, and is
+    refused with 409 by the caller.
+    """
     return db.scalars(
         select(LeaveApprovalStep)
         .where(LeaveApprovalStep.leave_request_id == request.id)
         .where(LeaveApprovalStep.status == "pending")
         .order_by(LeaveApprovalStep.step_no)
         .limit(1)
+        .with_for_update()
     ).first()
 
 
