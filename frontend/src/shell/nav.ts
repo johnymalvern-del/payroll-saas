@@ -45,6 +45,8 @@ const PERMISSION_NAV: Array<{
     item: { label: "Leave Balances", to: "/leave/balances-admin", icon: "dollar" } },
   { permission: "employee_crud", group: "People",
     item: { label: "Leave Admin", to: "/leave/admin", icon: "check" } },
+  { permission: "user_manage", group: "People",
+    item: { label: "Leave Types", to: "/leave/types-admin", icon: "settings" } },
   { permission: "pay_rate_view", group: "People",
     item: { label: "Employee payroll", to: "/payroll/employee-payroll", icon: "dollar" } },
   { permission: "payroll_preview", group: "Payroll",

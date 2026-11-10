@@ -93,4 +93,8 @@ describe("buildNav", () => {
       "/leave/balances-admin",
     ]);
   });
+
+  it("user_manage-only role sees Leave Types in People group", () => {
+    expect(flat(["user_manage"])).toEqual(["/leave/types-admin"]);
+  });
 });
