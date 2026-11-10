@@ -78,13 +78,19 @@ describe("buildNav", () => {
     expect(groups.map((g) => g.label)).toEqual([null, "Attendance", "People"]);
   });
 
-  it("approver with leave_approve sees My Approvals in the People group", () => {
-    expect(flat(["leave_approve"])).toEqual(["/leave/approvals"]);
+  it("approver with leave_approve sees My Approvals and Leave Balances", () => {
+    expect(flat(["leave_approve"])).toEqual([
+      "/leave/approvals",
+      "/leave/balances-admin",
+    ]);
   });
 
-  it("approver also holding self_view sees My Leave before My Approvals", () => {
-    expect(
-      flat(["self_view", "leave_approve"]),
-    ).toEqual(["/", "/leave", "/leave/approvals"]);
+  it("approver also holding self_view sees My Leave before the approver items", () => {
+    expect(flat(["self_view", "leave_approve"])).toEqual([
+      "/",
+      "/leave",
+      "/leave/approvals",
+      "/leave/balances-admin",
+    ]);
   });
 });

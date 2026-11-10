@@ -34,6 +34,7 @@ import { MyLeaveHistoryPage } from "./pages/MyLeaveHistoryPage";
 import { LeaveRequestDetailPage } from "./pages/LeaveRequestDetailPage";
 import { LeaveAdminPage } from "./pages/LeaveAdminPage";
 import { MyApprovalsPage } from "./pages/MyApprovalsPage";
+import { LeaveBalancesAdminPage } from "./pages/LeaveBalancesAdminPage";
 
 export default function App() {
   return (
@@ -67,6 +68,7 @@ export default function App() {
           <Route path="leave/requests/:id" element={<LeaveRequestDetailPage />} />
           <Route path="leave/admin" element={<LeaveAdminPage />} />
           <Route path="leave/approvals" element={<MyApprovalsPage />} />
+          <Route path="leave/balances-admin" element={<LeaveBalancesAdminPage />} />
           <Route path="setup/devices" element={<DevicesPage />} />
           <Route path="payroll/pay-periods" element={<PayPeriodsPage />} />
           <Route path="payroll/pay-periods/:id" element={<PayPeriodDetailPage />} />
