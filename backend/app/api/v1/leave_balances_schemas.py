@@ -1,16 +1,20 @@
-"""Leave balance schemas (Chapter 3, 3B.2)."""
+"""Leave balance schemas (Chapter 3, 3B.2).
+
+B-L5a: BalanceAdjustIn.reason is required (min_length 1) and must contain
+at least one non-whitespace character. Validation refuses blank inputs;
+it does not trim or alter the stored value.
+"""
 from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class LeaveBalanceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-
     id: uuid.UUID
     employee_id: uuid.UUID
     leave_type_id: uuid.UUID
@@ -40,7 +44,16 @@ class BalanceAdjustIn(BaseModel):
     leave_type_id: uuid.UUID
     cycle_start: date | None = None
     delta: Decimal
-    reason: str = Field(..., min_length=1, max_length=200)
+    reason: str = Field(..., min_length=1, max_length=1000)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError(
+                "reason must contain at least one non-whitespace character"
+            )
+        return v
 
 
 class BalanceAdjustOut(BaseModel):

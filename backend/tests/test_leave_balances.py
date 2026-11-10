@@ -1,6 +1,13 @@
-"""Chapter 3 L1e: leave balance read + adjust (3B.2 + amendment 4)."""
+"""Chapter 3 L1e: leave balance read + adjust (3B.2 + amendment 4).
+
+B-L5a: adds (a) schema tests proving BalanceAdjustIn.reason is required
+and non-blank, (b) a FOR UPDATE / advisory-lock SQL capture test, (c) a
+real-PostgreSQL concurrent-adjust test proving no duplicate row is created
+and no delta is lost on first-time scope adjustment.
+"""
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -8,7 +15,8 @@ from decimal import Decimal
 from typing import Iterator
 
 import pytest
-from sqlalchemy import create_engine, select
+from pydantic import ValidationError
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
 from app.api.v1.leave_balances import (
@@ -378,3 +386,189 @@ def test_get_never_writes_ledger(session):
     )
     after = session.scalar(select(_f.count()).select_from(LeaveBalanceLedger))
     assert after == before
+
+
+# ---------------------------------------------------------------------------
+# B-L5a Task A: BalanceAdjustIn.reason is required and non-blank
+# ---------------------------------------------------------------------------
+
+def test_schema_missing_reason_rejected():
+    with pytest.raises(ValidationError):
+        BalanceAdjustIn(
+            employee_id=uuid.uuid4(),
+            leave_type_id=uuid.uuid4(),
+            delta=Decimal("1"),
+        )
+
+
+def test_schema_empty_reason_rejected():
+    with pytest.raises(ValidationError):
+        BalanceAdjustIn(
+            employee_id=uuid.uuid4(),
+            leave_type_id=uuid.uuid4(),
+            delta=Decimal("1"),
+            reason="",
+        )
+
+
+def test_schema_whitespace_reason_rejected():
+    with pytest.raises(ValidationError):
+        BalanceAdjustIn(
+            employee_id=uuid.uuid4(),
+            leave_type_id=uuid.uuid4(),
+            delta=Decimal("1"),
+            reason="   ",
+        )
+
+
+def test_schema_valid_reason_accepted():
+    p = BalanceAdjustIn(
+        employee_id=uuid.uuid4(),
+        leave_type_id=uuid.uuid4(),
+        delta=Decimal("1"),
+        reason="Holiday bonus",
+    )
+    assert p.reason == "Holiday bonus"
+
+
+# ---------------------------------------------------------------------------
+# B-L5a Task B: closed-cycle success, advisory lock, concurrency
+# ---------------------------------------------------------------------------
+
+def test_adjust_closed_cycle_succeeds_with_payroll_finalise(session):
+    """A payroll_admin (PAYROLL_FINALISE) can adjust a closed cycle."""
+    emp = _mk_emp(session)
+    t = _mk_type(session)
+    b = LeaveBalance(
+        employee_id=emp.id, leave_type_id=t.id,
+        cycle_start=date(2024, 1, 1), cycle_end=date(2024, 12, 31),
+        entitled=Decimal("0"), accrued=Decimal("5"),
+        taken=Decimal("0"), pending=Decimal("0"),
+        carried_in=Decimal("0"), adjusted=Decimal("0"),
+        row_version=1,
+    )
+    session.add(b)
+    session.flush()
+    admin = _mk_user(session, role="payroll_admin")
+
+    out = adjust_leave_balance(
+        BalanceAdjustIn(
+            employee_id=emp.id,
+            leave_type_id=t.id,
+            cycle_start=date(2024, 1, 1),
+            delta=Decimal("2"),
+            reason="Late correction",
+        ),
+        session, admin,
+    )
+    assert out.balance.adjusted == Decimal("2")
+    assert out.balance.cycle_end == date(2024, 12, 31)
+
+
+def test_adjust_emits_advisory_lock_and_for_update_sql(session):
+    """The adjust path emits pg_advisory_xact_lock and FOR UPDATE."""
+    emp = _mk_emp(session)
+    t = _mk_type(session)
+    _mk_balance(session, emp, t, accrued="10")
+    u = _mk_user(session, role="hr")
+
+    captured: list[str] = []
+    bind = session.get_bind()
+    target = getattr(bind, "engine", bind)
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        captured.append(statement)
+
+    event.listen(target, "before_cursor_execute", _capture)
+    try:
+        adjust_leave_balance(
+            BalanceAdjustIn(
+                employee_id=emp.id, leave_type_id=t.id,
+                delta=Decimal("1"), reason="Test",
+            ),
+            session, u,
+        )
+    finally:
+        event.remove(target, "before_cursor_execute", _capture)
+
+    joined = "\n".join(captured).lower()
+    assert "pg_advisory_xact_lock" in joined, (
+        f"advisory lock missing; captured={captured}"
+    )
+    assert "for update" in joined, (
+        f"FOR UPDATE missing; captured={captured}"
+    )
+
+
+def test_adjust_concurrent_first_time_single_row(disposable_tenant):
+    """Two concurrent adjusts on a previously-empty scope produce one row
+    with adjusted == sum of both deltas; ledger has exactly two rows.
+
+    Real PostgreSQL — each worker uses its own engine and session.
+    """
+    url = _TENANT_URL.format(db=disposable_tenant.tenant_db_name)
+
+    # Setup in one session
+    eng = create_engine(url, future=True)
+    setup = Session(bind=eng)
+    emp = _mk_emp(setup)
+    t = _mk_type(setup)
+    hr_user = _mk_user(setup, role="hr")
+    emp_id, t_id, user_id = emp.id, t.id, hr_user.id
+    setup.commit()
+    setup.close()
+    eng.dispose()
+
+    barrier = threading.Barrier(2)
+    errors: list[str] = []
+
+    def worker(delta: str) -> None:
+        w_eng = create_engine(url, future=True)
+        s = Session(bind=w_eng)
+        try:
+            user = s.scalar(select(User).where(User.id == user_id))
+            payload = BalanceAdjustIn(
+                employee_id=emp_id, leave_type_id=t_id,
+                delta=Decimal(delta), reason=f"concurrent {delta}",
+            )
+            barrier.wait(timeout=10)
+            adjust_leave_balance(payload, s, user)
+        except Exception as e:  # noqa: BLE001
+            errors.append(repr(e))
+        finally:
+            s.close()
+            w_eng.dispose()
+
+    threads = [
+        threading.Thread(target=worker, args=("3",)),
+        threading.Thread(target=worker, args=("5",)),
+    ]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=30)
+
+    assert errors == [], errors
+
+    # Verify
+    v_eng = create_engine(url, future=True)
+    verify = Session(bind=v_eng)
+    try:
+        rows = list(verify.scalars(select(LeaveBalance).where(
+            LeaveBalance.employee_id == emp_id,
+            LeaveBalance.leave_type_id == t_id,
+        )).all())
+        assert len(rows) == 1, f"expected 1 row, got {len(rows)}"
+        assert rows[0].adjusted == Decimal("8"), (
+            f"lost update: adjusted={rows[0].adjusted}, expected 8"
+        )
+
+        ledger = list(verify.scalars(select(LeaveBalanceLedger).where(
+            LeaveBalanceLedger.employee_id == emp_id,
+            LeaveBalanceLedger.leave_type_id == t_id,
+            LeaveBalanceLedger.reason == "adjustment",
+        )).all())
+        assert len(ledger) == 2, f"expected 2 ledger rows, got {len(ledger)}"
+    finally:
+        verify.close()
+        v_eng.dispose()

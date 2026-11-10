@@ -1,6 +1,12 @@
-"""Chapter 3 L1e: accrual service + run endpoint (3B.3 + amendment 3)."""
+"""Chapter 3 L1e: accrual service + run endpoint (3B.3 + amendment 3).
+
+B-L5a: adds (a) an advisory-lock SQL capture test, (b) a real-PostgreSQL
+concurrent-accrual test proving no duplicate period keys, (c) a rollback
+test proving a mid-run failure leaves no partial state.
+"""
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -8,7 +14,7 @@ from decimal import Decimal
 from typing import Iterator
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import Session
 
 from app.api.v1.leave_accruals import run_accruals
@@ -304,3 +310,106 @@ def test_balances_list_fresh_after_run(session):
     )
     assert out.accrued_as_of is not None
     assert out.accrual_stale is False
+
+
+# ---------------------------------------------------------------------------
+# B-L5a Task C: advisory lock SQL + concurrency + rollback
+# ---------------------------------------------------------------------------
+
+def test_accrual_emits_advisory_lock_sql(session):
+    """accrue_all_employees must acquire pg_advisory_xact_lock first."""
+    _settings(session)
+    _mk_emp(session)
+    _mk_type(session, method="monthly", amount="1.00")
+
+    captured: list[str] = []
+    bind = session.get_bind()
+    target = getattr(bind, "engine", bind)
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        captured.append(statement)
+
+    event.listen(target, "before_cursor_execute", _capture)
+    try:
+        accrue_all_employees(session, date(2026, 3, 15))
+    finally:
+        event.remove(target, "before_cursor_execute", _capture)
+
+    joined = "\n".join(captured).lower()
+    assert "pg_advisory_xact_lock" in joined, (
+        f"advisory lock missing; captured={captured}"
+    )
+
+
+def test_accrual_concurrent_no_duplicate_ledger(disposable_tenant):
+    """Two concurrent accrual runs produce the same ledger as one run."""
+    url = _TENANT_URL.format(db=disposable_tenant.tenant_db_name)
+
+    # Setup
+    eng = create_engine(url, future=True)
+    setup = Session(bind=eng)
+    _settings(setup)
+    _mk_emp(setup)
+    _mk_type(setup, method="monthly", amount="1.00")
+    setup.commit()
+    setup.close()
+    eng.dispose()
+
+    barrier = threading.Barrier(2)
+    errors: list[str] = []
+
+    def worker() -> None:
+        w_eng = create_engine(url, future=True)
+        s = Session(bind=w_eng)
+        try:
+            barrier.wait(timeout=10)
+            accrue_all_employees(s, date(2026, 3, 15))
+        except Exception as e:  # noqa: BLE001
+            errors.append(repr(e))
+        finally:
+            s.close()
+            w_eng.dispose()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=30)
+
+    assert errors == [], errors
+
+    # Verify
+    v_eng = create_engine(url, future=True)
+    verify = Session(bind=v_eng)
+    try:
+        count = verify.scalar(
+            select(func.count()).select_from(LeaveBalanceLedger)
+        )
+        # Jan + Feb + Mar = 3 rows, not 6
+        assert count == 3, f"duplicate accrual: got {count} ledger rows"
+    finally:
+        verify.close()
+        v_eng.dispose()
+
+
+def test_accrual_rollback_on_mid_run_failure(session, monkeypatch):
+    """A mid-run exception leaves no partial state (rollback proven)."""
+    _settings(session)
+    _mk_emp(session)
+    _mk_type(session, method="monthly", amount="1.00")
+
+    from app.payroll_engine import leave as leave_engine
+
+    def _boom(lt):
+        raise RuntimeError("simulated failure mid-accrual")
+
+    monkeypatch.setattr(leave_engine, "_accrual_amount_for", _boom)
+
+    with pytest.raises(RuntimeError):
+        accrue_all_employees(session, date(2026, 3, 15))
+
+    session.rollback()
+    after = session.scalar(
+        select(func.count()).select_from(LeaveBalanceLedger)
+    )
+    assert after == 0, f"partial accrual committed: {after} ledger rows"

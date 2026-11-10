@@ -1,4 +1,13 @@
-"""Leave balance read + admin adjustment (Chapter 3, 3B.2)."""
+"""Leave balance read + admin adjustment (Chapter 3, 3B.2).
+
+B-L5a: adjust_leave_balance takes a transaction-scoped PostgreSQL advisory
+lock keyed to the exact (employee_id, leave_type_id, cycle_start) triple
+before the balance lookup, so concurrent first-time adjustments for the
+same scope serialise and cannot create duplicate rows or lose deltas. The
+existing-row path additionally uses SELECT ... FOR UPDATE. The lock is
+released automatically when the surrounding transaction commits or rolls
+back (existing db.commit() at the end of the handler).
+"""
 from __future__ import annotations
 
 import base64
@@ -9,7 +18,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 
 from app.api.deps import TenantDbDep
 from app.api.v1.leave_balances_schemas import (
@@ -209,47 +218,71 @@ def adjust_leave_balance(
 
     settings = db.scalar(select(PayrollSettings).limit(1))
 
+    # B-L5a: determine target cycle_start BEFORE taking the lock, so the lock
+    # key fully identifies the row we will read or create. Preserves existing
+    # behaviour: caller-supplied cycle_start must already exist (404 if not);
+    # the implicit-current-cycle path creates the row if missing.
     if payload.cycle_start is not None:
-        balance = db.scalar(
-            select(LeaveBalance).where(
-                LeaveBalance.employee_id == employee.id,
-                LeaveBalance.leave_type_id == leave_type.id,
-                LeaveBalance.cycle_start == payload.cycle_start,
-            )
+        target_cycle_start = payload.cycle_start
+        target_cycle_end: date | None = None
+        create_if_missing = False
+    else:
+        bounds = compute_cycle_bounds(
+            employee, leave_type, settings, date.today()
         )
-        if balance is None:
+        target_cycle_start = bounds.start
+        target_cycle_end = bounds.end
+        create_if_missing = True
+
+    # B-L5a: transaction-scoped advisory lock keyed to the exact
+    # (employee, leave_type, cycle_start) triple. Serialises concurrent
+    # adjustments for the same scope, including the first-time case where
+    # no LeaveBalance row exists yet (FOR UPDATE alone cannot cover that).
+    # Released automatically when this transaction commits or rolls back.
+    lock_key = (
+        f"leave_balance:{employee.id}:{leave_type.id}:"
+        f"{target_cycle_start.isoformat()}"
+    )
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+        {"k": lock_key},
+    )
+
+    # Existing-row path: also take a row-level FOR UPDATE. Defense in depth —
+    # any future code path that reaches this row without going through the
+    # advisory lock still sees a consistent view.
+    balance = db.scalar(
+        select(LeaveBalance)
+        .where(
+            LeaveBalance.employee_id == employee.id,
+            LeaveBalance.leave_type_id == leave_type.id,
+            LeaveBalance.cycle_start == target_cycle_start,
+        )
+        .with_for_update()
+    )
+
+    if balance is None:
+        if not create_if_missing:
             raise AppError(
                 "not_found",
                 "Leave balance not found for the requested cycle",
                 404,
             )
-    else:
-        bounds = compute_cycle_bounds(
-            employee, leave_type, settings, date.today()
+        balance = LeaveBalance(
+            employee_id=employee.id,
+            leave_type_id=leave_type.id,
+            cycle_start=target_cycle_start,
+            cycle_end=target_cycle_end,
+            entitled=_ZERO,
+            accrued=_ZERO,
+            taken=_ZERO,
+            pending=_ZERO,
+            carried_in=_ZERO,
+            adjusted=_ZERO,
+            row_version=1,
         )
-        balance = db.scalar(
-            select(LeaveBalance).where(
-                LeaveBalance.employee_id == employee.id,
-                LeaveBalance.leave_type_id == leave_type.id,
-                LeaveBalance.cycle_start == bounds.start,
-            )
-        )
-        if balance is None:
-            balance = LeaveBalance(
-                employee_id=employee.id,
-                leave_type_id=leave_type.id,
-                cycle_start=bounds.start,
-                cycle_end=bounds.end,
-                entitled=_ZERO,
-                accrued=_ZERO,
-                taken=_ZERO,
-                pending=_ZERO,
-                carried_in=_ZERO,
-                adjusted=_ZERO,
-                row_version=1,
-            )
-            db.add(balance)
-            db.flush()
+        db.add(balance)
+        db.flush()
 
     closed = balance.cycle_end < date.today()
     if closed and not can_finalise:

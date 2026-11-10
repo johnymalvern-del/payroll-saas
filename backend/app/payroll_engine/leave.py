@@ -9,6 +9,13 @@ escalate to payroll_admin (only if the leave type sets
 requires_payroll_admin_final) or raise no_eligible_approver.
 
 Amendment 4: available_balance excludes `entitled` (informational only).
+
+B-L5a: accrue_all_employees takes a transaction-scoped advisory lock at the
+top (per tenant). Serialises concurrent accrual runs and prevents the
+"read existing period keys, then write missing rows" race that could
+otherwise double-write a period under concurrent execution. Lock is
+released by the existing db.commit() at the end of the function (or any
+rollback).
 """
 from __future__ import annotations
 
@@ -16,7 +23,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
@@ -185,6 +192,15 @@ def _carry_in_for_prior_cycle(
 def accrue_all_employees(db: Session, as_of_date: date) -> dict:
     """Materialise accruals. Idempotent per (employee, type, cycle, period_key)
     via LeaveBalanceLedger.reason = "accrual:<period_key>"."""
+    # B-L5a: transaction-scoped advisory lock, tenant-wide. Serialises
+    # concurrent accrual runs. Held until the existing db.commit() at the
+    # end of this function (or any rollback). Prevents the race between the
+    # "read existing accrual:* keys" step and the "write missing rows" step
+    # that could otherwise double-write a period under concurrent execution.
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+        {"k": "leave_accrual_run"},
+    )
     settings = db.scalar(select(PayrollSettings).limit(1))
     employees = list(
         db.scalars(
