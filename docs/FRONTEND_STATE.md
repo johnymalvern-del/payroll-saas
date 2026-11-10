@@ -29,11 +29,11 @@
 ### Bulk resolve (F-3b)
 - Bulk mode toggle on `ExceptionsPage`; per-card checkbox via
   `ExceptionCard.selectable`.
-- Actions: `apply_suggestion` | `dismiss`. Dry-run → per-row results →
-  confirm modal → POST with dry-run token. Mapped errors via
-  `mapBulkError` (`token_mismatch` → "re-run the dry run",
-  `bulk_validation_failed` → page alert + re-render from
-  `err.details.results`, `batch_failed` → "nothing was applied").
+- Actions: `apply_suggestion` | `dismiss`. Dry-run -> per-row results ->
+  confirm modal -> POST with dry-run token. Mapped errors via
+  `mapBulkError` (`token_mismatch` -> "re-run the dry run",
+  `bulk_validation_failed` -> page alert + re-render from
+  `err.details.results`, `batch_failed` -> "nothing was applied").
 
 ### Pagination
 - `useInfiniteQuery` on `["exceptions", status]`; "Load more" follows
@@ -52,27 +52,27 @@
   includes it).
 - Time in / time out only when outcome = `worked`; HH:mm text inputs,
   constructed via `dayjs.tz(date + "T" + hhmm, DEFAULT_SITE_TZ)`;
-  night-shift rollover (`time_out <= time_in` → `+1 day`).
+  night-shift rollover (`time_out <= time_in` -> `+1 day`).
 - From date, To date (inclusive). Dates are local ISO `YYYY-MM-DD`.
 - Employees: `MultiSelect` fed by `fetchEmployees` (already follows
   `next_cursor`, rejects on error).
 - Reason code: free text, 1-40 chars. Note: optional; required only
-  when reason = `other` (10+ chars) — matches backend validator.
-- Item list = (selected employees) × (each date in range).
+  when reason = `other` (10+ chars) -- matches backend validator.
+- Item list = (selected employees) x (each date in range).
   Capped at 200 rows per `BulkAdjustIn.items.max_length`; over-cap
   shows a yellow alert and disables dry-run.
 
 ### Flow
-1. Fill in inputs → live row count.
-2. **Dry run** → `POST /api/v1/attendance/adjustments/bulk` with
+1. Fill in inputs -> live row count.
+2. **Dry run** -> `POST /api/v1/attendance/adjustments/bulk` with
    `{items}` (no token). Renders per-row results
    (`adjustments-bulk-row-{i}`). Confirm only enables when every row
    is `ok`.
-3. **Confirm batch** → modal (`adjustments-bulk-confirm-modal`) →
+3. **Confirm batch** -> modal (`adjustments-bulk-confirm-modal`) ->
    POST same items + `token` from dry-run. On success shows applied
    count and invalidates `["attendance"]` + `["exceptions"]`.
 4. On `bulk_validation_failed` during confirm, the page reconstructs
-   the dry-run result panel from `err.results` — no extra call.
+   the dry-run result panel from `err.results` -- no extra call.
 5. On `token_mismatch` the mapped error says "Re-run the dry run".
 
 ### Revert
@@ -89,11 +89,11 @@ otherwise delegates to `mapErrorCode` (so `day_locked`,
 `record_not_found` all map through their normal strings).
 
 ## Gaps / backend requests
-- **B-5**: site timezone via API — currently `DEFAULT_SITE_TZ`
+- **B-5**: site timezone via API -- currently `DEFAULT_SITE_TZ`
   (`Africa/Johannesburg`) in `frontend/src/lib/config.ts`.
 - **B-6**: multi-value type filter on `GET /attendance/exceptions`.
 - **B-11**: per-employee site timezone on list endpoints (or
-  `GET /sites?ids=...`) — needed to compute adjustment times in each
+  `GET /sites?ids=...`) -- needed to compute adjustment times in each
   employee's site tz rather than a single constant.
 - **B-12**: `GET /attendance/adjustments/reason-codes` (or embed the
   current allowed list in some settings response) so the reason_code
@@ -124,7 +124,7 @@ otherwise delegates to `mapErrorCode` (so `day_locked`,
 ### F-7b (list page)
 - `useInfiniteQuery(["pay_periods", status])` + Load more.
 - Status SegmentedControl: all / open / locked.
-- Row: period key, status badge, date range, pay date, `Open` button → detail route.
+- Row: period key, status badge, date range, pay date, `Open` button -> detail route.
 - Create modal: `period_key`, `start_date`, `end_date`, `pay_date`, `cutoff_at`.
   - `cutoff_local` entered as `datetime-local`, converted via `dayjs.tz(..., getSiteTz())` then `.toISOString()`.
   - Frontend validation: required fields, end >= start, pay_date >= end. Backend enforces `period_key_taken`, `invalid_range`, `invalid_pay_date`.
@@ -133,20 +133,19 @@ otherwise delegates to `mapErrorCode` (so `day_locked`,
 ### F-7c (detail page)
 - Header: back button, title (`Pay period <key>`), status badge.
 - Actions: Preview (disabled when locked), Finalise (disabled when locked), Reopen (disabled when not locked).
-- Preview: `POST /payroll/.../preview` → inline table (Employee, Gross, PAYE, Net, Warnings). `unacknowledged_formulas` banner when non-empty.
+- Preview: `POST /payroll/.../preview` -> inline table (Employee, Gross, PAYE, Net, Warnings). `unacknowledged_formulas` banner when non-empty.
 - Finalise:
   - Modal with `ack_open_exceptions_reason` Textarea.
-  - First submit with no ack → backend 409 `open_exceptions_in_period` → modal stays open, `needsAck=true`, error shown, user types reason, submit again.
-  - Blank ack while `needsAck` → local validation error.
+  - First submit with no ack -> backend 409 `open_exceptions_in_period` -> modal stays open, `needsAck=true`, error shown, user types reason, submit again.
+  - Blank ack while `needsAck` -> local validation error.
   - `period_locked` mapped via `strings.payPeriods.errPeriodLocked`.
-- Reopen: Modal with required `reason` Textarea; blank submit → local validation error. `later_period_locked` surfaces via `mapErrorCode`.
+- Reopen: Modal with required `reason` Textarea; blank submit -> local validation error. `later_period_locked` surfaces via `mapErrorCode`.
 - Reopen log: shown only for locked periods when entries exist.
 
 ### Known limitations
 - **Per-employee preview drill-down** (`previewPayPeriodEmployee`) is wired in `payPeriods.ts` but not surfaced in `PayPeriodDetailPage`. Follow-up: row click opens a `PreviewEmployeeDetail` modal or route; test on arrival.
-- **No `pay_period` cache invalidation on finalise/reopen beyond `pay_periods` list + reopen log** — the current detail refetch comes from `["pay_period", id]` invalidation. If a payslip view exists later, it will need its own invalidation key.
-- **`unacknowledged_formulas` warning is informational only** — no "acknowledge" button; formula acknowledgement lives on the (future) payroll-formulas screen.
-
+- **No `pay_period` cache invalidation on finalise/reopen beyond `pay_periods` list + reopen log** -- the current detail refetch comes from `["pay_period", id]` invalidation. If a payslip view exists later, it will need its own invalidation key.
+- **`unacknowledged_formulas` warning is informational only** -- no "acknowledge" button; formula acknowledgement lives on the (future) payroll-formulas screen.
 ## F-8 Audit log (committed)
 
 - `/audit-log` renders `frontend/src/pages/AuditLogPage.tsx` (was PlaceholderPage).
@@ -160,7 +159,7 @@ otherwise delegates to `mapErrorCode` (so `day_locked`,
 - `occurred_from`/`occurred_to` are converted to ISO with `startOf("day")`/
   `endOf("day")` before send.
 - Range notice: reads `occurred_from_applied` / `occurred_to_applied` from the
-  first page's response — the backend may widen or clamp the requested range
+  first page's response -- the backend may widen or clamp the requested range
   (defaults to last 30 days when `occurred_from` is unset). Note is shown in a
   small dim text under the filters.
 - List: `Table` with columns Occurred at / Actor role / Action / Entity type /
@@ -174,12 +173,12 @@ otherwise delegates to `mapErrorCode` (so `day_locked`,
   `mapErrorCode` / specific strings.
 
 ### Known limitations
-- Times rendered with `dayjs(...).format(...)` — browser tz, not site tz.
+- Times rendered with `dayjs(...).format(...)` -- browser tz, not site tz.
   Follow-up to route through `getSiteTz()` (same call as F-1c) once time-tz
   display becomes a global concern.
 - Full ID shown only in the drawer; table truncates to 8 chars.
 - No action-level drill-down shortcuts (e.g. click `request_id` to filter by
-  it) — one click on View opens the drawer with the full value visible.
+  it) -- one click on View opens the drawer with the full value visible.
 - No export / CSV.
 
 ## Own payslips (committed)
@@ -189,15 +188,15 @@ otherwise delegates to `mapErrorCode` (so `day_locked`,
 - Strings: `strings.payslips`.
 
 ### Page
-- Auditor role: shows a notice (`payslips-auditor-notice`) and never fetches — matches master brief §6.
-- List: `useInfiniteQuery(["my_payslips"])` → `GET /payroll/payslips/me`. Columns: period, pay date, status, gross, net, actions.
+- Auditor role: shows a notice (`payslips-auditor-notice`) and never fetches -- matches master brief section 6.
+- List: `useInfiniteQuery(["my_payslips"])` -> `GET /payroll/payslips/me`. Columns: period, pay date, status, gross, net, actions.
 - Load more via `next_cursor`.
-- Detail: `Drawer` (right, lg) driven by `GET /payroll/payslips/me/{id}`; shows gross → net breakdown + revision + computed_at. Uses the row's `period_key` for the title (the payslip payload has only `pay_period_id`).
-- PDF: `GET /payroll/payslips/me/{id}/pdf` → blob URL + anchor click; filename "payslip.pdf". Errors surface in a page-level dismissible Alert (`payslips-pdf-error`). Audited backend-side (`payslip.pdf_download_by_other` when non-owner; owner download is silent).
-- Errors mapped via `mapErrorCode`; `forbidden` → auditor notice text; `no_employee_record` → list error text.
+- Detail: `Drawer` (right, lg) driven by `GET /payroll/payslips/me/{id}`; shows gross -> net breakdown + revision + computed_at. Uses the row's `period_key` for the title (the payslip payload has only `pay_period_id`).
+- PDF: `GET /payroll/payslips/me/{id}/pdf` -> blob URL + anchor click; filename "payslip.pdf". Errors surface in a page-level dismissible Alert (`payslips-pdf-error`). Audited backend-side (`payslip.pdf_download_by_other` when non-owner; owner download is silent).
+- Errors mapped via `mapErrorCode`; `forbidden` -> auditor notice text; `no_employee_record` -> list error text.
 
 ### Known limitations
-- Drawer title uses the row's `period_key` (passed via state) — a hard reload of a deep link to a payslip (no such route today) would need a `fetchPayPeriod` call.
+- Drawer title uses the row's `period_key` (passed via state) -- a hard reload of a deep link to a payslip (no such route today) would need a `fetchPayPeriod` call.
 - Times shown with `dayjs(...).format(...)` (browser tz); follow-up to route through `getSiteTz()` as part of a global display pass.
 - No bulk PDF download; per-row only.
 - Employee-facing screen shows `status` (`current` | `superseded`) verbatim, uncoloured; no status-specific messaging for `superseded` beyond the raw value.
@@ -206,35 +205,35 @@ otherwise delegates to `mapErrorCode` (so `day_locked`,
 
 Bundles shipped against the "attendance usable today" goal:
 
-### Bundle 1 — Clock-in + Devices + tz plumbing
+### Bundle 1 -- Clock-in + Devices + tz plumbing
 - `/clock-in` (ClockInPage): employee-code lookup via
-  `GET /employees?employee_code=`, camera capture → `photo_base64`,
+  `GET /employees?employee_code=`, camera capture -> `photo_base64`,
   `POST /punches` with `X-Device-Key` header.
 - Device key in `localStorage` (key `payroll.device_key`, wrapped in
   try/catch); "Reset this device" clears it.
 - `/setup/devices` (DevicesPage): list, create (key shown once via
   `DeviceCreateOut.api_key`), rotate key via
   `POST /devices/{id}/rotate-key`.
-- `useMe` already applies `applyMeSiteTz` → `setSiteTz`; no change
+- `useMe` already applies `applyMeSiteTz` -> `setSiteTz`; no change
   required.
 
-### Bundle 2 — Setup screens
+### Bundle 2 -- Setup screens
 - `/setup` is a `SetupLayout` with tabs: Sites, Branches, Departments,
   Shifts, Work Patterns, Public Holidays, Devices.
 - Each tab: list + create (Sites also timezone; Shifts also inline rate
   rules modal; Work Patterns also 7-day expected grid; Public Holidays
   also deactivate + CLI note for country-level rows).
 - EmployeesPage `EmployeeForm` already had branch/site/department/
-  manager/work-pattern/default-shift pickers on disk — B8, B9, B10
+  manager/work-pattern/default-shift pickers on disk -- B8, B9, B10
   confirmed closed without further change.
 
-### Bundle 3 — CSV export
+### Bundle 3 -- CSV export
 - `/attendance` header has "Export CSV" (`attendance-export-csv`),
   long-format rows from `sheet.data.items`, built by
   `lib/csv.ts::toCsv` (RFC 4180-safe) + `downloadCsv` (blob URL).
 
 ### Already on disk (verified, no bundle needed)
-- F-1 `/auth/me` `default_timezone` → `setSiteTz` → `getSiteTz()`.
+- F-1 `/auth/me` `default_timezone` -> `setSiteTz` -> `getSiteTz()`.
   `DEFAULT_SITE_TZ` only appears in `lib/config.ts` and test files.
 - Reason-code `Select` in `AdjustmentsPage` (fed by
   `GET /attendance/reason-codes`, `requires_note` gating).
@@ -246,16 +245,16 @@ Bundles shipped against the "attendance usable today" goal:
   11/11, AttendanceSheetPage unchanged.
 
 ### Open items (not today)
-- B13 country calendar CSV load — CLI-only by design (§10).
+- B13 country calendar CSV load -- CLI-only by design (section 10).
 - EmployeeForm "date-scoped" work-pattern history via
-  `/employees/{id}/work-patterns` — direct `work_pattern_id` field
+  `/employees/{id}/work-patterns` -- direct `work_pattern_id` field
   is live; history UI is deferred.
-- Real ZA public holidays 2026–2027 — awaiting user CSV (§10).
+- Real ZA public holidays 2026-2027 -- awaiting user CSV (section 10).
 
 ## Visual polish P1 (shipped)
 
 ### Theme (single source of colours, fonts, radius, shadows, spacing)
-- `frontend/src/theme.ts` — Mantine `createTheme`. Light-only this pass
+- `frontend/src/theme.ts` -- Mantine `createTheme`. Light-only this pass
   (`defaultColorScheme="light"` in `main.tsx`).
 - Palettes: `navy` (primary, deep #0B3D5C), `accent` (warm #C45F22),
   `approved` (green), `pending` (amber), `problem` (red). `gray`
@@ -265,7 +264,7 @@ Bundles shipped against the "attendance usable today" goal:
 - `theme/components` overrides: `Button`, `Paper`, `Card`, `Badge`,
   `Modal`, `Alert`, `Table` (uppercase th, `F7F8FA` background, no
   stripes, hover-on).
-- `frontend/src/theme/colors.ts` — semantic colour aliases used by
+- `frontend/src/theme/colors.ts` -- semantic colour aliases used by
   every page (`colors.approved`, `colors.pending`, `colors.problem`,
   `colors.inactive`, `colors.info`, `colors.warning`, `colors.accent`).
   No page writes a literal colour name.
@@ -273,25 +272,25 @@ Bundles shipped against the "attendance usable today" goal:
   deleted with `git rm frontend/src/theme.backup.ts` if not needed).
 
 ### App shell
-- `frontend/src/shell/AppShell.tsx` — Mantine `AppShell` with:
+- `frontend/src/shell/AppShell.tsx` -- Mantine `AppShell` with:
   - Left `Navbar` (248px), grouped by section (Attendance / People /
     Payroll / Setup / Audit), icon + label per item, active-state
     styling via theme tokens.
   - Header (56px) with brand text + user menu (role label + logout).
   - Mobile: hamburger toggles `Navbar`.
-- `frontend/src/shell/nav.ts` — new grouped `buildNav` returns
+- `frontend/src/shell/nav.ts` -- new grouped `buildNav` returns
   `NavGroup[]` (`label`, `items[]`). Same permission gates as before;
   Home gated on `self_view`; Clock-in gated on `attendance_view`;
   Payslips gated on `payslip_view`.
-- `frontend/src/shell/nav.test.ts` — rewritten (6 tests, grouped shape).
+- `frontend/src/shell/nav.test.ts` -- rewritten (6 tests, grouped shape).
 
 ### Layout primitives (available for page adoption in P2/P3)
-- `components/layout/Icon.tsx` — 12 inline SVG icons (no npm
+- `components/layout/Icon.tsx` -- 12 inline SVG icons (no npm
   dependency added).
-- `components/layout/PageHeader.tsx` — title + optional subtitle +
+- `components/layout/PageHeader.tsx` -- title + optional subtitle +
   actions slot.
-- `components/layout/EmptyState.tsx` — centered dimmed message.
-- `components/layout/TableSkeleton.tsx` — header + row skeletons.
+- `components/layout/EmptyState.tsx` -- centered dimmed message.
+- `components/layout/TableSkeleton.tsx` -- header + row skeletons.
 
 ### Colour sweep
 - 24 `*.tsx` files: literal `color="red|green|orange|yellow|blue|gray"`
@@ -308,7 +307,7 @@ Bundles shipped against the "attendance usable today" goal:
 - Tenant name in header: `UserMeOut` has no tenant-name field.
   Header shows "Payroll" (appName). Real tenant name needs a `/tenant`
   endpoint (backend gap, out of P1 scope).
-- `PageHeader` adoption in individual pages is a P2/P3 concern — the
+- `PageHeader` adoption in individual pages is a P2/P3 concern -- the
   theme overrides apply without markup changes.
 
 ## F-9 Salary structures (M3 Stage F, committed)
@@ -333,7 +332,7 @@ amount/rate; deduction requires amount. Deactivate per row via
 
 ### F-9b SalaryStructureDetailPage
 Header (name, version, current, active badges), component table, version
-history, Edit modal (name, description, base_rate — submits version_number +
+history, Edit modal (name, description, base_rate -- submits version_number +
 row_version), Deactivate. Component editing is deferred. 10 tests.
 
 ### F-9c EmployeePayrollPage
@@ -349,9 +348,170 @@ selectable) plus structure-owned rows in a blue notice. Submit builds
   F-9d will surface them.
 - Edit modal does not touch components.
 - No list pagination on salary-structures / assignments.
-- Strings inlined per page — M3 pages do not consume `strings.ts`.
+- Strings inlined per page -- M3 pages do not consume `strings.ts`.
 - `check-collisions` submits with empty `override_manual_ids`; user toggles
   overrides after seeing candidates.
 - Individual change-request children (`assignment_id IS NOT NULL`) not
-  filtered from `ChangeRequestsPage` — backend guard refuses individual
+  filtered from `ChangeRequestsPage` -- backend guard refuses individual
   actions. F-9e.
+
+## F-10 M3.5 UI completion (committed)
+
+Five M3-gap items delivered per MILESTONE 3.5 spec. Each landed as its own
+commit with its own gate:
+
+| Item | Commit | Gate |
+|---|---|---|
+| Approve/reject/cancel on EmployeePayrollPage | `3aaa241` | 17/17 |
+| Component editing in structure edit modal | `51bd5f1` | 16/16 |
+| Cursor pagination for salary structures | `b2170a3` | 6 backend + 30 frontend |
+| Filter assignment-linked CRs from queue | `fa09fee` | 11/11 |
+| Demo seed backfills `no_shift_match` | `c124636` | 14/14 |
+
+### Item 1 -- approve/reject/cancel on EmployeePayrollPage (`3aaa241`)
+
+Assignment history table gains a per-row Actions column when
+`status = 'pending'`:
+
+- **Approve** -- `window.confirm` then `POST /employee-salary-assignments/{id}/approve`.
+  Loading via shared mutation `busyId` computed from `action.variables?.id`.
+  Success invalidates `["employee_assignments", employeeId]`.
+- **Reject** -- modal with required `note` Textarea. Submit disabled until
+  trimmed note is non-empty. `POST .../reject` with `{note}`.
+- **Cancel** -- `window.confirm` then `POST .../cancel`. Backend enforces
+  requester-only via `not_requester` 403 (surfaced verbatim).
+
+Errors mapped via extended `mapAssignmentError` (adds
+`self_approval_forbidden`, `not_requester`, `not_pending`,
+`assignment_effective_date_not_after_latest_approved`,
+`assignment_state_conflict`, `approval_batch_failed`,
+`approval_unexpected_error`, `close_set_mismatch`, `record_changed`).
+Page-level dismissible Alert `assignment-action-error`.
+
+Testids: `assignment-approve-{id}`, `assignment-reject-{id}`,
+`assignment-cancel-{id}`, `assignment-reject-note`,
+`assignment-reject-submit`, `assignment-reject-modal-cancel`,
+`assignment-action-error`.
+
+8 new tests; file total 17.
+
+### Item 2 -- component editing in structure edit modal (`51bd5f1`)
+
+Edit modal gains a **Modify components** toggle (`toggle-components`).
+Opening reveals a components editor seeded from the current version. Add,
+remove, and edit supported via the same draft-and-validate pattern already
+used in the create modal (`SalaryStructuresPage`).
+
+`componentsDirty` flag tracks any change. On submit, `components` is sent
+**only** when dirty; otherwise backend copies components as before. Preserves
+the "rename only" fast path and satisfies "never silently modify historical
+versions" -- backend already creates a new version on every edit, and
+historical versions and their components are frozen.
+
+Validation reuses create-modal rules: earning requires exactly one of
+`amount`/`rate` and a type; deduction requires `amount` and a type and
+forbids `rate`.
+
+Testids: `toggle-components`, `edit-components-editor`,
+`edit-component-row-{i}`, `edit-component-type-{i}`,
+`edit-component-amount-{i}`, `edit-component-rate-{i}`,
+`edit-component-remove-{i}`, `edit-add-earning`, `edit-add-deduction`.
+
+6 new tests; file total 16.
+
+### Item 3 -- cursor pagination for salary structures (`b2170a3`)
+
+**Backend additive change** (no schema, no migration): new
+`list_current_structures_paginated(db, *, limit=100, cursor=None) ->
+(list, next_cursor)` in `salary_structure_service.py`. The unpaginated
+`list_current_structures(db)` is untouched so Stage B callers (including
+`test_list_current_structures`) keep working. Ordering switched from
+`name.asc()` to `id.asc()` for cursor stability. Opaque base64url cursor
+`{"i": "<uuid>"}` mirrors the pattern in `payroll_change_requests.py`.
+
+Endpoint `GET /payroll/salary-structures` gains optional `limit` / `cursor`
+query params; response is a local `_StructureListPage` defined inside the
+endpoint file so the shared `StructureListOut` schema (used by `/versions`)
+is untouched. `limit` default 100, ceiling 500.
+
+**Frontend:** `SalaryStructuresPage` switches from `useQuery` to
+`useInfiniteQuery` with "Load more" (`structures-load-more`).
+`isFetchNextPageError` surfaces a dedicated `structures-load-more-error`
+alert so a failed subsequent page is not silently swallowed (TanStack Query
+v5 keeps the query in `isSuccess` state after a next-page failure).
+`listStructures(params?)` tolerates an unknown first-arg shape so
+`EmployeePayrollPage`'s `queryFn: listStructures` continues to work
+unchanged.
+
+6 new backend tests in `test_salary_structure_pagination.py`; 3 new frontend
+tests (file total 13).
+
+### Item 4 -- filter assignment-linked CRs from queue (`fa09fee`)
+
+`ChangeRequestOut` (frontend type in `api/changeRequests.ts`) gains
+`assignment_id: string | null` (backend has always sent it since M3 Stage C,
+`269de14`).
+
+`ChangeRequestsPage` filters `r.assignment_id != null` **after**
+`flatMap`-flattening -- the raw cursor walks all pages, then the filter runs
+on the display set. Server cursor semantics preserved. Loosely null-checked
+so pre-Stage-C records (hypothetically missing the field) still render.
+Nothing deleted or hidden at API level: assignment-linked rows remain
+accessible via `GET /payroll/change-requests/{id}` and via the salary
+assignment detail page.
+
+2 new tests (filtered-by-default; load-more preserves filter across pages);
+file total 11.
+
+### Item 5 -- demo seed backfills `no_shift_match` (`c124636`)
+
+Pre-existing test gap exposed by the M3.5 full-backend gate:
+`test_seed_exception_spread_covers_all_ten_real_types` expected 10
+exception types but the seed only backfilled 8. `no_shift_match` is emitted
+by the engine only when a punch lands on a day with no matching shift
+(`attendance_engine.py:847-848, 863, 993-996`) -- the demo tenant's shifts
+and punch dates align, so the branch never fires. The failure was
+pre-existing, not M3.5-caused; never surfaced in earlier gates because
+`test_seed_demo.py` was never in the targeted subset.
+
+Fix: added `"no_shift_match"` to `types_missing` in
+`_backfill_exceptions`. Same fabrication-vs-engine design tradeoff as the
+existing 8 backfilled types -- documented in `docs/SEED.md`. Duplicates
+guarded by the pre-existing `existing`-set check against
+`uq_exception_item_open`.
+
+14/14 in `test_seed_demo.py` (was 13/14).
+
+### Aggregate M3.5 test totals
+
+- **Backend:** 6 new tests (item 3 pagination) + 1 pre-existing test fixed
+  (item 5 seed). Full-backend baseline at M3 close (M3.5 section 6 first
+  full run): 1300 passed / 1 failed / 4 skipped. After item 5 fix:
+  expected 1301 passed / 4 skipped on the next full run.
+- **Frontend:** 19 new tests across items 1-4 (8 + 6 + 3 + 2). Full frontend
+  suite at M3.5 gate: **193/193 passed** across 30 test files (verified in
+  the `fa09fee` gate run; unchanged since -- item 5 is backend-only).
+- **Item 3 backend cross-check:** 127/127 green on the item-3 gate
+  (`test_salary_structure_pagination.py` + `test_salary_structure_service.py`
+  + `test_salary_structure_models.py` + `test_payroll_endpoint_permissions.py`).
+
+### Known limitations
+
+- **Approve/reject/cancel controls shown to all viewers of a pending row.**
+  Cannot determine `current_user == submitter` without an extra `/me` fetch
+  on this page. Backend `not_requester` 403 is authoritative and surfaced
+  verbatim. Matches how `ChangeRequestsPage` handles the same problem.
+- **Cancel from a non-requester 403s at action time**, not at button
+  visibility. Same tradeoff as above.
+- **Component editing toggle requires opt-in** -- the common edit path
+  (name / rate) never sends components, avoiding accidental component
+  rewrites. Users editing components pay one extra click.
+- **Pagination ordering changed** from name-alphabetical to id-ordered.
+  Cosmetic; no UX test depends on structure ordering. Deliberate consequence
+  of stable cursor keys.
+- **Assignment-linked CRs are silently absent from the standalone queue.**
+  Users who need to see them must open the assignment detail page. Backend
+  guard already refuses individual actions on these children (since M3
+  Stage C).
+- **Seed fabricates `no_shift_match`** rather than producing it via the
+  engine. Same tradeoff as the other 8 backfilled types.
