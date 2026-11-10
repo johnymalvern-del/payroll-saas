@@ -44,6 +44,7 @@ Errors:
                                  a note
   cannot_cancel_after_days_taken - cancel on approved request with taken day
   record_changed               - row_version mismatch on PATCH
+  awaiting_filter_not_self     - awaiting_approver_user_id != caller's user.id
 """
 from __future__ import annotations
 
@@ -56,6 +57,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import delete, func, or_, select
+from sqlalchemy.orm import aliased
 
 from app.api.deps import TenantDbDep
 from app.api.v1.leave_requests_schemas import (
@@ -113,7 +115,13 @@ def _zero() -> Decimal:
     return _ZERO
 
 
-def _to_out(db: Any, request: LeaveRequest) -> LeaveRequestOut:
+def _to_out(
+    db: Any,
+    request: LeaveRequest,
+    *,
+    employee: Employee | None = None,
+    leave_type: LeaveType | None = None,
+) -> LeaveRequestOut:
     day_rows = db.scalars(
         select(LeaveRequestDay)
         .where(LeaveRequestDay.leave_request_id == request.id)
@@ -138,6 +146,13 @@ def _to_out(db: Any, request: LeaveRequest) -> LeaveRequestOut:
             ]
         else:
             data[name] = getattr(request, name, None)
+    if employee is not None:
+        data["employee_code"] = employee.employee_code
+        data["employee_name"] = f"{employee.first_name} {employee.last_name}"
+    else:
+        data["employee_code"] = None
+        data["employee_name"] = None
+    data["leave_type_name"] = leave_type.name if leave_type is not None else None
     return LeaveRequestOut.model_validate(data)
 
 
@@ -513,14 +528,29 @@ def _capture_note_if_needed(user: Any, request: LeaveRequest, note: str | None) 
 def list_leave_requests(
     db: TenantDbDep,
     user: Annotated[Any, Depends(get_current_user)],
-    employee_id: uuid.UUID | None = Query(None),
-    status_filter: str | None = Query(None, alias="status"),
-    from_date_gte: date | None = Query(None),
-    to_date_lte: date | None = Query(None),
-    limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
-    cursor: str | None = Query(None),
+    employee_id: uuid.UUID | None = None,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    from_date_gte: date | None = None,
+    to_date_lte: date | None = None,
+    awaiting_approver_user_id: uuid.UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
+    cursor: str | None = None,
 ) -> LeaveRequestListOut:
     _require_any_read(user)
+
+    if awaiting_approver_user_id is not None:
+        if not check_permission(user, Permission.LEAVE_APPROVE):
+            raise AppError(
+                "forbidden",
+                "LEAVE_APPROVE required for awaiting_approver_user_id",
+                status.HTTP_403_FORBIDDEN,
+            )
+        if awaiting_approver_user_id != getattr(user, "id", None):
+            raise AppError(
+                "awaiting_filter_not_self",
+                "awaiting_approver_user_id must match the authenticated user",
+                status.HTTP_403_FORBIDDEN,
+            )
 
     q = select(LeaveRequest)
     if _is_self_only(user):
@@ -536,6 +566,31 @@ def list_leave_requests(
         if employee_id is not None:
             q = q.where(LeaveRequest.employee_id == employee_id)
         q = apply_scope(q, user, db, model=LeaveRequest)
+
+    if awaiting_approver_user_id is not None:
+        _s_cur = aliased(LeaveApprovalStep)
+        _s_min = aliased(LeaveApprovalStep)
+        min_pending_step_no_sq = (
+            select(func.min(_s_min.step_no))
+            .where(
+                _s_min.leave_request_id == LeaveRequest.id,
+                _s_min.status == "pending",
+            )
+            .correlate(LeaveRequest)
+            .scalar_subquery()
+        )
+        queue_filter = (
+            select(_s_cur.id)
+            .where(
+                _s_cur.leave_request_id == LeaveRequest.id,
+                _s_cur.status == "pending",
+                _s_cur.step_no == min_pending_step_no_sq,
+                _s_cur.approver_user_id == awaiting_approver_user_id,
+            )
+            .correlate(LeaveRequest)
+            .exists()
+        )
+        q = q.where(queue_filter)
 
     if status_filter is not None:
         q = q.where(LeaveRequest.status == status_filter)
@@ -563,8 +618,34 @@ def list_leave_requests(
         last = rows[-1]
         next_cursor = _encode_cursor(last.created_at, last.id)
 
+    employee_ids = {r.employee_id for r in rows}
+    leave_type_ids = {r.leave_type_id for r in rows}
+    employees_by_id: dict[uuid.UUID, Employee] = {}
+    leave_types_by_id: dict[uuid.UUID, LeaveType] = {}
+    if employee_ids:
+        employees_by_id = {
+            e.id: e
+            for e in db.scalars(
+                select(Employee).where(Employee.id.in_(employee_ids))
+            ).all()
+        }
+    if leave_type_ids:
+        leave_types_by_id = {
+            lt.id: lt
+            for lt in db.scalars(
+                select(LeaveType).where(LeaveType.id.in_(leave_type_ids))
+            ).all()
+        }
+
     return LeaveRequestListOut(
-        items=[_to_out(db, r) for r in rows],
+        items=[
+            _to_out(
+                db, r,
+                employee=employees_by_id.get(r.employee_id),
+                leave_type=leave_types_by_id.get(r.leave_type_id),
+            )
+            for r in rows
+        ],
         next_cursor=next_cursor,
     )
 
@@ -576,7 +657,10 @@ def get_leave_request(
     user: Annotated[Any, Depends(get_current_user)],
 ) -> LeaveRequestOut:
     _require_any_read(user)
-    return _to_out(_load_request(db, request_id, user))
+    request = _load_request(db, request_id, user)
+    employee = db.get(Employee, request.employee_id)
+    leave_type = db.get(LeaveType, request.leave_type_id)
+    return _to_out(db, request, employee=employee, leave_type=leave_type)
 
 
 @router.post(

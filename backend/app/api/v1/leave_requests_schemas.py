@@ -49,6 +49,9 @@ class LeaveRequestOut(BaseModel):
     captured_by_user_id: uuid.UUID | None = None
     days: list[LeaveRequestDayOut] = Field(default_factory=list)
     steps: list[LeaveApprovalStepOut] = Field(default_factory=list)
+    employee_code: str | None = None
+    employee_name: str | None = None
+    leave_type_name: str | None = None
 
 
 class LeaveRequestListOut(BaseModel):
