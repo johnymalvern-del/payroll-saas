@@ -51,11 +51,74 @@ with file names listed; `test_golden_reviewed_cases_pass` skips because
 
 ## Chapter 3 — L1 (3B leave types & balances) committed
 
-- **L1a** migration ten_0022: leave_type.approval_chain, leave_type.requires_payroll_admin_final; payroll_settings leave_escalation_days, leave_cycle_fixed_anchor, advance_max_pct, advance_hard_cap, sick_leave_codes, net_estimate_method. audit_redact extended with leave_reason, advance_reason, grievance_subject/body/note, resolution_note, sick_note_*.
-- **L1b** leave types CRUD: GET/POST/PATCH/deactivate/reactivate at `/api/v1/leave/types`. Permission: GET = LEAVE_APPROVE OR SELF_VIEW; writes = USER_MANAGE. approval_chain defaults ["manager","hr"]. Business rules: accrual_amount required for annual/fixed, negative-requires-accrual, no-carryover-on-fixed. Code immutable on PATCH.
-- **L1c** leave balances: GET list + single at `/api/v1/leave/balances`; POST /adjust. Adjust writes LeaveBalanceLedger (reason="adjustment"), refuses 422 insufficient_balance when resulting available<0 and allow_negative=false. Adjusting closed cycle requires PAYROLL_FINALISE. Auto-creates missing live-cycle balance.
-- **L1c** `payroll_engine/leave.py`: compute_cycle_bounds (calendar/anniversary/fixed), available_balance = accrued + carried_in + adjusted - taken - pending (entitled informational only, per amendment 4).
-- **L1d** accrual: POST `/api/v1/leave/accruals/run` (USER_MANAGE). `accrue_all_employees(db, as_of)` computes period keys per cycle, idempotent via reason="accrual:<period_key>". Carry-over honoured at cycle creation, respects leave_type.max_carryover. Migration ten_0023 adds payroll_settings.last_accrual_run_at. GET /leave/balances now returns `accrued_as_of` + `accrual_stale` (True when last run is None or >1 day old). GETs never write.
+- **L1a** migration ten_0022: leave_type.approval_chain, leave_type.requires_payroll_admin_final; payroll_settings leave_escalation_days, leave_cycle_fixed_anchor, advance_max_pct, advance_hard_cap, sick_leave_codes, net_estimate_method. audit_redact extended with leave_reason, advance_reason, grievance_subject/body/note, resolution_note, sick_note_*. 
+- **L1b** leave types CRUD: GET/POST/PATCH/deactivate/reactivate at `/api/v1/leave/types`. Permission: GET = LEAVE_APPROVE OR SELF_VIEW; writes = USER_MANAGE. approval_chain defaults ["manager","hr"]. Business rules: accrual_amount required for annual/fixed, negative-requires-accrual, no-carryover-on-fixed. Code immutable on PATCH. 
+- **L1c** leave balances: GET list + single at `/api/v1/leave/balances`; POST /adjust. Adjust writes LeaveBalanceLedger (reason="adjustment"), refuses 422 insufficient_balance when resulting available<0 and allow_negative=false. Adjusting closed cycle requires PAYROLL_FINALISE. Auto-creates missing live-cycle balance. 
+- **L1c** `payroll_engine/leave.py`: compute_cycle_bounds (calendar/anniversary/fixed), available_balance = accrued + carried_in + adjusted - taken - pending (entitled informational only, per amendment 4). 
+- **L1d** accrual: POST `/api/v1/leave/accruals/run` (USER_MANAGE). `accrue_all_employees(db, as_of)` computes period keys per cycle, idempotent via reason="accrual:<period_key>". Carry-over honoured at cycle creation, respects leave_type.max_carryover. Migration ten_0023 adds payroll_settings.last_accrual_run_at. GET /leave/balances now returns `accrued_as_of` + `accrual_stale` (True when last run is None or >1 day old). GETs never write. 
 - **L1e** tests: `test_leave_types.py`, `test_leave_balances.py`, `test_leave_accruals.py` — covers create/dup/validators/PATCH/immutability/deactivate-refused-in-use/list-filters/approval-chain defaults, available_balance numeric formula (entitled excluded), self-vs-approver scope, adjust positive/negative/closed-cycle/ledger/auto-create, GET-never-writes, accrual monthly/annual/fixed/none, idempotency, carry-over max vs full, endpoint counts, stale/fresh detection.
 
 Pending chapter 3: L2 (3C leave requests + approval chain + attendance adjustments on approval), L3 (3D attachments/sick notes), L4 (3E advances + 3F grievances), L5 (3G /me aggregator + daily-jobs CLI + demo seed extension). Refer to Chapter 3 amendments 1–12 (approval_chain configurable, approved-leave creates adjustments, accrual never lazy-on-read, day-only for now, sick-note POPIA rules, audit redaction, capture-on-behalf, grievance notes, advance repayment_plan typed, 5-bundle split).
+
+## M5 — Monthly salary sheet (committed, `c600884`)
+
+`GET /payroll/pay-periods/{period_id}/salary-sheet` — read-only
+company-wide salary sheet for a pay period, backed by persisted
+`Payslip` / `PayslipLine` rows. No call to
+`payroll_runner.run_preview` / `finalise` / `run_pipeline`; the sheet
+cannot trigger or invalidate a payroll run.
+
+- **Permission:** `PAYROLL_PREVIEW` (hr, payroll_admin). Refused for
+  employee, manager, auditor — matches the permission matrix.
+- **Scope:** `apply_scope(..., model=Payslip)` on `Payslip.employee_id`
+  composes inside the same query as the `q` search predicate — a
+  scoped HR user cannot search out of their scope.
+- **States:**
+  - `figures_state = "finalised"` → `PayPeriod.status == "locked"`,
+    reads `Payslip.status == "current"`.
+  - `figures_state = "preview"` → `PayPeriod.status == "open"`,
+    reads `Payslip.status == "preview"`.
+  - `figures_state = "no_preview"` → open period with zero preview
+    rows.
+- **Figures:** every column except `basic_earnings` /
+  `additional_earnings` is a byte-for-byte copy of a `Payslip` column.
+  Basic = sum of `PayslipLine.amount` where `line_type="earning"` and
+  `source_ref.earning_type_code="BASE_MONTHLY"`; Additional = sum of
+  the remaining earning lines. So `basic_earnings + additional_earnings
+  == gross`, and all figures match the payslip PDF.
+- **Pagination:** composite cursor over `(employee_code, payslip_id)`
+  matching `ORDER BY employee_code ASC, payslip_id ASC`. A UUID-only
+  cursor would re-serve rows because `Payslip.id` is a random UUID;
+  fixed by carrying `employee_code` in the cursor payload.
+- **Query param normaliser:** `q` / `limit` / `cursor` are normalised
+  to their intended types at the top of the handler so tests that call
+  the function directly (bypassing FastAPI `Query` resolution) match
+  HTTP behaviour. No effect on HTTP semantics; `Query(ge=1, le=500)`
+  on `limit` still validates over the wire.
+- **Schemas:** `backend/app/api/v1/payroll_salary_sheet_schemas.py`
+  (`SalarySheetRow`, `SalarySheetOut`).
+- **Tests:** `backend/tests/test_payroll_salary_sheet.py` (9) —
+  permission matrix, preview / finalised / no-preview, basic vs
+  additional split from `PayslipLine`, reconciliation with `Payslip`,
+  employee search, composite cursor pagination, period-not-found.
+- **Full backend suite at commit:** **1336 passed / 4 skipped /
+  0 failed**.
+
+### Known limitations (backend)
+- **Preview must be run first.** An open period with no preview
+  returns `figures_state = "no_preview"` and zero items; the frontend
+  prompts the user to open pay-period detail and Preview. Read-only by
+  design.
+- **Superseded payslips not surfaced** — after reopen, prior-current
+  payslips have `status = "superseded"`; the sheet filters to
+  `"preview"` / `"current"` only, matching the `list_payslips` default.
+
+### Documentation gap
+
+The preceding entries in this file stop at Chapter 3 L1. M4 backend
+stages (B-L4a awaiting-approver queue filter + `LeaveRequestOut`
+display fields; B-L4b row lock on leave decisions; B-L5a advisory
+locks + schema hardening) are on disk and committed, but are not
+recorded here in the pasted copy of the file. Flagged, not filled —
+the git history at `c600884` is the authoritative record. To be
+backfilled in a dedicated docs pass if desired.

@@ -515,3 +515,68 @@ guarded by the pre-existing `existing`-set check against
   Stage C).
 - **Seed fabricates `no_shift_match`** rather than producing it via the
   engine. Same tradeoff as the other 8 backfilled types.
+
+## F-11 M5 monthly salary sheet (committed, `c600884`)
+
+- `/payroll/pay-periods/:id/salary-sheet` renders `SalarySheetPage`.
+  Entry point: "Salary sheet" button on `PayPeriodDetailPage`
+  (`pay-period-salary-sheet-open`), positioned between Preview and
+  Finalise. No new nav item -- reachable only via the pay-period detail
+  page.
+- API module: `frontend/src/api/payPeriods.ts` gains `SalarySheetRow`
+  and `SalarySheetOut` types plus `fetchSalarySheet()`.
+
+### Page features
+- Header (back -> period detail, `Salary Sheet — <period_key>`, status
+  badge).
+- Context card (period range, pay date).
+- Banner: green "Finalised figures — locked period, read-only" when
+  `figures_state = "finalised"`; blue "Preview figures — not finalised"
+  when `"preview"`; yellow "No preview has been run" with instructions
+  when `"no_preview"`.
+- Search input (300ms debounce -> `q` param) matching employee code /
+  first name / last name.
+- 14-column table: Employee, Code, Basic, Additional, Gross, Pre-tax,
+  Taxable, PAYE, UIF emp, UIF er, SDL, Other ded, Reimb, Net.
+- Load more follows `next_cursor` (composite `employee_code` +
+  `payslip_id` cursor, backend authoritative).
+- Export CSV button (client-side, from the same `items` array the
+  table renders). Disabled when `items.length === 0`.
+- States: loading spinner, error alert with retry, empty message.
+
+### Single source of truth
+Every figure is sourced from a persisted `Payslip` or `PayslipLine`
+row -- the frontend does no arithmetic beyond column formatting.
+Matches the payslip PDF byte-for-byte.
+
+### Test IDs
+`salary-sheet-page`, `salary-sheet-back`, `salary-sheet-search`,
+`salary-sheet-export-csv`, `salary-sheet-table`,
+`salary-sheet-row-{employee_id}`, `salary-sheet-gross-{employee_id}`,
+`salary-sheet-paye-{employee_id}`, `salary-sheet-net-{employee_id}`,
+`salary-sheet-load-more`, `salary-sheet-preview-banner`,
+`salary-sheet-finalised-banner`, `salary-sheet-no-preview`,
+`salary-sheet-fetch-error`, `salary-sheet-retry`.
+
+### Tests
+- `frontend/src/pages/SalarySheetPage.test.tsx` (11) -- header,
+  endpoint called, preview/finalised/no-preview banners, row rendering,
+  search debounce, CSV enable/disable, load-more visibility, error
+  retry.
+- Full frontend suite: **353 passed / 43 files** (was 342 / 42 at
+  M4 L7 close; +11 tests, +1 file).
+
+### Known limitations
+- **No branch dropdown filter** -- scope enforcement is backend; a
+  branch selector would need a "branches available to this scope"
+  endpoint that does not exist. Search covers the find-specific-
+  employee case.
+- **No totals row** -- the endpoint is paginated; a client-computed
+  total would cover only the loaded page.
+- **Superseded payslips not surfaced** -- after reopen, prior-current
+  payslips are `status = "superseded"`. Same behaviour as the
+  `"current"` default on `list_payslips`.
+- **No PDF export** -- deferred per M5 approval §7.
+- **CSV file content not asserted in test** -- jsdom limitation on
+  `URL.createObjectURL`; identity with the rendered table is guaranteed
+  by construction (same `items` array).
