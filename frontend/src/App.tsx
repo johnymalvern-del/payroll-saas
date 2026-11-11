@@ -28,6 +28,7 @@ import { PayPeriodDetailPage } from "./pages/PayPeriodDetailPage";
 import { PayslipSoFarPage } from "./pages/PayslipSoFarPage";
 import { SalaryStructuresPage } from "./pages/SalaryStructuresPage";
 import { SalaryStructureDetailPage } from "./pages/SalaryStructureDetailPage";
+import { SalarySheetPage } from "./pages/SalarySheetPage";
 import { EmployeePayrollPage } from "./pages/EmployeePayrollPage";
 import { MyLeavePage } from "./pages/MyLeavePage";
 import { MyLeaveHistoryPage } from "./pages/MyLeaveHistoryPage";
@@ -76,6 +77,7 @@ export default function App() {
           <Route path="setup/devices" element={<DevicesPage />} />
           <Route path="payroll/pay-periods" element={<PayPeriodsPage />} />
           <Route path="payroll/pay-periods/:id" element={<PayPeriodDetailPage />} />
+          <Route path="payroll/pay-periods/:id/salary-sheet" element={<SalarySheetPage />} />
           <Route path="payroll/pay-periods/:id/payslip-so-far/:employeeId" element={<PayslipSoFarPage />} />
           <Route path="payroll/change-requests" element={<ChangeRequestsPage />} />
           <Route path="payroll/salary-structures" element={<SalaryStructuresPage />} />
@@ -94,7 +96,6 @@ export default function App() {
             <Route path="devices" element={<DevicesPage />} />
             <Route path="intelligence" element={<IntelligenceSettingsPage />} />
             <Route path="intelligence/decisions" element={<IntelligenceDecisionsPage />} />
-
           </Route>
           <Route path="payslips" element={<OwnPayslipsPage />} />
         </Route>

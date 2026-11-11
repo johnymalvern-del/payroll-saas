@@ -93,6 +93,38 @@ export type PayPeriodIn = {
   cutoff_at: string;
 };
 
+export type SalarySheetRow = {
+  employee_id: string;
+  employee_code: string;
+  employee_name: string;
+  payslip_id: string;
+  payslip_status: string;
+  revision: number;
+  basic_earnings: string;
+  additional_earnings: string;
+  gross: string;
+  pre_tax_deductions: string;
+  taxable_income: string;
+  paye: string;
+  uif_employee: string;
+  uif_employer: string;
+  sdl: string;
+  other_deductions: string;
+  reimbursements: string;
+  net: string;
+};
+
+export type SalarySheetOut = {
+  pay_period_id: string;
+  pay_period_key: string;
+  pay_period_status: string;
+  figures_state: "preview" | "finalised" | "no_preview";
+  run_id: string | null;
+  revision: number | null;
+  items: SalarySheetRow[];
+  next_cursor: string | null;
+};
+
 export class PayPeriodsApiError extends Error {
   code: string;
   status: number;
@@ -293,6 +325,27 @@ export async function previewEmployeeAsOf(
     e.details = errBody.error?.details ?? null;
     throw e;
   }
-return (await res.json()) as PreviewEmployeeAsOfOut;
+  return (await res.json()) as PreviewEmployeeAsOfOut;
 }
 
+export async function fetchSalarySheet(params: {
+  periodId: string;
+  q?: string;
+  limit?: number;
+  cursor?: string | null;
+}): Promise<SalarySheetOut> {
+  const qs = new URLSearchParams();
+  qs.set("limit", String(params.limit ?? 100));
+  if (params.q) qs.set("q", params.q);
+  if (params.cursor) qs.set("cursor", params.cursor);
+  const res = await wrappedFetch(
+    new Request(
+      absoluteUrl(
+        `/api/v1/payroll/pay-periods/${params.periodId}/salary-sheet?${qs.toString()}`,
+      ),
+      { credentials: "include" },
+    ),
+  );
+  if (!res.ok) throw await parseError(res);
+  return (await res.json()) as SalarySheetOut;
+}

@@ -212,6 +212,13 @@ export function PayPeriodDetailPage() {
             {strings.payPeriods.previewButton}
           </Button>
           <Button
+            variant="default"
+            onClick={() => navigate(`/payroll/pay-periods/${id}/salary-sheet`)}
+            data-testid="pay-period-salary-sheet-open"
+          >
+            Salary sheet
+          </Button>
+          <Button
             onClick={() => {
               setFinaliseAck("");
               setFinaliseError(null);

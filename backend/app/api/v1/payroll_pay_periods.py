@@ -3,6 +3,13 @@
 B-3 adds:
   GET /payroll/pay-periods/{period_id}/preview/{employee_id}
     Read-only single-employee preview from the latest persisted run.
+
+M5 adds:
+  GET /payroll/pay-periods/{period_id}/salary-sheet
+    Company-wide read-only salary sheet for a period, backed by persisted
+    Payslip rows. Preview figures when the period is open, finalised
+    figures when the period is locked. Basic vs Additional earnings are
+    derived only by summing already-persisted PayslipLine rows.
 """
 from __future__ import annotations
 
@@ -10,10 +17,11 @@ import base64
 import json
 import uuid
 from datetime import date
+from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.api.deps import TenantDbDep
 from app.api.v1.payroll_pay_periods_schemas import (
@@ -30,9 +38,10 @@ from app.api.v1.payroll_pay_periods_schemas import (
     ReopenIn,
     ReopenLogOut,
 )
+from app.api.v1.payroll_salary_sheet_schemas import SalarySheetOut, SalarySheetRow
 from app.core.errors import AppError
 from app.core.permissions import Permission, require_permission
-from app.core.scope import ScopeViolation, assert_in_scope
+from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
 from app.db.tenant.models.pay import (
     PayPeriod, PayrollRun, Payslip, PayslipLine, PeriodReopenLog,
 )
@@ -48,6 +57,7 @@ router = APIRouter(prefix="/payroll/pay-periods", tags=["payroll-pay-periods"])
 
 _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 500
+_ZERO = Decimal("0")
 
 
 def _encode_cursor(uid: uuid.UUID) -> str:
@@ -62,6 +72,26 @@ def _decode_cursor(cursor: str) -> uuid.UUID:
         return uuid.UUID(json.loads(raw)["i"])
     except Exception:
         raise AppError("invalid_cursor", "The pagination cursor is malformed", 400) from None
+
+
+def _encode_sheet_cursor(employee_code: str, ps_id: uuid.UUID) -> str:
+    """Composite cursor for the salary sheet's (employee_code, payslip_id) order."""
+    raw = json.dumps(
+        {"c": employee_code, "i": str(ps_id)}, separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_sheet_cursor(cursor: str) -> tuple[str, uuid.UUID]:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        payload = json.loads(raw)
+        return payload["c"], uuid.UUID(payload["i"])
+    except Exception:
+        raise AppError(
+            "invalid_cursor", "The pagination cursor is malformed", 400,
+        ) from None
 
 
 def _preview_row_from_payslip(payslip: Payslip, employee: Employee) -> PreviewSummaryRow:
@@ -308,6 +338,153 @@ def preview_employee(
         warnings=[str(w) for w in warns],
         lines=earning_lines,
         deductions=deduction_lines,
+    )
+
+
+@router.get("/{period_id}/salary-sheet", response_model=SalarySheetOut)
+def get_salary_sheet(
+    period_id: uuid.UUID,
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.PAYROLL_PREVIEW))],
+    q: str | None = Query(None),
+    limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
+    cursor: str | None = Query(None),
+) -> SalarySheetOut:
+    """M5 — read-only monthly salary sheet.
+
+    Reads persisted Payslip rows for the period; never calls the pipeline.
+    Preview payslips for an open period, current payslips for a locked one.
+    basic_earnings and additional_earnings are sums of PayslipLine amounts
+    split on source_ref.earning_type_code == 'BASE_MONTHLY'. Every other
+    figure is copied from Payslip, so it matches the payslip PDF exactly.
+
+    Ordering is (Employee.employee_code ASC, Payslip.id ASC). The cursor
+    encodes both fields and the filter is a compound predicate matching
+    that order — Payslip.id alone is insufficient because it is a random
+    UUID and does not track the employee_code-sorted position.
+    """
+    # Normalise FastAPI Query defaults. When this handler is called through
+    # HTTP, FastAPI has already resolved these to plain str/int/None. When
+    # unit tests call the function directly, the parameter defaults are
+    # fastapi.params.Query objects rather than their resolved values; the
+    # isinstance checks below restore the intended defaults so the body of
+    # the function sees exactly what it would see over HTTP.
+    q = q if isinstance(q, str) else None
+    cursor = cursor if isinstance(cursor, str) else None
+    limit = limit if isinstance(limit, int) else _DEFAULT_LIMIT
+
+    period = db.scalar(select(PayPeriod).where(PayPeriod.id == period_id))
+    if period is None:
+        raise AppError("not_found", "Pay period not found", 404)
+
+    if period.status == "locked":
+        payslip_status = "current"
+        figures_state = "finalised"
+    else:
+        payslip_status = "preview"
+        figures_state = "preview"
+
+    base = (
+        select(Payslip, Employee)
+        .join(Employee, Employee.id == Payslip.employee_id)
+        .where(
+            Payslip.pay_period_id == period.id,
+            Payslip.status == payslip_status,
+        )
+    )
+    base = apply_scope(base, user, db, model=Payslip)
+
+    if q:
+        needle = f"%{q.strip()}%"
+        base = base.where(
+            or_(
+                Employee.employee_code.ilike(needle),
+                Employee.first_name.ilike(needle),
+                Employee.last_name.ilike(needle),
+            )
+        )
+
+    if cursor is not None:
+        c_code, c_id = _decode_sheet_cursor(cursor)
+        base = base.where(
+            or_(
+                Employee.employee_code > c_code,
+                (Employee.employee_code == c_code) & (Payslip.id > c_id),
+            )
+        )
+
+    base = base.order_by(Employee.employee_code.asc(), Payslip.id.asc()).limit(limit + 1)
+    pairs = list(db.execute(base).all())
+    next_cursor = None
+    if len(pairs) > limit:
+        pairs = pairs[:limit]
+        last_ps, last_emp = pairs[-1]
+        next_cursor = _encode_sheet_cursor(last_emp.employee_code, last_ps.id)
+
+    # Sum PayslipLine rows for Basic vs Additional. One batched query.
+    payslip_ids = [p.id for p, _e in pairs]
+    split_by_ps: dict[uuid.UUID, tuple[Decimal, Decimal]] = {}
+    if payslip_ids:
+        line_rows = db.execute(
+            select(
+                PayslipLine.payslip_id,
+                PayslipLine.source_ref,
+                PayslipLine.amount,
+            ).where(
+                PayslipLine.payslip_id.in_(payslip_ids),
+                PayslipLine.line_type == "earning",
+            )
+        ).all()
+        for ps_id, source_ref, amount in line_rows:
+            code = (source_ref or {}).get("earning_type_code")
+            basic, additional = split_by_ps.get(ps_id, (_ZERO, _ZERO))
+            if code == "BASE_MONTHLY":
+                basic = basic + Decimal(amount)
+            else:
+                additional = additional + Decimal(amount)
+            split_by_ps[ps_id] = (basic, additional)
+
+    items: list[SalarySheetRow] = []
+    run_id: uuid.UUID | None = None
+    revision: int | None = None
+    for p, e in pairs:
+        if run_id is None:
+            run_id = p.payroll_run_id
+            revision = p.revision
+        basic, additional = split_by_ps.get(p.id, (_ZERO, _ZERO))
+        items.append(SalarySheetRow(
+            employee_id=e.id,
+            employee_code=e.employee_code,
+            employee_name=f"{e.first_name} {e.last_name}".strip(),
+            payslip_id=p.id,
+            payslip_status=p.status,
+            revision=p.revision,
+            basic_earnings=basic,
+            additional_earnings=additional,
+            gross=p.gross,
+            pre_tax_deductions=p.pre_tax_deductions,
+            taxable_income=p.taxable_income,
+            paye=p.paye,
+            uif_employee=p.uif_employee,
+            uif_employer=p.uif_employer,
+            sdl=p.sdl,
+            other_deductions=p.other_deductions,
+            reimbursements=p.reimbursements,
+            net=p.net,
+        ))
+
+    if figures_state == "preview" and not items and not next_cursor:
+        figures_state = "no_preview"
+
+    return SalarySheetOut(
+        pay_period_id=period.id,
+        pay_period_key=period.period_key,
+        pay_period_status=period.status,
+        figures_state=figures_state,
+        run_id=run_id,
+        revision=revision,
+        items=items,
+        next_cursor=next_cursor,
     )
 
 
