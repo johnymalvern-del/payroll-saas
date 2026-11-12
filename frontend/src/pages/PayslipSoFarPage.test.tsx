@@ -238,4 +238,32 @@ describe("PayslipSoFarPage", () => {
       await screen.findByTestId("payslip-error"),
     ).toHaveTextContent(/permission/i);
   });
+
+  // ---- Stage 6 item 4 — deduction-code column ----
+
+  it("renders deduction_type_code in the deductions table", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.includes("/preview/")) return jr(baseEstimate());
+      return jr(PERIOD);
+    });
+    renderPage();
+
+    // Table renders (unchanged baseline).
+    const table = await screen.findByTestId("payslip-deductions-table");
+    expect(table).toBeInTheDocument();
+
+    // Code column header exists.
+    expect(screen.getByText("Code")).toBeInTheDocument();
+
+    // Code cell renders the value from the fixture ("uif").
+    const codeCell = screen.getByTestId("payslip-deduction-code-0");
+    expect(codeCell).toBeInTheDocument();
+    expect(codeCell.textContent).toBe("uif");
+
+    // Name still renders (regression guard for the added column not
+    // displacing the pre-existing columns).
+    expect(screen.getByText("UIF")).toBeInTheDocument();
+    expect(screen.getByText("50.00")).toBeInTheDocument();
+  });
 });

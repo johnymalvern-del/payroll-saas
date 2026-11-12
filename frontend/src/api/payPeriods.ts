@@ -228,17 +228,22 @@ export async function previewPayPeriodEmployee(
 export async function finalisePayPeriod(
   id: string,
   ackOpenExceptionsReason?: string | null,
+  ackStalePreviewReason?: string | null,
 ): Promise<PayrollRunOut> {
-  const body =
-    ackOpenExceptionsReason && ackOpenExceptionsReason.trim()
-      ? { ack_open_exceptions_reason: ackOpenExceptionsReason }
-      : undefined;
+  const body: Record<string, string> = {};
+  if (ackOpenExceptionsReason && ackOpenExceptionsReason.trim()) {
+    body.ack_open_exceptions_reason = ackOpenExceptionsReason;
+  }
+  if (ackStalePreviewReason && ackStalePreviewReason.trim()) {
+    body.ack_stale_preview_reason = ackStalePreviewReason;
+  }
+  const hasBody = Object.keys(body).length > 0;
   const res = await wrappedFetch(
     new Request(absoluteUrl(`/api/v1/payroll/pay-periods/${id}/finalise`), {
       method: "POST",
       credentials: "include",
-      headers: body ? { "Content-Type": "application/json" } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
+      headers: hasBody ? { "Content-Type": "application/json" } : undefined,
+      body: hasBody ? JSON.stringify(body) : undefined,
     }),
   );
   if (!res.ok) throw await parseError(res);

@@ -356,8 +356,6 @@ describe("ChangeRequestsPage", () => {
     });
   });
 
-  // ---- assignment-link filter (M3.5 item 4) ----
-
   it("filters assignment-linked change requests out of the queue", async () => {
     const REQ_CHILD = {
       ...REQ,
@@ -381,11 +379,8 @@ describe("ChangeRequestsPage", () => {
     }) as unknown as typeof fetch;
 
     renderPage();
-    // The individual request renders.
     await screen.findByTestId("change-request-cr3");
-    // The assignment-linked request does not.
     expect(screen.queryByTestId("change-request-cr2")).toBeNull();
-    // And the individual row has its action buttons.
     expect(screen.getByTestId("change-request-approve-cr3")).toBeInTheDocument();
   });
 
@@ -418,10 +413,95 @@ describe("ChangeRequestsPage", () => {
     fireEvent.click(screen.getByTestId("change-requests-load-more"));
     await screen.findByTestId("change-request-cr21");
 
-    // Both individuals visible; both children still hidden.
     expect(screen.getByTestId("change-request-cr11")).toBeInTheDocument();
     expect(screen.getByTestId("change-request-cr21")).toBeInTheDocument();
     expect(screen.queryByTestId("change-request-cr10")).toBeNull();
     expect(screen.queryByTestId("change-request-cr20")).toBeNull();
+  });
+
+  // ---- Stage 6 item 3 — decision metadata exposure ----
+
+  it("renders decision metadata for approved requests", async () => {
+    const APPROVED = {
+      ...REQ,
+      id: "cr-approved",
+      status: "approved",
+      decided_by_user_id: "abcd1234-5678-90ab-cdef-1234567890ab",
+      decided_at: "2026-01-16T14:00:00Z",
+      decision_note: null,
+    };
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.includes("/api/v1/employees")) {
+        return jr({ items: [EMP], next_cursor: null });
+      }
+      if (url.includes("/payroll/change-requests")) {
+        return jr({ items: [APPROVED], next_cursor: null });
+      }
+      return jr({}, 200);
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    const row = await screen.findByTestId("change-request-cr-approved");
+    const decided = within(row).getByTestId(
+      "change-request-decided-cr-approved",
+    );
+    const text = decided.textContent ?? "";
+    expect(text).toMatch(/Decided/);
+    expect(text).toMatch(/abcd1234/); // short fallback for decided_by_user_id
+    // No note rendered because decision_note is null.
+    expect(
+      within(row).queryByTestId("change-request-decision-note-cr-approved"),
+    ).toBeNull();
+  });
+
+  it("renders decision note when present", async () => {
+    const REJECTED = {
+      ...REQ,
+      id: "cr-rejected",
+      status: "rejected",
+      decided_by_user_id: "abcd1234-5678-90ab-cdef-1234567890ab",
+      decided_at: "2026-01-16T14:00:00Z",
+      decision_note: "insufficient evidence",
+    };
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.includes("/api/v1/employees")) {
+        return jr({ items: [EMP], next_cursor: null });
+      }
+      if (url.includes("/payroll/change-requests")) {
+        return jr({ items: [REJECTED], next_cursor: null });
+      }
+      return jr({}, 200);
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    const row = await screen.findByTestId("change-request-cr-rejected");
+    expect(
+      within(row).getByTestId("change-request-decision-note-cr-rejected")
+        .textContent ?? "",
+    ).toMatch(/insufficient evidence/);
+  });
+
+  it("does not show decision metadata for pending requests", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.includes("/api/v1/employees")) {
+        return jr({ items: [EMP], next_cursor: null });
+      }
+      if (url.includes("/payroll/change-requests")) {
+        return jr({ items: [REQ], next_cursor: null });
+      }
+      return jr({}, 200);
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    const row = await screen.findByTestId("change-request-cr1");
+    expect(
+      within(row).queryByTestId("change-request-decided-cr1"),
+    ).toBeNull();
+    expect(
+      within(row).queryByTestId("change-request-decision-note-cr1"),
+    ).toBeNull();
   });
 });

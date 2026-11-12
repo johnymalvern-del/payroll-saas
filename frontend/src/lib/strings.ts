@@ -340,6 +340,9 @@ export const strings = {
     confirmCancelBody: "The requester can re-submit later if needed.",
     rejectNoteLabel: "Rejection note",
     rejectNoteRequired: "A rejection note is required.",
+    decidedLabel: "Decided",
+    decidedByLabel: "by",
+    decisionNoteLabel: "Note",
   },
   employees: {
     title: "Employees",
@@ -448,6 +451,20 @@ export const strings = {
     finaliseAckLabel: "Acknowledgement reason",
     finaliseAckHint: "Required when open exceptions exist in this period. Recorded in the audit log.",
     finaliseAckRequired: "Provide a reason to acknowledge open exceptions.",
+    errPendingChangeRequests: (count: number) =>
+      `${count} pending change request(s) could affect this period. Approve, reject, or cancel them on the Change Requests page, then retry.`,
+    pendingChangeRequestsGuidance:
+      "Open the Change Requests page to approve, reject, or cancel these requests. Then return here and retry finalisation.",
+    errPreviewStale:
+      "Inputs have changed since the last preview. Re-run the preview to review the updated figures, or provide an acknowledgement reason to proceed with the current state.",
+    previewStaleWarningBody:
+      "Data has changed since the preview you reviewed. Finalising now will compute figures against the current data, not the previewed data.",
+    previewStaleAckLabel: "Stale-preview acknowledgement reason",
+    previewStaleAckHint:
+      "Required to override the stale-preview gate. Recorded in the audit log.",
+    previewStaleAckRequired:
+      "Provide a reason to acknowledge the stale preview.",
+    rerunPreviewButton: "Re-run preview",
     reopenTitle: "Reopen pay period?",
     reopenBody: "You can reopen a locked period with a reason. Any later locked period must be reopened first.",
     reopenReasonLabel: "Reason",

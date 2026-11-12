@@ -76,6 +76,17 @@ const PREVIEW = {
   next_cursor: null,
 };
 
+const RUN_OUT = {
+  id: "run-final",
+  pay_period_id: "pp1",
+  kind: "final",
+  revision: 1,
+  status: "completed",
+  started_at: "2026-02-05T00:00:00Z",
+  completed_at: "2026-02-05T00:01:00Z",
+  error_code: null,
+};
+
 function renderPage() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -229,6 +240,235 @@ describe("PayPeriodDetailPage", () => {
           screen.getByTestId("pay-period-reopen-error").textContent ?? "",
         ).toMatch(/reason is required/i);
       });
+    },
+    MODAL_TEST_TIMEOUT_MS,
+  );
+
+  // ---- Stage 6 — pending-CR and stale-preview states ----
+
+  it(
+    "finalise shows pending-CR guidance and disables submit when backend blocks",
+    async () => {
+      global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        const method = requestMethod(input);
+        if (url.endsWith("/payroll/pay-periods/pp1") && method === "GET") {
+          return jr(PERIOD_OPEN);
+        }
+        if (url.endsWith("/finalise") && method === "POST") {
+          return jr(
+            {
+              error: {
+                code: "pending_change_requests_in_period",
+                details: { count: 3, sample: [] },
+              },
+            },
+            409,
+          );
+        }
+        return jr({});
+      }) as unknown as typeof fetch;
+
+      renderPage();
+      await screen.findByText(/Pay period 2026-01/);
+      fireEvent.click(screen.getByTestId("pay-period-finalise-open"));
+      await screen.findByTestId("pay-period-finalise-modal");
+      fireEvent.click(await screen.findByTestId("pay-period-finalise-submit"));
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("pay-period-finalise-error").textContent ?? "",
+        ).toMatch(/3 pending change request/i);
+      });
+
+      expect(
+        screen.getByTestId("pay-period-finalise-pending-cr-guidance"),
+      ).toBeInTheDocument();
+
+      expect(
+        (screen.getByTestId("pay-period-finalise-submit") as HTMLButtonElement)
+          .disabled,
+      ).toBe(true);
+
+      expect(screen.queryByTestId("pay-period-finalise-stale-ack")).toBeNull();
+    },
+    MODAL_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "finalise shows stale-preview warning and ack field when backend blocks",
+    async () => {
+      global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        const method = requestMethod(input);
+        if (url.endsWith("/payroll/pay-periods/pp1") && method === "GET") {
+          return jr(PERIOD_OPEN);
+        }
+        if (url.endsWith("/finalise") && method === "POST") {
+          return jr(
+            {
+              error: {
+                code: "preview_stale",
+                details: {
+                  preview_hash: "aaaa",
+                  current_hash: "bbbb",
+                },
+              },
+            },
+            409,
+          );
+        }
+        return jr({});
+      }) as unknown as typeof fetch;
+
+      renderPage();
+      await screen.findByText(/Pay period 2026-01/);
+      fireEvent.click(screen.getByTestId("pay-period-finalise-open"));
+      await screen.findByTestId("pay-period-finalise-modal");
+      fireEvent.click(await screen.findByTestId("pay-period-finalise-submit"));
+
+      await screen.findByTestId("pay-period-finalise-stale-warning");
+
+      expect(
+        screen.getByTestId("pay-period-finalise-stale-ack"),
+      ).toBeInTheDocument();
+
+      expect(
+        screen.getByTestId("pay-period-finalise-rerun-preview"),
+      ).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId("pay-period-finalise-submit"));
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("pay-period-finalise-error").textContent ?? "",
+        ).toMatch(/reason to acknowledge the stale preview/i);
+      });
+    },
+    MODAL_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "finalise resubmits with ack_stale_preview_reason after stale error",
+    async () => {
+      let finaliseCallCount = 0;
+      const capturedBodies: string[] = [];
+      global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        const method = requestMethod(input);
+        if (url.endsWith("/payroll/pay-periods/pp1") && method === "GET") {
+          return jr(PERIOD_OPEN);
+        }
+        if (url.endsWith("/finalise") && method === "POST") {
+          finaliseCallCount++;
+          // Capture only when a body is present. First finalise is body-less
+          // (no ack reasons); second carries ack_stale_preview_reason.
+          if (input instanceof Request && input.body) {
+            capturedBodies.push(await input.text());
+          }
+          if (finaliseCallCount === 1) {
+            return jr(
+              {
+                error: {
+                  code: "preview_stale",
+                  details: {
+                    preview_hash: "aaaa",
+                    current_hash: "bbbb",
+                  },
+                },
+              },
+              409,
+            );
+          }
+          return jr(RUN_OUT);
+        }
+        return jr({});
+      }) as unknown as typeof fetch;
+
+      renderPage();
+      await screen.findByText(/Pay period 2026-01/);
+      fireEvent.click(screen.getByTestId("pay-period-finalise-open"));
+      await screen.findByTestId("pay-period-finalise-modal");
+      fireEvent.click(await screen.findByTestId("pay-period-finalise-submit"));
+      await screen.findByTestId("pay-period-finalise-stale-warning");
+
+      fireEvent.change(screen.getByTestId("pay-period-finalise-stale-ack"), {
+        target: { value: "cfo approved post-preview correction" },
+      });
+      fireEvent.click(screen.getByTestId("pay-period-finalise-submit"));
+
+      await waitFor(() => {
+        expect(finaliseCallCount).toBe(2);
+      });
+
+      // Only the SECOND call had a body. If the first call had also carried
+      // a body, this count would be 2 and we would index [1]; but proving
+      // "first call body-less" is a stronger invariant, so assert exactly 1.
+      expect(capturedBodies.length).toBe(1);
+      expect(capturedBodies[0]).toMatch(/ack_stale_preview_reason/);
+      expect(capturedBodies[0]).toMatch(/cfo approved post-preview correction/);
+
+      // Success clears the stale-ack state synchronously.
+      await waitFor(() => {
+        expect(
+          screen.queryByTestId("pay-period-finalise-stale-warning"),
+        ).toBeNull();
+      });
+    },
+    MODAL_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "re-run preview button closes modal and triggers preview",
+    async () => {
+      let previewCallCount = 0;
+      let finaliseCallCount = 0;
+      global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        const method = requestMethod(input);
+        if (url.endsWith("/payroll/pay-periods/pp1") && method === "GET") {
+          return jr(PERIOD_OPEN);
+        }
+        if (url.includes("/preview") && method === "POST") {
+          previewCallCount++;
+          return jr(PREVIEW);
+        }
+        if (url.endsWith("/finalise") && method === "POST") {
+          finaliseCallCount++;
+          return jr(
+            {
+              error: {
+                code: "preview_stale",
+                details: { preview_hash: "a", current_hash: "b" },
+              },
+            },
+            409,
+          );
+        }
+        return jr({});
+      }) as unknown as typeof fetch;
+
+      renderPage();
+      await screen.findByText(/Pay period 2026-01/);
+      fireEvent.click(screen.getByTestId("pay-period-finalise-open"));
+      await screen.findByTestId("pay-period-finalise-modal");
+      fireEvent.click(await screen.findByTestId("pay-period-finalise-submit"));
+      await screen.findByTestId("pay-period-finalise-stale-warning");
+
+      fireEvent.click(screen.getByTestId("pay-period-finalise-rerun-preview"));
+
+      await waitFor(() => {
+        expect(
+          screen.queryByTestId("pay-period-finalise-stale-warning"),
+        ).toBeNull();
+      });
+
+      await waitFor(() => {
+        expect(previewCallCount).toBe(1);
+      });
+
+      expect(finaliseCallCount).toBe(1);
+
+      await screen.findByTestId("pay-period-preview-result");
     },
     MODAL_TEST_TIMEOUT_MS,
   );

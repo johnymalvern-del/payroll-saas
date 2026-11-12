@@ -58,6 +58,9 @@ export function PayPeriodDetailPage() {
   const [finaliseAck, setFinaliseAck] = useState("");
   const [finaliseError, setFinaliseError] = useState<string | null>(null);
   const [needsAck, setNeedsAck] = useState(false);
+  const [needsStaleAck, setNeedsStaleAck] = useState(false);
+  const [staleAckReason, setStaleAckReason] = useState("");
+  const [pendingCrCount, setPendingCrCount] = useState<number | null>(null);
 
   const [reopenOpen, setReopenOpen] = useState(false);
   const [reopenReason, setReopenReason] = useState("");
@@ -93,13 +96,26 @@ export function PayPeriodDetailPage() {
     },
   });
 
+  const resetFinaliseState = () => {
+    setFinaliseAck("");
+    setFinaliseError(null);
+    setNeedsAck(false);
+    setNeedsStaleAck(false);
+    setStaleAckReason("");
+    setPendingCrCount(null);
+  };
+
   const finaliseMutation = useMutation({
-    mutationFn: (ack: string | null) => finalisePayPeriod(id!, ack),
+    mutationFn: ({
+      ack,
+      staleAck,
+    }: {
+      ack: string | null;
+      staleAck: string | null;
+    }) => finalisePayPeriod(id!, ack, staleAck),
     onSuccess: () => {
       setFinaliseOpen(false);
-      setFinaliseAck("");
-      setFinaliseError(null);
-      setNeedsAck(false);
+      resetFinaliseState();
       qc.invalidateQueries({ queryKey: ["pay_period", id] });
       qc.invalidateQueries({ queryKey: ["pay_periods"] });
       qc.invalidateQueries({ queryKey: ["pay_period_reopen_log", id] });
@@ -109,6 +125,17 @@ export function PayPeriodDetailPage() {
         if (err.code === "open_exceptions_in_period") {
           setNeedsAck(true);
           setFinaliseError(strings.payPeriods.errOpenExceptions);
+        } else if (err.code === "pending_change_requests_in_period") {
+          const rawCount = err.details?.count;
+          const count =
+            typeof rawCount === "number" && Number.isFinite(rawCount)
+              ? rawCount
+              : 0;
+          setPendingCrCount(count);
+          setFinaliseError(strings.payPeriods.errPendingChangeRequests(count));
+        } else if (err.code === "preview_stale") {
+          setNeedsStaleAck(true);
+          setFinaliseError(strings.payPeriods.errPreviewStale);
         } else if (err.code === "period_locked") {
           setFinaliseError(strings.payPeriods.errPeriodLocked);
         } else {
@@ -172,7 +199,12 @@ export function PayPeriodDetailPage() {
       setFinaliseError(strings.payPeriods.finaliseAckRequired);
       return;
     }
-    finaliseMutation.mutate(ack);
+    const staleAck = staleAckReason.trim() ? staleAckReason.trim() : null;
+    if (needsStaleAck && !staleAck) {
+      setFinaliseError(strings.payPeriods.previewStaleAckRequired);
+      return;
+    }
+    finaliseMutation.mutate({ ack, staleAck });
   };
 
   const onSubmitReopen = () => {
@@ -181,6 +213,12 @@ export function PayPeriodDetailPage() {
       return;
     }
     reopenMutation.mutate(reopenReason.trim());
+  };
+
+  const onRerunPreview = () => {
+    setFinaliseOpen(false);
+    resetFinaliseState();
+    previewMutation.mutate();
   };
 
   return (
@@ -220,9 +258,7 @@ export function PayPeriodDetailPage() {
           </Button>
           <Button
             onClick={() => {
-              setFinaliseAck("");
-              setFinaliseError(null);
-              setNeedsAck(false);
+              resetFinaliseState();
               setFinaliseOpen(true);
             }}
             disabled={isLocked}
@@ -352,20 +388,38 @@ export function PayPeriodDetailPage() {
         onClose={() => {
           if (finaliseMutation.isPending) return;
           setFinaliseOpen(false);
-          setFinaliseAck("");
-          setFinaliseError(null);
-          setNeedsAck(false);
+          resetFinaliseState();
         }}
         title={strings.payPeriods.finaliseTitle}
         data-testid="pay-period-finalise-modal"
       >
         <Stack gap="sm">
           <Text size="sm">{strings.payPeriods.finaliseBody}</Text>
+
           {finaliseError ? (
             <Alert color={colors.problem} data-testid="pay-period-finalise-error">
               {finaliseError}
             </Alert>
           ) : null}
+
+          {pendingCrCount !== null ? (
+            <Alert
+              color={colors.warning}
+              data-testid="pay-period-finalise-pending-cr-guidance"
+            >
+              {strings.payPeriods.pendingChangeRequestsGuidance}
+            </Alert>
+          ) : null}
+
+          {needsStaleAck ? (
+            <Alert
+              color={colors.warning}
+              data-testid="pay-period-finalise-stale-warning"
+            >
+              {strings.payPeriods.previewStaleWarningBody}
+            </Alert>
+          ) : null}
+
           <Textarea
             label={strings.payPeriods.finaliseAckLabel}
             description={strings.payPeriods.finaliseAckHint}
@@ -374,14 +428,34 @@ export function PayPeriodDetailPage() {
             minRows={2}
             data-testid="pay-period-finalise-ack"
           />
+
+          {needsStaleAck ? (
+            <Textarea
+              label={strings.payPeriods.previewStaleAckLabel}
+              description={strings.payPeriods.previewStaleAckHint}
+              value={staleAckReason}
+              onChange={(e) => setStaleAckReason(e.currentTarget.value)}
+              minRows={2}
+              data-testid="pay-period-finalise-stale-ack"
+            />
+          ) : null}
+
           <Group justify="flex-end">
+            {needsStaleAck ? (
+              <Button
+                variant="default"
+                onClick={onRerunPreview}
+                disabled={finaliseMutation.isPending}
+                data-testid="pay-period-finalise-rerun-preview"
+              >
+                {strings.payPeriods.rerunPreviewButton}
+              </Button>
+            ) : null}
             <Button
               variant="default"
               onClick={() => {
                 setFinaliseOpen(false);
-                setFinaliseAck("");
-                setFinaliseError(null);
-                setNeedsAck(false);
+                resetFinaliseState();
               }}
               disabled={finaliseMutation.isPending}
               data-testid="pay-period-finalise-cancel"
@@ -391,6 +465,7 @@ export function PayPeriodDetailPage() {
             <Button
               onClick={onSubmitFinalise}
               loading={finaliseMutation.isPending}
+              disabled={pendingCrCount !== null}
               data-testid="pay-period-finalise-submit"
             >
               {strings.payPeriods.finaliseConfirm}

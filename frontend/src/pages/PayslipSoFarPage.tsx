@@ -247,6 +247,7 @@ export function PayslipSoFarPage() {
                   <Table.Thead>
                     <Table.Tr>
                       <Table.Th>Deduction</Table.Th>
+                      <Table.Th>Code</Table.Th>
                       <Table.Th>Amount</Table.Th>
                     </Table.Tr>
                   </Table.Thead>
@@ -254,6 +255,15 @@ export function PayslipSoFarPage() {
                     {estimate.data.deductions.map((d, i) => (
                       <Table.Tr key={i}>
                         <Table.Td>{d.deduction_type_name}</Table.Td>
+                        <Table.Td>
+                          <Text
+                            size="sm"
+                            c="dimmed"
+                            data-testid={`payslip-deduction-code-${i}`}
+                          >
+                            {d.deduction_type_code || "—"}
+                          </Text>
+                        </Table.Td>
                         <Table.Td>{d.amount}</Table.Td>
                       </Table.Tr>
                     ))}

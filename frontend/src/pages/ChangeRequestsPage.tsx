@@ -245,6 +245,28 @@ export function ChangeRequestsPage() {
                       <Text size="xs" c="dimmed">
                         Requested {new Date(r.requested_at).toLocaleString()}
                       </Text>
+                      {r.decided_at ? (
+                        <Text
+                          size="xs"
+                          c="dimmed"
+                          data-testid={`change-request-decided-${r.id}`}
+                        >
+                          {strings.changeRequests.decidedLabel}{" "}
+                          {new Date(r.decided_at).toLocaleString()}
+                          {r.decided_by_user_id
+                            ? ` ${strings.changeRequests.decidedByLabel} ${r.decided_by_user_id.slice(0, 8)}`
+                            : ""}
+                        </Text>
+                      ) : null}
+                      {r.decision_note ? (
+                        <Text
+                          size="xs"
+                          c="dimmed"
+                          data-testid={`change-request-decision-note-${r.id}`}
+                        >
+                          {strings.changeRequests.decisionNoteLabel}: {r.decision_note}
+                        </Text>
+                      ) : null}
                     </Stack>
                     {r.status === "pending" ? (
                       <Group gap="xs">
