@@ -174,3 +174,194 @@ and `SalarySheetOut.figures_state="preview_out_of_scope"` distinguish
 "no preview has been generated" from "a preview exists but no employees
 in the caller's scope." Both backend and frontend surface this
 distinction.
+
+## Payroll / Processing Safety (M6 Part 2)
+
+**Backend committed at `9631bbf` (11 files); frontend and this doc
+section in subsequent commits.** Six stages of safety improvements to
+the payroll processing lifecycle. **No migrations. No rewrites of the
+calculation pipeline. No changes to statutory calc, permissions
+matrix, or DB models.**
+
+### Stage 1 — concurrency
+
+`SELECT ... FOR UPDATE` on `finalise`, `reopen`, and `run_preview`
+serialises concurrent callers on the `pay_period` row. Without this,
+two callers can both observe `status="open"`, both compute the same
+revision, and the loser hits a raw `IntegrityError` 500
+(`uq_payslip_period_employee_rev`). `populate_existing=True` ensures
+the refreshed row replaces any stale identity-mapped state so the
+subsequent status guard runs against the current DB value.
+
+### Stage 2 — locked-period guard on CR approval
+
+`payroll_change_request._apply` refuses with 409 `locked_period_affects`
+if approving the CR would alter a locked period. Effective-window
+overlap with boundaries inclusive; the **existing row's window is also
+checked** for update/deactivate kinds — a shorten removes from the
+period and an extend adds to it, so checking the proposed window alone
+is insufficient. `employee_field_update` has no effective window and
+blocks if the employee has a payslip in any locked period. Malformed
+payloads fail closed. No ack path — reopen is the audited override.
+
+### Stage 2b — locked-period guard on salary-assignment approval
+
+`salary_assignment_approve_service._locked_period_guard` refuses with
+the same 409 if any locked period's `end_date >=
+assignment.effective_from`. Guard runs in Phase A (after the assignment-
+specific rechecks, before Phase B's savepoint), so a blocked approval
+leaves zero residue and the failure-recovery helper is not triggered.
+Closing prior rows at `effective_from - 1` is provably safe for locked
+periods that end at or before that day, so the single comparison is
+both necessary and sufficient.
+
+### Stage 3 — pending-CR gate on finalise
+
+`finalise` refuses with 409 `pending_change_requests_in_period` when
+any pending CR could affect the period if approved. **Company-wide
+count** (not scope-filtered — finalise is a company-wide event, so a
+scoped HR passing through a scoped gate would miss unresolved CRs
+outside their view). Effective-window overlap is used; the existing
+row's window is included for update/deactivate kinds. `employee_field_update`
+blocks by default. Malformed payloads fail closed. **No acknowledgement
+override** — admins must approve, reject, or cancel pending CRs via the
+existing audited endpoints before retrying finalise.
+
+### Stage 4 — stale-preview detection
+
+`run_preview` stores a canonical `input_hash` in
+`PayrollRun.rules_snapshot`. `finalise` recomputes it and, if a preview
+run exists with a different hash, refuses with 409 `preview_stale`
+unless `ack_stale_preview_reason` is provided. Hash covers only
+calc-affecting inputs: employee calc fields (`pay_basis`,
+`pay_frequency`, `base_rate`, `uif_exempt`, `medical_scheme_members`,
+`contracted_weekly_hours`, `date_of_birth`, `default_shift_id`,
+`status`), `EmployeeEarning`/`EmployeeDeduction` rows,
+`EmployeePayHistory` approved rows, `AttendanceDay`/`AttendanceSegment`
+within the period, referenced `EarningType`/`DeductionType`/`Shift`
+calc fields, and calc-affecting `PayrollSettings` fields
+(`sdl_applies`, `age_reference_date`, `net_pay_floor`,
+`attendance_earning_map`, `unpaid_day_*`, `public_holiday_*`,
+`leave_authoritative_source`, `monthly_hourly_derivation_formula_code`,
+`leave_earning_for_monthly`). Excludes exceptions, formula acks,
+cosmetic fields (labels, names, email, mobile), statutory tables in the
+control DB. **No migration** — hash lives in the existing
+`rules_snapshot` JSONB.
+
+**Behaviour with no prior preview:** hash gate is **skipped** —
+preserves the pre-Stage-4 contract where finalise without a preview was
+allowed. Legacy preview rows with no `input_hash` are treated as stale
+(fail-safe), requiring one re-preview after deploy.
+
+### Stage 5 — hygiene
+
+- **F19** — `scope.py:_employees_in_scope` rewritten to remove
+  obfuscated dead code (`and_(True, *[]) if False else ...`);
+  `__import__("sqlalchemy").or_` replaced with a module-level import;
+  unused `and_` import removed. **No behavioural change** — the
+  dead branch was never evaluated. Verified against the full backend
+  suite (1388 tests) that nothing outside payroll regressed.
+- **F22** — `run_preview_for_employee_as_of` `deduction_type_code` now
+  read from `DeductionLine.source_ref` (was `getattr(d, "code", "")`
+  which silently returned `""` because `DeductionLine` has no `.code`
+  attribute). Non-as-of `preview_employee` path already read from
+  `source_ref` and was correct; the fix aligns the as-of response with
+  the same field-population discipline.
+- **F18b** — `ChangeRequestOut` schema `status`, `decided_by_user_id`,
+  `decision_note`. **Verified at `9631bbf` that the schema already had
+  all three fields** (part of M6 Part 1, not new work). No migration —
+  all three DB columns exist on `PayrollChangeRequest` in
+  `models/change_request.py`.
+
+### Stage 6 — frontend (committed in a separate follow-up commit)
+
+- **Finalise dialog (`PayPeriodDetailPage.tsx`)** — when
+  `finaliseMutation` fails with `pending_change_requests_in_period`,
+  shows the count from `err.details.count` and a guidance alert
+  ("Open the Change Requests page..."). Submit button is **disabled**
+  while pending CRs block — no frontend-only bypass possible. Matches
+  backend semantics exactly (no ack path).
+- **Stale-preview warning (`PayPeriodDetailPage.tsx`)** — when
+  `finaliseMutation` fails with `preview_stale`, shows a warning alert
+  explaining what changed and a `Textarea` for
+  `ack_stale_preview_reason`. A "Re-run preview" button closes the
+  dialog and triggers a fresh preview (the "respect the backend ack"
+  alternative to acking). On resubmit, the ack reason is sent via the
+  `ack_stale_preview_reason` body field. Client-side validation
+  requires a reason when `needsStaleAck` is set.
+- **ChangeRequestsPage (`ChangeRequestsPage.tsx`)** — decided rows
+  now show `decided_at` (localised), `decided_by_user_id` (first 8
+  chars), and `decision_note` (when present). Pending rows unchanged.
+  No new permissions — the data is already scope-filtered by the
+  backend `apply_scope` on `list_requests`, so any user who can see
+  the row can see its decision metadata.
+- **PayslipSoFarPage (`PayslipSoFarPage.tsx`)** — deductions table
+  gains a "Code" column surfacing `deduction_type_code` (populated by
+  F22). Empty-string fallback to `—` for defensive rendering.
+
+### Residual race — documented, not closed
+
+**A CR approved between the pending-CR gate and the hash snapshot at
+finalise lands inside the current transaction's window.** The Stage 4
+hash is computed *after* the Stage 3 gate and reflects the state at
+that instant, so a CR approved in the microseconds between gate-check
+and hash-snapshot will not be caught by either. The resulting payslips
+reflect the CR's effect, which is correct — but the audit trail will
+show `pending_cr_count_at_finalise: 0` even though a CR was approved
+just before finalise completed.
+
+**Fully closing this requires CR approval to take the `pay_period` row
+lock** — the same lock Stage 1 uses for finalise. That change needs its
+own design (CR approval can span multiple periods, so a single
+`pay_period` lock target isn't sufficient; a set-of-periods lock or an
+advisory lock keyed on employee + period window would be needed).
+**Deferred to a future milestone.** Documented in code comments at
+`payroll_runner.finalise()` (Stage 3 gate comment) and
+`payroll_change_request._apply()` (Stage 2 guard comment).
+
+### Test evidence
+
+- **Focused backend** (16 files across Stages 1–5, 2b, plus M6 Part 1
+  regression): **116 passed / 0 failed**
+- **Broader payroll** (`-k "payroll or scope or permission or audit or salary"`):
+  **661 passed / 0 failed**
+- **Full backend** (all tests): **1388 passed / 4 skipped / 0 failed**
+  — matches M5 baseline 1336/4 + 52 new tests (Stages 1+2+2b+3+4+F22)
+- **Full frontend**: **363 passed / 43 files** — matches M6 Part 1
+  baseline 355 + 8 new tests (Stage 6: 4 + 3 + 1)
+- **Focused Stage 6A** (`PayPeriodDetailPage.test.tsx`): **9 passed**
+- **Focused Stage 6B** (`ChangeRequestsPage.test.tsx`): **14 passed**
+- **Focused Stage 6C** (`PayslipSoFarPage.test.tsx`): **10 passed**
+
+### Known limitations (M6 Part 2)
+
+- **Pending CRs block finalise with no override.** Deliberate —
+  forcing explicit resolve-or-reject is safer than an "I promise"
+  acknowledgement path. If a legitimate operational need arises, a
+  dedicated `ack_pending_crs_reason` could be added later; none exists
+  today.
+- **Stale-preview ack is a single-admin override.** Recorded in the
+  audit log alongside the finalise action, but a single admin can
+  override the gate. Same pattern as the existing `ack_open_exceptions`
+  path. Two-person control for stale-preview override is out of scope
+  for M6.
+- **Cross-mutator lock enforcement covers CR-driven and salary-
+  assignment writes only.** Stage 2 guards `_apply` (all 7 CR kinds) and
+  Stage 2b guards `salary_assignment_approve_service`. **Direct edits to
+  `Employee` calc fields** via the employee CRUD path (e.g. a direct
+  `PATCH /employees/{id}` to `base_rate`) are **not** guarded against
+  locked periods. Flagged for a future milestone if the employee CRUD
+  path can be reached by a role that shouldn't be able to alter
+  locked-period inputs; today the only direct-write endpoint in that
+  family is `EmployeePayrollPage`'s salary-assignment flow, which IS
+  guarded via Stage 2b.
+- **Stage 4 no-preview case skips the gate entirely.** Admins can
+  finalise without ever running a preview (pre-Stage-4 behaviour
+  preserved for test compatibility). This is a deliberate compatibility
+  choice, not a bug — but it means the "reviewed figures == finalised
+  figures" invariant only holds *when a preview was run*. Documented so
+  future readers don't assume the invariant is universal.
+- **`payroll_settings.py` service stub is empty.** Present on disk as
+  an empty file, not tracked by git. `_load_settings()` lives inside
+  `payroll_runner.py`. No action needed; flagged because a future
+  reader might expect settings logic there.
