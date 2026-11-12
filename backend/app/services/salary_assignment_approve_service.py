@@ -11,6 +11,15 @@ Batch approval with:
   * failure-recovery helper that commits a failed attempt after the outer
     txn rolls back, WITHOUT touching terminal assignments (reacquires the
     same lock, reloads, checks status under lock)
+
+M6 Part 2 Stage 2b: Phase A now also refuses with 409 locked_period_affects
+if any locked pay period has `end_date >= assignment.effective_from`.
+Approving the assignment inserts new effective-dated rows starting at
+`effective_from` and closes prior manual/structure-owned rows at
+`effective_from - 1`; both operations can alter any locked period whose
+window extends to or past `effective_from`. Closing rows at
+`effective_from - 1` is provably safe for locked periods that end at or
+before that day, so the single comparison is both necessary and sufficient.
 """
 from __future__ import annotations
 
@@ -26,7 +35,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError
 from app.db.tenant.models.change_request import PayrollChangeRequest
 from app.db.tenant.models.pay import (
-    DeductionType, EarningType, EmployeeDeduction, EmployeeEarning,
+    DeductionType, EarningType, EmployeeDeduction, EmployeeEarning, PayPeriod,
 )
 from app.db.tenant.models.people import Employee, EmployeePayHistory
 from app.db.tenant.models.salary_structure import (
@@ -227,6 +236,46 @@ def _recheck_closure_consistency(
                     {"kind": k, "id": str(i)} for k, i in missing
                 ],
             }},
+        )
+
+
+def _locked_period_guard(
+    db: Session, a: EmployeeSalaryStructureAssignment,
+) -> None:
+    """M6 Part 2 Stage 2b: refuse if approving the assignment would alter
+    any locked pay period.
+
+    Approving inserts new effective-dated rows starting at a.effective_from
+    and closes prior manual/structure-owned rows at a.effective_from - 1.
+    For a locked period [S, E]:
+      * E < a.effective_from → new rows never enter the period; closes at
+        a.effective_from - 1 keep prior rows active through E → no change.
+      * E >= a.effective_from → new rows enter on [max(S, effective_from), E]
+        and/or prior rows stop before a.effective_from → period's payslips
+        would differ on recompute.
+
+    Single comparison is necessary and sufficient.
+    """
+    locked = db.scalar(
+        select(PayPeriod)
+        .where(
+            PayPeriod.status == "locked",
+            PayPeriod.end_date >= a.effective_from,
+        )
+        .limit(1)
+    )
+    if locked is not None:
+        raise AppError(
+            "locked_period_affects",
+            f"approving this assignment would alter locked period "
+            f"{locked.period_key!r}; reopen the period first",
+            409,
+            {
+                "period_id": str(locked.id),
+                "period_key": locked.period_key,
+                "assignment_id": str(a.id),
+                "effective_from": a.effective_from.isoformat(),
+            },
         )
 
 
@@ -643,6 +692,12 @@ def _do_approve(
     validate_date_rules(db, a.effective_from)
     _effective_ordering_check(db, a)
     _recheck_closure_consistency(db, a)
+
+    # M6 Part 2 Stage 2b: locked-period guard. Runs last in Phase A so the
+    # user gets assignment-specific error messages first, then the
+    # environmental one. Raises before Phase B's savepoint opens, so a
+    # blocked approval leaves zero residue.
+    _locked_period_guard(db, a)
 
     # ---- Phase B: batch work inside a savepoint ----
     sp = db.begin_nested()

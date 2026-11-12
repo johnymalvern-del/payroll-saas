@@ -8,11 +8,13 @@ Covers:
 - as_of before period.start_date -> 422
 - as_of after period.end_date -> clamped
 - Typed response shape (available + reason_unavailable + as_of)
+- M6 Part 2 Stage 5 (F22): deduction_type_code populated from source_ref
 """
 from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -137,3 +139,61 @@ def test_as_of_typed_shape(db):
     assert "available" in out
     assert "reason_unavailable" in out
     assert "as_of" in out
+
+
+def test_as_of_deduction_type_code_populated(db, monkeypatch):
+    """F22 (M6 Part 2 Stage 5): as-of deductions must surface deduction_type_code
+    from `DeductionLine.source_ref`. Previously the code used
+    `getattr(d, "code", "")` which returned "" because DeductionLine has no
+    `code` attribute — silently empty in every response."""
+    from app.services import payroll_runner as PR
+    from app.services import payroll_pipeline as P
+
+    emp = _mk_employee(db, pay_basis="hourly")
+    period = _mk_period(db)
+
+    # Construct a fake DeductionLine with the source_ref that the real
+    # _build_deductions sets on its output. Use SimpleNamespace to avoid
+    # coupling the test to the DeductionLine constructor signature.
+    fake_deduction = SimpleNamespace(
+        label="Medical aid",
+        amount=Decimal("500.00"),
+        category="benefit",
+        is_pre_tax=False,
+        priority=100,
+        source_ref={
+            "employee_deduction_id": str(uuid.uuid4()),
+            "deduction_type_code": "MED_AID",
+        },
+    )
+
+    # Patch the input-building helpers and the pipeline so we exercise the
+    # exact transformation that F22 fixed, without needing a fully seeded
+    # tenant (settings, statutory tables, earning types, etc.).
+    monkeypatch.setattr(PR, "build_pipeline_config", lambda *a, **kw: SimpleNamespace())
+    monkeypatch.setattr(PR, "_build_all_earnings", lambda *a, **kw: ([], [], {}))
+    monkeypatch.setattr(PR, "_build_deductions", lambda *a, **kw: [fake_deduction])
+    monkeypatch.setattr(
+        P, "run_pipeline",
+        lambda *a, **kw: SimpleNamespace(
+            refused=False,
+            refusal_code=None,
+            refusal_message=None,
+            gross=Decimal("1000.00"),
+            paye=Decimal("100.00"),
+            net=Decimal("900.00"),
+        ),
+    )
+
+    out = run_preview_for_employee_as_of(
+        db, _user(), period, emp, date(2026, 11, 10),
+    )
+
+    assert out["available"] is True
+    assert len(out["deductions"]) == 1
+    assert out["deductions"][0]["deduction_type_code"] == "MED_AID", (
+        "F22 regression: deduction_type_code must come from source_ref, "
+        "not from the nonexistent DeductionLine.code attribute"
+    )
+    assert out["deductions"][0]["deduction_type_name"] == "Medical aid"
+    assert out["deductions"][0]["amount"] == Decimal("500.00")

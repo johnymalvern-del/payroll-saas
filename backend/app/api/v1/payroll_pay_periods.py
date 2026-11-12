@@ -1,24 +1,18 @@
-"""Pay period endpoints (Chapter 4 Bundle 004b-a + Chapter 4H B-4d + B-3 + M5 + M6-A).
+"""Pay period endpoints (Chapter 4 Bundle 004b-a + Chapter 4H B-4d + B-3 + M5 + M6-A + M6 Part 2).
 
 B-3 adds:
   GET /payroll/pay-periods/{period_id}/preview/{employee_id}
-    Read-only single-employee preview from the latest persisted run.
 
 M5 adds:
   GET /payroll/pay-periods/{period_id}/salary-sheet
-    Company-wide read-only salary sheet for a period, backed by persisted
-    Payslip rows.
 
 M6 Stage A adds:
-  - POST /{period_id}/preview: response is scope-filtered via apply_scope
-    on Payslip.employee_id. The CALCULATION remains company-wide
-    (payroll_runner.run_preview / _in_scope_employees unchanged) so a
-    branch-scoped HR trigger does not replace the company-wide preview
-    with a partial one.
-  - PreviewOut.raw_employee_count: authoritative company-wide employee
-    count from run.rules_snapshot["employee_count"].
-  - SalarySheetOut.figures_state gains "preview_out_of_scope" when a
-    preview exists but no employees are within the caller's scope.
+  - POST /{period_id}/preview: response scope-filtered; raw_employee_count
+  - SalarySheetOut.figures_state gains "preview_out_of_scope"
+
+M6 Part 2 Stage 4 adds:
+  - POST /{period_id}/finalise accepts ack_stale_preview_reason, plumbed to
+    payroll_runner.finalise.
 """
 from __future__ import annotations
 
@@ -84,7 +78,6 @@ def _decode_cursor(cursor: str) -> uuid.UUID:
 
 
 def _encode_sheet_cursor(employee_code: str, ps_id: uuid.UUID) -> str:
-    """Composite cursor for the salary sheet's (employee_code, payslip_id) order."""
     raw = json.dumps(
         {"c": employee_code, "i": str(ps_id)}, separators=(",", ":"),
     ).encode("utf-8")
@@ -195,9 +188,6 @@ def preview_pay_period(
     if period is None:
         raise AppError("not_found", "Pay period not found", 404)
 
-    # M6 Stage A: the CALCULATION remains company-wide. run_preview and
-    # _in_scope_employees are untouched so a branch-scoped HR trigger does
-    # not replace the company-wide preview run with a partial one.
     run = run_preview(db, user, period)
     db.commit()
 
@@ -207,9 +197,6 @@ def preview_pay_period(
         .where(Payslip.payroll_run_id == run.id)
         .order_by(Payslip.id.asc())
     )
-    # M6 Stage A: the HTTP RESPONSE is scope-filtered. For payroll_admin
-    # and HR-without-scope rows this is a no-op; for scoped HR it narrows
-    # items to their authorised employees.
     q = apply_scope(q, user, db, model=Payslip)
     if cursor is not None:
         q = q.where(Payslip.id > _decode_cursor(cursor))
@@ -240,7 +227,6 @@ def _preview_as_of(
     employee_id: uuid.UUID,
     as_of: date | None = None,
 ) -> PreviewEmployeeOut:
-    """Read-only payslip-so-far for one employee, as of `as_of`."""
     pay_period = db.get(PayPeriod, period_id)
     if pay_period is None:
         raise AppError("record_not_found", "Pay period not found", 404)
@@ -362,12 +348,6 @@ def get_salary_sheet(
     limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
     cursor: str | None = Query(None),
 ) -> SalarySheetOut:
-    """M5 + M6 Stage A — read-only monthly salary sheet.
-
-    Reads persisted Payslip rows for the period; never calls the pipeline.
-    All figures come from Payslip / PayslipLine. Response is scope-filtered
-    via apply_scope(model=Payslip); payroll_admin sees the full company.
-    """
     q = q if isinstance(q, str) else None
     cursor = cursor if isinstance(cursor, str) else None
     limit = limit if isinstance(limit, int) else _DEFAULT_LIMIT
@@ -471,11 +451,6 @@ def get_salary_sheet(
             net=p.net,
         ))
 
-    # M6 Stage A: distinguish "no preview has been generated" from "a
-    # preview exists but no employees are within the caller's scope".
-    # Only applies to the preview state — finalised periods keep their
-    # existing figures_state="finalised" even if the caller's scope
-    # resolves to zero employees.
     if figures_state == "preview" and not items and not next_cursor:
         raw_preview_count = db.scalar(
             select(func.count())
@@ -512,7 +487,12 @@ def finalise_pay_period(
     if period is None:
         raise AppError("not_found", "Pay period not found", 404)
     ack = body.ack_open_exceptions_reason if body is not None else None
-    run = finalise(db, user, period, ack_open_exceptions_reason=ack)
+    ack_stale = body.ack_stale_preview_reason if body is not None else None
+    run = finalise(
+        db, user, period,
+        ack_open_exceptions_reason=ack,
+        ack_stale_preview_reason=ack_stale,
+    )
     db.commit()
     return PayrollRunOut.model_validate(run)
 

@@ -1,7 +1,8 @@
-"""Pay period schemas (Chapter 4 + Chapter 4H B-4d + B-3 + M6 Stage A).
+"""Pay period schemas (Chapter 4 + Chapter 4H B-4d + B-3 + M6 Stage A + M6 Part 2).
 
 B-3 adds PreviewEmployeeOut (single-employee preview detail).
 M6 Stage A adds PreviewOut.raw_employee_count.
+M6 Part 2 Stage 4 adds FinaliseIn.ack_stale_preview_reason.
 """
 from __future__ import annotations
 
@@ -54,10 +55,6 @@ class PreviewOut(BaseModel):
     unacknowledged_formulas: list[str] = Field(default_factory=list)
     items: list[PreviewSummaryRow]
     next_cursor: str | None = None
-    # M6 Stage A: authoritative company-wide employee count from
-    # run.rules_snapshot["employee_count"]. Distinguishes "no employees
-    # were previewed" from "employees were previewed but none are in the
-    # caller's scope".
     raw_employee_count: int = 0
 
 
@@ -90,6 +87,7 @@ class ReopenLogOut(BaseModel):
 
 class FinaliseIn(BaseModel):
     ack_open_exceptions_reason: str | None = Field(default=None, max_length=500)
+    ack_stale_preview_reason: str | None = Field(default=None, max_length=500)
 
 
 class PreviewEmployeeLineOut(BaseModel):
@@ -124,3 +122,5 @@ class PreviewEmployeeOut(BaseModel):
     as_of: date | None = None
     unacknowledged_formulas: list[str] = Field(default_factory=list)
     demo_values: bool = False
+
+# END OF FILE

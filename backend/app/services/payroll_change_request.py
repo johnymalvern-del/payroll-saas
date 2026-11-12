@@ -1,4 +1,4 @@
-"""Payroll change request service (Chapter 4, Bundle 004a-iv-a + iv-b + M6 Stage A).
+"""Payroll change request service (Chapter 4, Bundle 004a-iv-a + iv-b + M6 Stage A + M6 Part 2 Stage 2).
 
 F3: HR submits, payroll_admin approves, approver != requester. Pending
 requests never touch employee_earning / employee_deduction / employee fields.
@@ -18,6 +18,13 @@ _load_scoped_request. Order matters — scope is checked FIRST, before the
 assignment-child 409 and before the not-pending 409, so an out-of-scope
 request returns an indistinguishable 404 instead of leaking existence
 or status.
+
+M6 Part 2 Stage 2: _apply refuses with 409 locked_period_affects if
+approving the CR would alter a locked period. Effective-window overlap is
+used; the existing row's window is included for update/deactivate kinds
+because a shorten removes from the period and an extend adds to it.
+`employee_field_update` blocks if the employee has a payslip in any locked
+period. Malformed payloads fail closed.
 """
 from __future__ import annotations
 
@@ -320,6 +327,44 @@ def _reject_self_approval(request: PayrollChangeRequest, user: Any) -> None:
 def _apply(
     db: Session, request: PayrollChangeRequest, *, approver_user: Any,
 ) -> uuid.UUID:
+    # M6 Part 2 Stage 2: refuse approval if the change would alter a locked
+    # period. Guard runs before any write so a blocked CR leaves no residue.
+    #
+    # Residual concurrency note: this guard reads locked periods, but a
+    # concurrent finalise() that is turning an OPEN period into LOCKED can
+    # interleave with this read. Full closure of that race is Stage 4's job
+    # (content-hash comparison at finalise). See payroll_runner.finalise
+    # docstring.
+    from app.services.payroll_runner import _cr_could_affect_locked_periods
+
+    locked_period, reason = _cr_could_affect_locked_periods(db, request)
+    if locked_period is not None:
+        raise AppError(
+            "locked_period_affects",
+            f"approving this change request would alter locked period "
+            f"{locked_period.period_key!r}; reopen the period first",
+            409,
+            {
+                "period_id": str(locked_period.id),
+                "period_key": locked_period.period_key,
+                "cr_id": str(request.id),
+                "cr_kind": request.kind,
+            },
+        )
+    if reason is not None:
+        raise AppError(
+            "locked_period_affects",
+            f"cannot determine whether approving this change request would "
+            f"alter a locked period ({reason}); cancel or reject the request "
+            f"instead",
+            409,
+            {
+                "cr_id": str(request.id),
+                "cr_kind": request.kind,
+                "reason": reason,
+            },
+        )
+
     kind = request.kind
     p = request.payload
 

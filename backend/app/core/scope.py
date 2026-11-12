@@ -74,7 +74,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db.tenant.models.organisation import Branch, Department, Site
@@ -163,7 +163,11 @@ def _employees_in_scope(session: Session, scope_rows: list[UserScope]) -> set[uu
     if not clauses:
         return set()
 
-    rows = session.scalars(select(Employee.id).where(and_(True, *[]) if False else (clauses[0] if len(clauses) == 1 else __import__("sqlalchemy").or_(*clauses)))).all()
+    if len(clauses) == 1:
+        condition = clauses[0]
+    else:
+        condition = or_(*clauses)
+    rows = session.scalars(select(Employee.id).where(condition)).all()
     return set(rows)
 
 
@@ -425,6 +429,7 @@ def assert_site_in_scope(user: Any, site_id: uuid.UUID, session: Session) -> Non
             f"site {site_id} is outside the current user's scope"
         )
 
+
 # ---------------------------------------------------------------------------
 # Department scope (1C.7)
 # ---------------------------------------------------------------------------
@@ -516,5 +521,3 @@ def assert_department_in_scope(user: Any, department_id: uuid.UUID, session: Ses
         raise ScopeViolation(
             f"department {department_id} is outside the current user's scope"
         )
-
-# END OF FILE

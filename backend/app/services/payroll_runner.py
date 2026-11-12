@@ -4,9 +4,33 @@ B-3 additions: `_write_payslip` now persists one `PayslipLine` per
 `EarningLine` and per `DeductionLine` so `GET /payroll/pay-periods/{id}/
 preview/{employee_id}` can surface the actual line detail without
 recomputing.
+
+M6 Part 2 Stage 1: `run_preview`, `finalise` and `reopen` now take a
+`SELECT ... FOR UPDATE` on `pay_period` at the top of the function so
+concurrent calls serialize.
+
+M6 Part 2 Stage 2: `_cr_could_affect_locked_periods` supports the CR-
+approval guard in `payroll_change_request._apply`. Effective-window overlap
+with existing-row window included for update/deactivate kinds; field updates
+block on any locked payslip.
+
+M6 Part 2 Stage 3: `finalise` refuses with 409 `pending_change_requests_in_period`
+when any pending change request could affect the period if approved.
+
+M6 Part 2 Stage 4: `run_preview` stores a canonical `input_hash` in
+`PayrollRun.rules_snapshot`. `finalise` recomputes it and, if a preview run
+exists with a different hash, refuses with 409 `preview_stale` unless
+`ack_stale_preview_reason` is provided. This closes the residual race where
+inputs change between preview and finalise but the pending-CR gate cannot
+see them (approved CRs, direct employee edits, etc.).
+
+M6 Part 2 Stage 5 (F22): `run_preview_for_employee_as_of` now reads
+`deduction_type_code` from `DeductionLine.source_ref`.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -833,7 +857,459 @@ def _count_open_exceptions_in_period(
     return count, sample
 
 
+# ---------------------------------------------------------------------------
+# M6 Part 2 Stage 4 — canonical input hash for preview/finalise comparison
+#
+# The hash captures only the fields the calc pipeline actually reads. It
+# does NOT include:
+#   - exceptions (gate-only, not calc inputs)
+#   - formula_acks (gate-only)
+#   - cosmetic fields (labels, names, email, mobile)
+#   - statutory tables in the control DB (controlled release; re-preview
+#     is the operational answer if they update)
+#
+# Deterministic by construction: rows sorted by id, dicts sorted by key,
+# Decimals rendered via their DB-consistent string form, dates via
+# isoformat.
+# ---------------------------------------------------------------------------
+
+
+def _json_default(o):
+    if isinstance(o, Decimal):
+        return format(o, "f")
+    if isinstance(o, datetime):
+        return o.isoformat()
+    if isinstance(o, date):
+        return o.isoformat()
+    if isinstance(o, uuid.UUID):
+        return str(o)
+    raise TypeError(f"unhashable type in input snapshot: {type(o).__name__}")
+
+
+def _build_input_snapshot(db: Session, pay_period: PayPeriod) -> dict:
+    employees = list(db.scalars(
+        select(Employee).where(Employee.status != "terminated")
+    ).all())
+    employees.sort(key=lambda e: str(e.id))
+    emp_ids = [e.id for e in employees]
+
+    employee_data = [
+        {
+            "id": str(e.id),
+            "status": e.status,
+            "pay_basis": e.pay_basis,
+            "pay_frequency": e.pay_frequency,
+            "base_rate": str(e.base_rate) if e.base_rate is not None else None,
+            "uif_exempt": bool(e.uif_exempt),
+            "medical_scheme_members": int(e.medical_scheme_members or 0),
+            "contracted_weekly_hours": (
+                str(e.contracted_weekly_hours)
+                if e.contracted_weekly_hours is not None else None
+            ),
+            "date_of_birth": e.date_of_birth.isoformat() if e.date_of_birth else None,
+            "default_shift_id": (
+                str(e.default_shift_id) if e.default_shift_id else None
+            ),
+        }
+        for e in employees
+    ]
+
+    earnings = list(db.scalars(
+        select(EmployeeEarning).where(EmployeeEarning.employee_id.in_(emp_ids))
+    ).all()) if emp_ids else []
+    earnings.sort(key=lambda r: str(r.id))
+    earnings_data = [
+        {
+            "id": str(r.id),
+            "employee_id": str(r.employee_id),
+            "earning_type_id": str(r.earning_type_id),
+            "amount": str(r.amount) if r.amount is not None else None,
+            "rate": str(r.rate) if r.rate is not None else None,
+            "effective_from": r.effective_from.isoformat(),
+            "effective_to": r.effective_to.isoformat() if r.effective_to else None,
+            "is_active": bool(r.is_active),
+        }
+        for r in earnings
+    ]
+
+    earning_type_ids = {r.earning_type_id for r in earnings}
+    earning_types = list(db.scalars(
+        select(EarningType).where(EarningType.id.in_(earning_type_ids))
+    ).all()) if earning_type_ids else []
+    earning_types.sort(key=lambda t: str(t.id))
+    earning_types_data = [
+        {
+            "id": str(t.id),
+            "code": t.code,
+            "calc_method": t.calc_method,
+            "frequency": t.frequency,
+            "is_taxable": bool(t.is_taxable),
+            "counts_for_uif": bool(t.counts_for_uif),
+            "counts_for_sdl": bool(t.counts_for_sdl),
+        }
+        for t in earning_types
+    ]
+
+    deductions = list(db.scalars(
+        select(EmployeeDeduction).where(EmployeeDeduction.employee_id.in_(emp_ids))
+    ).all()) if emp_ids else []
+    deductions.sort(key=lambda r: str(r.id))
+    deductions_data = [
+        {
+            "id": str(r.id),
+            "employee_id": str(r.employee_id),
+            "deduction_type_id": str(r.deduction_type_id),
+            "amount": str(r.amount),
+            "effective_from": r.effective_from.isoformat(),
+            "effective_to": r.effective_to.isoformat() if r.effective_to else None,
+            "is_active": bool(r.is_active),
+        }
+        for r in deductions
+    ]
+
+    deduction_type_ids = {r.deduction_type_id for r in deductions}
+    deduction_types = list(db.scalars(
+        select(DeductionType).where(DeductionType.id.in_(deduction_type_ids))
+    ).all()) if deduction_type_ids else []
+    deduction_types.sort(key=lambda t: str(t.id))
+    deduction_types_data = [
+        {
+            "id": str(t.id),
+            "code": t.code,
+            "category": t.category,
+            "is_pre_tax": bool(t.is_pre_tax),
+            "priority": int(t.priority),
+        }
+        for t in deduction_types
+    ]
+
+    history = list(db.scalars(
+        select(EmployeePayHistory).where(
+            EmployeePayHistory.employee_id.in_(emp_ids),
+            EmployeePayHistory.status == "approved",
+        )
+    ).all()) if emp_ids else []
+    history.sort(key=lambda h: str(h.id))
+    history_data = [
+        {
+            "id": str(h.id),
+            "employee_id": str(h.employee_id),
+            "base_rate": str(h.base_rate),
+            "effective_from": h.effective_from.isoformat(),
+        }
+        for h in history
+    ]
+
+    days = list(db.scalars(
+        select(AttendanceDay).where(
+            AttendanceDay.employee_id.in_(emp_ids),
+            AttendanceDay.work_date >= pay_period.start_date,
+            AttendanceDay.work_date <= pay_period.end_date,
+        )
+    ).all()) if emp_ids else []
+    days.sort(key=lambda d: str(d.id))
+    days_data = [
+        {
+            "id": str(d.id),
+            "employee_id": str(d.employee_id),
+            "work_date": d.work_date.isoformat(),
+            "status": d.status,
+            "worked_minutes": int(d.worked_minutes or 0),
+            "shift_id": str(d.shift_id) if d.shift_id else None,
+        }
+        for d in days
+    ]
+
+    day_ids = [d.id for d in days]
+    segments = list(db.scalars(
+        select(AttendanceSegment).where(
+            AttendanceSegment.attendance_day_id.in_(day_ids)
+        )
+    ).all()) if day_ids else []
+    segments.sort(key=lambda s: str(s.id))
+    segments_data = [
+        {
+            "id": str(s.id),
+            "attendance_day_id": str(s.attendance_day_id),
+            "kind": s.kind,
+            "day_type": s.day_type,
+            "tier": str(s.tier) if s.tier is not None else None,
+            "minutes": int(s.minutes),
+            "rate_method": s.rate_method,
+            "rate_value": str(s.rate_value) if s.rate_value is not None else None,
+            "overtime_status": s.overtime_status,
+            "local_date": s.local_date.isoformat(),
+        }
+        for s in segments
+    ]
+
+    shift_ids = set()
+    for e in employees:
+        if e.default_shift_id is not None:
+            shift_ids.add(e.default_shift_id)
+    for d in days:
+        if d.shift_id is not None:
+            shift_ids.add(d.shift_id)
+    shifts = list(db.scalars(
+        select(Shift).where(Shift.id.in_(shift_ids))
+    ).all()) if shift_ids else []
+    shifts.sort(key=lambda s: str(s.id))
+    shifts_data = [
+        {
+            "id": str(s.id),
+            "length_minutes": int(s.length_minutes) if s.length_minutes is not None else None,
+            "overtime_requires_approval": (
+                bool(s.overtime_requires_approval)
+                if s.overtime_requires_approval is not None else None
+            ),
+        }
+        for s in shifts
+    ]
+
+    settings = db.scalar(select(PayrollSettings).limit(1))
+    settings_data = None
+    if settings is not None:
+        settings_data = {
+            "sdl_applies": (
+                bool(settings.sdl_applies) if settings.sdl_applies is not None else None
+            ),
+            "age_reference_date": settings.age_reference_date,
+            "net_pay_floor": str(settings.net_pay_floor),
+            "attendance_earning_map": dict(settings.attendance_earning_map or {}),
+            "unpaid_day_behaviour": settings.unpaid_day_behaviour,
+            "unpaid_day_formula_code": settings.unpaid_day_formula_code,
+            "public_holiday_unworked_monthly": settings.public_holiday_unworked_monthly,
+            "public_holiday_paid": (
+                bool(settings.public_holiday_paid)
+                if settings.public_holiday_paid is not None else None
+            ),
+            "leave_authoritative_source": settings.leave_authoritative_source,
+            "monthly_hourly_derivation_formula_code":
+                settings.monthly_hourly_derivation_formula_code,
+            "leave_earning_for_monthly": (
+                bool(settings.leave_earning_for_monthly)
+                if settings.leave_earning_for_monthly is not None else None
+            ),
+        }
+
+    return {
+        "period": {
+            "id": str(pay_period.id),
+            "start_date": pay_period.start_date.isoformat(),
+            "end_date": pay_period.end_date.isoformat(),
+            "pay_date": pay_period.pay_date.isoformat(),
+        },
+        "employees": employee_data,
+        "earnings": earnings_data,
+        "earning_types": earning_types_data,
+        "deductions": deductions_data,
+        "deduction_types": deduction_types_data,
+        "pay_history": history_data,
+        "attendance_days": days_data,
+        "attendance_segments": segments_data,
+        "shifts": shifts_data,
+        "settings": settings_data,
+    }
+
+
+def _compute_input_hash(db: Session, pay_period: PayPeriod) -> str:
+    payload = _build_input_snapshot(db, pay_period)
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=_json_default,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# M6 Part 2 Stage 3 — pending CR gate helpers (unchanged from Round 2)
+# ---------------------------------------------------------------------------
+
+
+def _parse_date(s: str) -> date:
+    return date.fromisoformat(s)
+
+
+def _parse_date_or_none(s: str | None) -> date | None:
+    return date.fromisoformat(s) if s else None
+
+
+def _windows_overlap(
+    a_from: date, a_to: date | None,
+    b_from: date, b_to: date,
+) -> bool:
+    """Inclusive overlap test. a_to=None means ongoing."""
+    if a_from > b_to:
+        return False
+    if a_to is not None and a_to < b_from:
+        return False
+    return True
+
+
+def _load_target_row(db: Session, cr) -> EmployeeEarning | EmployeeDeduction | None:
+    payload = cr.payload or {}
+    target_id = payload.get("target_id")
+    if not target_id:
+        return None
+    try:
+        tid = uuid.UUID(str(target_id))
+    except (ValueError, TypeError):
+        return None
+    if cr.kind.startswith("employee_earning_"):
+        return db.scalar(
+            select(EmployeeEarning).where(
+                EmployeeEarning.id == tid,
+                EmployeeEarning.employee_id == cr.employee_id,
+            )
+        )
+    if cr.kind.startswith("employee_deduction_"):
+        return db.scalar(
+            select(EmployeeDeduction).where(
+                EmployeeDeduction.id == tid,
+                EmployeeDeduction.employee_id == cr.employee_id,
+            )
+        )
+    return None
+
+
+def _resolve_cr_windows(
+    db: Session, cr,
+) -> list[tuple[date | None, date | None]] | None:
+    payload = cr.payload or {}
+    kind = cr.kind
+    try:
+        if kind in ("employee_earning_create", "employee_deduction_create"):
+            f = payload.get("effective_from")
+            if not f:
+                return None
+            return [(
+                _parse_date(f),
+                _parse_date_or_none(payload.get("effective_to")),
+            )]
+        if kind in ("employee_earning_update", "employee_deduction_update"):
+            existing = _load_target_row(db, cr)
+            if existing is None:
+                return None
+            if "effective_from" in payload and payload["effective_from"] is not None:
+                proposed_from = _parse_date(payload["effective_from"])
+            else:
+                proposed_from = existing.effective_from
+            if "effective_to" in payload and payload["effective_to"] is not None:
+                proposed_to = _parse_date(payload["effective_to"])
+            else:
+                proposed_to = existing.effective_to
+            return [
+                (existing.effective_from, existing.effective_to),
+                (proposed_from, proposed_to),
+            ]
+        if kind in (
+            "employee_earning_deactivate", "employee_deduction_deactivate",
+        ):
+            existing = _load_target_row(db, cr)
+            if existing is None:
+                return None
+            return [(existing.effective_from, existing.effective_to)]
+        return None
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _cr_affects_target_period(
+    db: Session, cr, period: PayPeriod,
+) -> bool:
+    if cr.kind == "employee_field_update":
+        return True
+    windows = _resolve_cr_windows(db, cr)
+    if windows is None:
+        return True
+    if not windows:
+        return True
+    for wf, wt in windows:
+        if wf is None:
+            return True
+        if _windows_overlap(wf, wt, period.start_date, period.end_date):
+            return True
+    return False
+
+
+def _count_pending_change_requests_in_period(
+    db: Session, pay_period: PayPeriod,
+) -> tuple[int, list[dict]]:
+    from app.db.tenant.models.change_request import PayrollChangeRequest
+
+    rows = db.scalars(
+        select(PayrollChangeRequest).where(
+            PayrollChangeRequest.status == "pending",
+        )
+    ).all()
+    blockers = [
+        cr for cr in rows
+        if _cr_affects_target_period(db, cr, pay_period)
+    ]
+    count = len(blockers)
+    sample = [
+        {
+            "id": str(cr.id),
+            "kind": cr.kind,
+            "employee_id": str(cr.employee_id),
+        }
+        for cr in blockers[:5]
+    ]
+    return count, sample
+
+
+def _cr_could_affect_locked_periods(
+    db: Session, cr,
+) -> tuple[PayPeriod | None, str | None]:
+    if cr.kind == "employee_field_update":
+        locked = db.scalar(
+            select(PayPeriod)
+            .join(Payslip, Payslip.pay_period_id == PayPeriod.id)
+            .where(
+                Payslip.employee_id == cr.employee_id,
+                PayPeriod.status == "locked",
+            )
+            .limit(1)
+        )
+        if locked is not None:
+            return locked, None
+        return None, None
+
+    windows = _resolve_cr_windows(db, cr)
+    if windows is None:
+        return None, "payload_unresolvable"
+    if not windows:
+        return None, "no_effective_windows"
+    for wf, wt in windows:
+        if wf is None:
+            return None, "effective_from_missing"
+        stmt = (
+            select(PayPeriod)
+            .where(PayPeriod.status == "locked")
+            .where(PayPeriod.end_date >= wf)
+        )
+        if wt is not None:
+            stmt = stmt.where(PayPeriod.start_date <= wt)
+        locked = db.scalar(stmt.limit(1))
+        if locked is not None:
+            return locked, None
+    return None, None
+
+
+def _lock_period(db: Session, pay_period_id: uuid.UUID) -> PayPeriod:
+    return db.execute(
+        select(PayPeriod)
+        .where(PayPeriod.id == pay_period_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one()
+
+
 def run_preview(db: Session, user, pay_period: PayPeriod) -> PayrollRun:
+    pay_period = _lock_period(db, pay_period.id)
+
     if pay_period.status == "locked":
         raise AppError("period_locked", "Cannot preview a finalised period; reopen it first", 409)
 
@@ -859,10 +1335,14 @@ def run_preview(db: Session, user, pay_period: PayPeriod) -> PayrollRun:
     db.flush()
 
     warnings = _formula_warnings(db)
+    # Stage 4: hash the input state BEFORE the pipeline writes anything
+    # calc-affecting. The hash captures the reviewed inputs; finalise
+    # compares against a fresh hash of current inputs.
     run.rules_snapshot = {
         "preview": True,
         "unacknowledged_formulas": warnings,
         "employee_count": 0,
+        "input_hash": _compute_input_hash(db, pay_period),
     }
 
     employees = _in_scope_employees(db)
@@ -893,7 +1373,11 @@ def run_preview(db: Session, user, pay_period: PayPeriod) -> PayrollRun:
     write_audit(
         db, user,
         entity_type="payroll_run", entity_id=run.id, action="preview",
-        new_value={"pay_period_id": str(pay_period.id), "employee_count": run.rules_snapshot["employee_count"]},
+        new_value={
+            "pay_period_id": str(pay_period.id),
+            "employee_count": run.rules_snapshot["employee_count"],
+            "input_hash": run.rules_snapshot.get("input_hash"),
+        },
     )
     return run
 
@@ -901,7 +1385,10 @@ def run_preview(db: Session, user, pay_period: PayPeriod) -> PayrollRun:
 def finalise(
     db: Session, user, pay_period: PayPeriod,
     *, ack_open_exceptions_reason: str | None = None,
+    ack_stale_preview_reason: str | None = None,
 ) -> PayrollRun:
+    pay_period = _lock_period(db, pay_period.id)
+
     if pay_period.status == "locked":
         raise AppError("period_locked", "Period is already finalised", 409)
 
@@ -926,6 +1413,60 @@ def finalise(
             )
         ack_used = True
 
+    # Stage 3: pending CRs.
+    pending_cr_count, pending_cr_sample = _count_pending_change_requests_in_period(
+        db, pay_period,
+    )
+    if pending_cr_count > 0:
+        raise AppError(
+            "pending_change_requests_in_period",
+            f"{pending_cr_count} pending change request(s) could affect this "
+            f"period; approve, reject, or cancel them before finalising",
+            409,
+            {"count": pending_cr_count, "sample": pending_cr_sample},
+        )
+
+    # Stage 4: stale-preview gate.
+    #
+    # Compute the current input hash. If a preview run exists and its stored
+    # hash differs, the admin reviewed a different set of inputs. Block
+    # unless acknowledged.
+    #
+    # No preview run at all → skip. This preserves the pre-Stage-4 contract
+    # where finalise without a prior preview was allowed.
+    #
+    # Residual race (documented, not fully closed): a CR approved between
+    # the pending-CR gate above and the hash snapshot below lands inside
+    # the current transaction's window; the hash will not see it, and the
+    # resulting payslips will reflect it. Fully closing that requires CR
+    # approval to take the pay_period row lock — Stage 2b territory.
+    current_hash = _compute_input_hash(db, pay_period)
+    stale_used = False
+    preview_run = db.scalar(
+        select(PayrollRun)
+        .where(
+            PayrollRun.pay_period_id == pay_period.id,
+            PayrollRun.kind == "preview",
+        )
+        .order_by(PayrollRun.started_at.desc())
+        .limit(1)
+    )
+    if preview_run is not None:
+        stored_hash = (preview_run.rules_snapshot or {}).get("input_hash")
+        if stored_hash != current_hash:
+            if not ack_stale_preview_reason or not ack_stale_preview_reason.strip():
+                raise AppError(
+                    "preview_stale",
+                    "inputs changed since last preview; re-run preview or pass "
+                    "ack_stale_preview_reason to override",
+                    409,
+                    {
+                        "preview_hash": stored_hash,
+                        "current_hash": current_hash,
+                    },
+                )
+            stale_used = True
+
     _purge_preview(db, pay_period.id)
     ensure_system_earning_types(db)
 
@@ -948,7 +1489,12 @@ def finalise(
     db.flush()
 
     employees = _in_scope_employees(db)
-    run.rules_snapshot = {"final": True, "employee_count": 0, "revision": rev}
+    run.rules_snapshot = {
+        "final": True,
+        "employee_count": 0,
+        "revision": rev,
+        "input_hash": current_hash,
+    }
 
     for emp in employees:
         prior = db.scalar(
@@ -992,12 +1538,18 @@ def finalise(
             "employee_count": run.rules_snapshot["employee_count"],
             "open_exception_count_at_finalise": open_count,
             "ack_open_exceptions_reason": ack_open_exceptions_reason if ack_used else None,
+            "pending_cr_count_at_finalise": pending_cr_count,
+            "stale_preview_acked": bool(stale_used),
+            "ack_stale_preview_reason": ack_stale_preview_reason if stale_used else None,
+            "input_hash": current_hash,
         },
     )
     return run
 
 
 def reopen(db: Session, user, pay_period: PayPeriod, reason: str) -> PeriodReopenLog:
+    pay_period = _lock_period(db, pay_period.id)
+
     if pay_period.status != "locked":
         raise AppError("period_not_locked", "Only a locked period can be reopened", 409)
 
@@ -1047,12 +1599,6 @@ def run_preview_for_employee_as_of(
     employee: Employee,
     as_of: date,
 ) -> dict:
-    """Read-only payslip-so-far for one employee, up to `as_of`.
-
-    No PayrollRun row, no Payslip row, no audit, no preview purge.
-    Refuses locked periods (409). Monthly salaried refused with typed
-    reason until the proration rule is confirmed (see §10).
-    """
     if pay_period.status == "locked":
         raise AppError(
             "period_locked",
@@ -1131,7 +1677,7 @@ def run_preview_for_employee_as_of(
     ]
     base["deductions"] = [
         {
-            "deduction_type_code": getattr(d, "code", "") or "",
+            "deduction_type_code": (d.source_ref or {}).get("deduction_type_code", ""),
             "deduction_type_name": getattr(d, "label", "") or "",
             "amount": d.amount,
         }
