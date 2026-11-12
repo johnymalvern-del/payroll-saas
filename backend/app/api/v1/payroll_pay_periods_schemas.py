@@ -1,6 +1,7 @@
-"""Pay period schemas (Chapter 4 + Chapter 4H B-4d + B-3).
+"""Pay period schemas (Chapter 4 + Chapter 4H B-4d + B-3 + M6 Stage A).
 
 B-3 adds PreviewEmployeeOut (single-employee preview detail).
+M6 Stage A adds PreviewOut.raw_employee_count.
 """
 from __future__ import annotations
 
@@ -53,6 +54,11 @@ class PreviewOut(BaseModel):
     unacknowledged_formulas: list[str] = Field(default_factory=list)
     items: list[PreviewSummaryRow]
     next_cursor: str | None = None
+    # M6 Stage A: authoritative company-wide employee count from
+    # run.rules_snapshot["employee_count"]. Distinguishes "no employees
+    # were previewed" from "employees were previewed but none are in the
+    # caller's scope".
+    raw_employee_count: int = 0
 
 
 class PayrollRunOut(BaseModel):

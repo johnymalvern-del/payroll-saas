@@ -33,6 +33,7 @@ export type PreviewOut = {
   unacknowledged_formulas: string[];
   items: PreviewSummaryRow[];
   next_cursor: string | null;
+  raw_employee_count: number;
 };
 
 export type PreviewEmployeeLineOut = {
@@ -118,7 +119,7 @@ export type SalarySheetOut = {
   pay_period_id: string;
   pay_period_key: string;
   pay_period_status: string;
-  figures_state: "preview" | "finalised" | "no_preview";
+  figures_state: "preview" | "finalised" | "no_preview" | "preview_out_of_scope";
   run_id: string | null;
   revision: number | null;
   items: SalarySheetRow[];

@@ -122,3 +122,55 @@ locks + schema hardening) are on disk and committed, but are not
 recorded here in the pasted copy of the file. Flagged, not filled —
 the git history at `c600884` is the authoritative record. To be
 backfilled in a dedicated docs pass if desired.
+
+## Payroll / Scope (M6 Stage A)
+
+**HR default scope is fail-open — documented risk, not fixed in M6.**
+
+- `app/core/scope.py:109-113` — HR users with **zero** `UserScope` rows
+  receive company-wide employee visibility. This is intentional existing
+  behaviour relied upon by `tests/test_seed_demo.py:194` (the demo HR user
+  is seeded without scope rows).
+- Tenant provisioning **must** add `UserScope` rows for any HR user who
+  should be branch-restricted. Missing rows are not detected — the HR
+  user simply sees every employee in every branch.
+- Manager scope (`app/core/scope.py:115-121`) is fail-**closed** — a
+  manager with no direct reports and no scope rows sees nobody. The
+  asymmetry is deliberate but means HR onboarding requires deliberate
+  scope-row setup.
+- **Known business/security risk requiring a separately planned future
+  milestone.** A fail-closed default for HR would need: a
+  `scope_type="company"` sentinel or a `Company.hr_default_scope`
+  setting, a demo-seed update, a migration to backfill existing tenants,
+  and an admin UI for `UserScope` management. None of those exist today;
+  changing the default without them would break access for every tenant
+  where HR currently relies on the fail-open behaviour. Documented here,
+  not fixed in M6 Stage A.
+
+### Preview response scope (M6 Stage A)
+
+`POST /payroll/pay-periods/{id}/preview` — the **calculation** remains
+company-wide (`payroll_runner.run_preview` and `_in_scope_employees`
+unchanged), but the **HTTP response** is scope-filtered via
+`apply_scope(..., model=Payslip)`. A branch-scoped HR triggering a
+preview runs the full company calculation but only receives their
+in-scope employees in `items[]`. Payroll administrators receive all
+employees. M5 salary-sheet behaviour unchanged.
+
+### Change-request scope (M6 Stage A)
+
+`GET /payroll/change-requests` (list) and `GET /payroll/change-requests/{id}`
+(detail) now enforce employee scope. Approve / reject / cancel enforce
+scope via the private `_load_scoped_request` helper — 404 for out-of-scope
+requests, indistinguishable from nonexistent records. Submission (`POST`)
+already enforced scope and is unchanged. The permission matrix is
+unchanged; approve/reject remain payroll-admin-only, with the added
+`assert_in_scope` as defence-in-depth for any future permission grant.
+
+### Empty-preview state (M6 Stage A)
+
+`PreviewOut.raw_employee_count` (from `run.rules_snapshot["employee_count"]`)
+and `SalarySheetOut.figures_state="preview_out_of_scope"` distinguish
+"no preview has been generated" from "a preview exists but no employees
+in the caller's scope." Both backend and frontend surface this
+distinction.

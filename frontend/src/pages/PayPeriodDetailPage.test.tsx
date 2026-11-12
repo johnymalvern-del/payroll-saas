@@ -138,6 +138,33 @@ describe("PayPeriodDetailPage", () => {
     expect(result.textContent ?? "").toMatch(/Ada/);
   });
 
+  it("preview shows out-of-scope banner when caller's scope is empty", async () => {
+    const PREVIEW_OUT_OF_SCOPE = {
+      ...PREVIEW,
+      items: [],
+      raw_employee_count: 2,
+    };
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      const method = requestMethod(input);
+      if (url.endsWith("/payroll/pay-periods/pp1") && method === "GET") {
+        return jr(PERIOD_OPEN);
+      }
+      if (url.includes("/preview") && method === "POST") {
+        return jr(PREVIEW_OUT_OF_SCOPE);
+      }
+      return jr({});
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    await screen.findByText(/Pay period 2026-01/);
+    fireEvent.click(screen.getByTestId("pay-period-preview"));
+    const banner = await screen.findByTestId(
+      "pay-period-preview-out-of-scope",
+    );
+    expect(banner.textContent ?? "").toMatch(/access scope/i);
+  }, MODAL_TEST_TIMEOUT_MS);
+
   it(
     "finalise shows ack field after open_exceptions_in_period error",
     async () => {

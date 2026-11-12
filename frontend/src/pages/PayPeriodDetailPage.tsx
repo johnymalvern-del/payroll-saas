@@ -278,7 +278,16 @@ export function PayPeriodDetailPage() {
               </Alert>
             ) : null}
             {previewData.items.length === 0 ? (
-              <Text c="dimmed">{strings.payPeriods.previewEmpty}</Text>
+              previewData.raw_employee_count > 0 ? (
+                <Alert
+                  color={colors.warning}
+                  data-testid="pay-period-preview-out-of-scope"
+                >
+                  {strings.payPeriods.previewOutOfScope}
+                </Alert>
+              ) : (
+                <Text c="dimmed">{strings.payPeriods.previewEmpty}</Text>
+              )
             ) : (
               <Table.ScrollContainer minWidth={600}>
                 <Table striped withTableBorder>

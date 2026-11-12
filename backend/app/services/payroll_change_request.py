@@ -1,4 +1,4 @@
-"""Payroll change request service (Chapter 4, Bundle 004a-iv-a + iv-b).
+"""Payroll change request service (Chapter 4, Bundle 004a-iv-a + iv-b + M6 Stage A).
 
 F3: HR submits, payroll_admin approves, approver != requester. Pending
 requests never touch employee_earning / employee_deduction / employee fields.
@@ -11,8 +11,13 @@ Approval writes through in the same transaction as the status flip.
 
 M3 Stage C: individual approve / reject / cancel refuse to act on any
 change request whose assignment_id IS NOT NULL. These children are audit
-envelopes controlled exclusively by the salary-assignment service
-(design §5.11 Rule 1).
+envelopes controlled exclusively by the salary-assignment service.
+
+M6 Stage A: approve / reject / cancel now enforce employee scope via
+_load_scoped_request. Order matters — scope is checked FIRST, before the
+assignment-child 409 and before the not-pending 409, so an out-of-scope
+request returns an indistinguishable 404 instead of leaking existence
+or status.
 """
 from __future__ import annotations
 
@@ -114,7 +119,7 @@ SUBMIT_SCHEMAS: dict[str, type[BaseModel]] = {
 
 
 # ---------------------------------------------------------------------------
-# Assignment-child guard (design §5.11 Rule 1)
+# Assignment-child guard (design §5.11 Rule 1) + M6 Stage A scope guard
 # ---------------------------------------------------------------------------
 
 _ASSIGNMENT_CHILD_GUARD: dict[str, str] = {
@@ -124,24 +129,49 @@ _ASSIGNMENT_CHILD_GUARD: dict[str, str] = {
 }
 
 
-def _guard_not_assignment_child(
-    db: Session, request_id: uuid.UUID, action: str,
-) -> None:
-    """Refuse if the target change request is controlled by an assignment.
+def _load_scoped_request(
+    db: Session, user: Any, request_id: uuid.UUID,
+) -> PayrollChangeRequest:
+    """Load the request; 404 if missing or outside the caller's employee scope.
 
-    Runs before _load_pending so a terminal assignment-linked child also
-    refuses with the batch-specific code, not `not_pending`.
+    Scope is checked FIRST — before any status or assignment-child guard —
+    so an out-of-scope request cannot leak its existence or status by
+    responding differently from a nonexistent one.
     """
-    row = db.scalar(select(PayrollChangeRequest).where(
-        PayrollChangeRequest.id == request_id,
-    ))
+    row = db.scalar(
+        select(PayrollChangeRequest).where(
+            PayrollChangeRequest.id == request_id,
+        )
+    )
     if row is None:
         raise AppError("not_found", "Change request not found", 404)
+    try:
+        assert_in_scope(user, row.employee_id, db)
+    except ScopeViolation:
+        raise AppError("not_found", "Change request not found", 404) from None
+    return row
+
+
+def _guard_assignment_child(row: PayrollChangeRequest, action: str) -> None:
+    """Refuse if the target change request is controlled by an assignment.
+
+    Called after _load_scoped_request so an out-of-scope assignment-linked
+    request has already responded 404 (existence not leaked).
+    """
     if row.assignment_id is not None:
         raise AppError(
             _ASSIGNMENT_CHILD_GUARD[action],
             f"This change request is controlled by salary assignment "
             f"{row.assignment_id}; use the assignment {action} endpoint",
+            409,
+        )
+
+
+def _guard_pending(row: PayrollChangeRequest) -> None:
+    if row.status != "pending":
+        raise AppError(
+            "not_pending",
+            f"Change request is {row.status}, cannot transition",
             409,
         )
 
@@ -208,85 +238,75 @@ def submit_change_request(
 def approve_change_request(
     db: Session, user: Any, request_id: uuid.UUID,
 ) -> tuple[PayrollChangeRequest, uuid.UUID]:
-    _guard_not_assignment_child(db, request_id, "approve")
-    request = _load_pending(db, request_id)
-    _reject_self_approval(request, user)
+    row = _load_scoped_request(db, user, request_id)  # 404 if missing or out-of-scope
+    _guard_assignment_child(row, "approve")            # 409 if assignment-linked
+    _guard_pending(row)                                 # 409 if not pending
+    _reject_self_approval(row, user)                    # 409 if self-approval
 
-    applied_id = _apply(db, request, approver_user=user)
-    request.status = "approved"
-    request.decided_by_user_id = getattr(user, "id", None)
-    request.decided_at = datetime.utcnow()
-    request.applied_entity_id = applied_id
-    request.row_version += 1
+    applied_id = _apply(db, row, approver_user=user)
+    row.status = "approved"
+    row.decided_by_user_id = getattr(user, "id", None)
+    row.decided_at = datetime.utcnow()
+    row.applied_entity_id = applied_id
+    row.row_version += 1
     db.flush()
     write_audit(
         db, user,
-        entity_type="payroll_change_request", entity_id=request.id, action="approve",
+        entity_type="payroll_change_request", entity_id=row.id, action="approve",
         old_value={"status": "pending"},
         new_value={"status": "approved", "applied_entity_id": str(applied_id)},
     )
-    return request, applied_id
+    return row, applied_id
 
 
 def reject_change_request(
     db: Session, user: Any, request_id: uuid.UUID, note: str,
 ) -> PayrollChangeRequest:
-    _guard_not_assignment_child(db, request_id, "reject")
-    request = _load_pending(db, request_id)
-    _reject_self_approval(request, user)
-    request.status = "rejected"
-    request.decided_by_user_id = getattr(user, "id", None)
-    request.decided_at = datetime.utcnow()
-    request.decision_note = note
-    request.row_version += 1
+    row = _load_scoped_request(db, user, request_id)  # 404 if missing or out-of-scope
+    _guard_assignment_child(row, "reject")             # 409 if assignment-linked
+    _guard_pending(row)                                 # 409 if not pending
+    _reject_self_approval(row, user)                    # 409 if self-approval
+
+    row.status = "rejected"
+    row.decided_by_user_id = getattr(user, "id", None)
+    row.decided_at = datetime.utcnow()
+    row.decision_note = note
+    row.row_version += 1
     db.flush()
     write_audit(
         db, user,
-        entity_type="payroll_change_request", entity_id=request.id, action="reject",
+        entity_type="payroll_change_request", entity_id=row.id, action="reject",
         old_value={"status": "pending"},
         new_value={"status": "rejected", "note": note},
     )
-    return request
+    return row
 
 
 def cancel_change_request(
     db: Session, user: Any, request_id: uuid.UUID,
 ) -> PayrollChangeRequest:
-    _guard_not_assignment_child(db, request_id, "cancel")
-    request = _load_pending(db, request_id)
-    if request.requested_by_user_id != getattr(user, "id", None):
+    row = _load_scoped_request(db, user, request_id)  # 404 if missing or out-of-scope
+    _guard_assignment_child(row, "cancel")             # 409 if assignment-linked
+    _guard_pending(row)                                 # 409 if not pending
+
+    if row.requested_by_user_id != getattr(user, "id", None):
         raise AppError(
             "not_requester", "Only the requester may cancel a pending change", 403,
         )
-    request.status = "cancelled"
-    request.row_version += 1
+    row.status = "cancelled"
+    row.row_version += 1
     db.flush()
     write_audit(
         db, user,
-        entity_type="payroll_change_request", entity_id=request.id, action="cancel",
+        entity_type="payroll_change_request", entity_id=row.id, action="cancel",
         old_value={"status": "pending"}, new_value={"status": "cancelled"},
     )
-    return request
+    return row
 
 
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
-
-def _load_pending(db: Session, request_id: uuid.UUID) -> PayrollChangeRequest:
-    request = db.scalar(
-        select(PayrollChangeRequest).where(PayrollChangeRequest.id == request_id)
-    )
-    if request is None:
-        raise AppError("not_found", "Change request not found", 404)
-    if request.status != "pending":
-        raise AppError(
-            "not_pending",
-            f"Change request is {request.status}, cannot transition",
-            409,
-        )
-    return request
-
 
 def _reject_self_approval(request: PayrollChangeRequest, user: Any) -> None:
     if request.requested_by_user_id == getattr(user, "id", None):

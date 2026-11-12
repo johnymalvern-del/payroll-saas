@@ -1,15 +1,9 @@
-"""M5 — salary-sheet endpoint tests.
+"""M6-BE-1 / M5 — salary-sheet endpoint tests (extended by M6 Stage A).
 
-Covers: permission matrix assertion, preview/finalised figures_state,
-basic vs additional split from PayslipLine, reconciliation with Payslip
-totals, empty periods, employee search, and cursor pagination.
-
-Self-contained: builds all DB rows via ORM models directly. No import
-of *_mk_emp / _mk_user_for helpers from other test modules — those
-helper names are not stable across test modules in this repo. The
-session fixture is probed defensively against every known
-shared-session fixture name; if none is present, DB tests skip with a
-clear reason.
+Covers: permission matrix, preview/finalised figures_state, basic vs
+additional split from PayslipLine, reconciliation with Payslip totals,
+empty periods, employee search, cursor pagination, and M6 Stage A's
+preview_out_of_scope state.
 """
 from __future__ import annotations
 
@@ -23,21 +17,15 @@ import pytest
 from app.api.v1.payroll_pay_periods import get_salary_sheet
 from app.core.errors import AppError
 from app.core.permissions import ROLE_PERMISSIONS, Permission
+from app.db.tenant.models.organisation import Branch
 from app.db.tenant.models.pay import (
     PayPeriod, PayrollRun, Payslip, PayslipLine,
 )
-from app.db.tenant.models.people import Employee
+from app.db.tenant.models.people import Employee, User, UserScope
 
 
 @pytest.fixture()
 def session(request):
-    """Return whichever shared-session fixture this repo defines.
-
-    The repo has multiple test modules with different fixture names; the
-    exact one is not stable across modules. Probe the known names in
-    likelihood order. Skip if none is available — but that only affects
-    DB-dependent tests, not the permission-matrix test.
-    """
     for name in (
         "_leave_session_shared",
         "_payroll_session_shared",
@@ -58,10 +46,29 @@ def session(request):
 
 
 def _admin():
-    """Minimal fake user object; the endpoint only reads role/id/employee_id."""
     return SimpleNamespace(
         id=uuid.uuid4(), role="payroll_admin", employee_id=None,
     )
+
+
+def _mk_branch(session, branch_id: uuid.UUID | None = None) -> uuid.UUID:
+    """Get-or-create a Branch row so Employee.branch_id FK is satisfiable.
+
+    Idempotent: safe when two employees share a branch or when a test
+    pre-creates one before wiring emp.branch_id.
+    """
+    bid = branch_id or uuid.uuid4()
+    if session.get(Branch, bid) is not None:
+        return bid
+    session.add(Branch(
+        id=bid,
+        name=f"Branch {bid.hex[:12]}",
+        code=f"B-{bid.hex[:12]}",
+        is_active=True,
+        row_version=1,
+    ))
+    session.flush()
+    return bid
 
 
 def _mk_period(
@@ -99,13 +106,6 @@ def _mk_run(
 
 
 def _mk_employee(session, code: str = "E1") -> Employee:
-    """Minimal Employee row that satisfies the model's non-null columns.
-
-    Only the fields that prior test fixtures have shown to be required
-    or defaulted are set. If a field is genuinely required at the DB
-    level and omitted here, the test will surface it — fix in the next
-    round with a one-line addition, not a design change.
-    """
     e = Employee(
         id=uuid.uuid4(),
         employee_code=code,
@@ -202,7 +202,6 @@ def _mk_line(
 
 
 def test_payroll_preview_permission_matrix():
-    """Endpoint gate is require_permission(PAYROLL_PREVIEW). Verify roles."""
     assert Permission.PAYROLL_PREVIEW not in ROLE_PERMISSIONS["employee"]
     assert Permission.PAYROLL_PREVIEW not in ROLE_PERMISSIONS["manager"]
     assert Permission.PAYROLL_PREVIEW not in ROLE_PERMISSIONS["auditor"]
@@ -211,7 +210,7 @@ def test_payroll_preview_permission_matrix():
 
 
 # ─────────────────────────────────────────────────────────────────────
-# DB-dependent tests
+# DB-dependent tests (existing)
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -282,7 +281,6 @@ def test_reconciles_with_payslip_fields(session):
     session.commit()
     out = get_salary_sheet(period_id=period.id, db=session, user=_admin())
     row = out.items[0]
-    # Every numeric field is copied from Payslip — no recomputation.
     ps = session.query(Payslip).filter(Payslip.employee_id == emp.id).one()
     assert row.gross == ps.gross
     assert row.paye == ps.paye
@@ -337,3 +335,76 @@ def test_period_not_found(session):
             period_id=uuid.uuid4(), db=session, user=_admin(),
         )
     assert e.value.code == "not_found"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# M6 Stage A additions — preview_out_of_scope state
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _mk_hr_user(session, scope_type: str, scope_id: uuid.UUID) -> User:
+    u = User(
+        id=uuid.uuid4(),
+        username=f"hr-{uuid.uuid4().hex[:6]}",
+        password_hash="x",
+        role="hr",
+        is_active=True,
+        must_change_password=False,
+        row_version=1,
+    )
+    session.add(u)
+    session.flush()
+    session.add(UserScope(
+        id=uuid.uuid4(),
+        user_id=u.id,
+        scope_type=scope_type,
+        scope_id=scope_id,
+    ))
+    session.flush()
+    return u
+
+
+def test_preview_out_of_scope_state(session):
+    """Preview exists but caller's scope resolves to zero employees."""
+    branch_a, branch_b, branch_empty = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    _mk_branch(session, branch_a)
+    _mk_branch(session, branch_b)
+    period = _mk_period(session)
+    run = _mk_run(session, period)
+    emp_a = _mk_employee(session, code="EA")
+    emp_b = _mk_employee(session, code="EB")
+    emp_a.branch_id = branch_a
+    emp_b.branch_id = branch_b
+    session.flush()
+    _mk_payslip(session, period=period, run=run, emp=emp_a)
+    _mk_payslip(session, period=period, run=run, emp=emp_b)
+    hr = _mk_hr_user(session, "branch", branch_empty)
+    out = get_salary_sheet(
+        period_id=period.id, db=session, user=hr, q=None,
+        limit=100, cursor=None,
+    )
+    assert out.items == []
+    assert out.figures_state == "preview_out_of_scope"
+
+
+def test_preview_out_of_scope_state_locked_period_returns_finalised(session):
+    """Locked period + empty in-scope result keeps figures_state=finalised."""
+    branch_a, branch_b, branch_empty = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    _mk_branch(session, branch_a)
+    _mk_branch(session, branch_b)
+    period = _mk_period(session, status="locked")
+    run = _mk_run(session, period, kind="final")
+    emp_a = _mk_employee(session, code="EA")
+    emp_b = _mk_employee(session, code="EB")
+    emp_a.branch_id = branch_a
+    emp_b.branch_id = branch_b
+    session.flush()
+    _mk_payslip(session, period=period, run=run, emp=emp_a, status="current")
+    _mk_payslip(session, period=period, run=run, emp=emp_b, status="current")
+    hr = _mk_hr_user(session, "branch", branch_empty)
+    out = get_salary_sheet(
+        period_id=period.id, db=session, user=hr, q=None,
+        limit=100, cursor=None,
+    )
+    assert out.items == []
+    assert out.figures_state == "finalised"

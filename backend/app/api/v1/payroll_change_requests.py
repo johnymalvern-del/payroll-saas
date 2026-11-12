@@ -1,7 +1,14 @@
-"""Payroll change requests (Chapter 4, Bundle 004a-iv-a).
+"""Payroll change requests (Chapter 4, Bundle 004a-iv-a + M6 Stage A).
 
 HR submits via PAY_RATE_REQUEST, payroll_admin approves via PAY_RATE_APPROVE.
 List/get via PAY_RATE_VIEW (hr, payroll_admin, auditor).
+
+M6 Stage A: list and get are scope-filtered via apply_scope /
+assert_in_scope on PayrollChangeRequest.employee_id. A scoped HR user
+sees only in-scope requests in the list and receives 404 for out-of-scope
+single-request retrieval (indistinguishable from a nonexistent record).
+The mutation endpoints (approve/reject/cancel) enforce the same scope in
+the service layer — see app.services.payroll_change_request._load_scoped_request.
 """
 from __future__ import annotations
 
@@ -22,6 +29,7 @@ from app.api.v1.payroll_change_requests_schemas import (
 )
 from app.core.errors import AppError
 from app.core.permissions import Permission, require_permission
+from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
 from app.db.tenant.models.change_request import PayrollChangeRequest
 from app.services.payroll_change_request import (
     approve_change_request,
@@ -81,6 +89,9 @@ def list_requests(
         q = q.where(PayrollChangeRequest.status == status)
     if employee_id is not None:
         q = q.where(PayrollChangeRequest.employee_id == employee_id)
+    # M6 Stage A: scope filter. Composes with employee_id above and cursor
+    # below. payroll_admin's _scoped_target_ids returns None → no-op.
+    q = apply_scope(q, user, db, model=PayrollChangeRequest)
     if cursor is not None:
         q = q.where(PayrollChangeRequest.id > _decode_cursor(cursor))
     q = q.order_by(PayrollChangeRequest.id.asc()).limit(limit + 1)
@@ -106,6 +117,11 @@ def get_request(
     )
     if row is None:
         raise AppError("not_found", "Change request not found", 404)
+    # M6 Stage A: 404 for out-of-scope requests so existence is not leaked.
+    try:
+        assert_in_scope(user, row.employee_id, db)
+    except ScopeViolation:
+        raise AppError("not_found", "Change request not found", 404) from None
     return ChangeRequestOut.model_validate(row)
 
 

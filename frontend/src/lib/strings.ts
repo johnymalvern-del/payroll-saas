@@ -429,6 +429,8 @@ export const strings = {
     detailLoadError: "Could not load this pay period.",
     previewTitle: "Preview",
     previewEmpty: "No employees in the current run.",
+    previewOutOfScope:
+      "A preview exists for this period, but none of its employees fall within your access scope.",
     previewError: "Could not generate the preview.",
     previewLoadMore: "Load more",
     previewDetailButton: "Detail",

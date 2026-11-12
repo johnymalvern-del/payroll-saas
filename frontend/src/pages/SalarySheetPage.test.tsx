@@ -218,6 +218,30 @@ describe("SalarySheetPage", () => {
     );
   });
 
+  it("shows out-of-scope banner when figures_state=preview_out_of_scope", async () => {
+    setupMock({
+      sheet: buildSheet({
+        figures_state: "preview_out_of_scope",
+        items: [],
+      }),
+    });
+    renderPage();
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("salary-sheet-preview-out-of-scope"),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByTestId("salary-sheet-preview-banner"),
+    ).toBeNull();
+    expect(
+      screen.queryByTestId("salary-sheet-no-preview"),
+    ).toBeNull();
+    expect(
+      screen.queryByTestId("salary-sheet-finalised-banner"),
+    ).toBeNull();
+  });
+
   it("renders one row per payslip with the canonical figures", async () => {
     setupMock();
     renderPage();

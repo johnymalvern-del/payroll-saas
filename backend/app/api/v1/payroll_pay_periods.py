@@ -1,4 +1,4 @@
-"""Pay period endpoints (Chapter 4 Bundle 004b-a + Chapter 4H B-4d + B-3).
+"""Pay period endpoints (Chapter 4 Bundle 004b-a + Chapter 4H B-4d + B-3 + M5 + M6-A).
 
 B-3 adds:
   GET /payroll/pay-periods/{period_id}/preview/{employee_id}
@@ -7,9 +7,18 @@ B-3 adds:
 M5 adds:
   GET /payroll/pay-periods/{period_id}/salary-sheet
     Company-wide read-only salary sheet for a period, backed by persisted
-    Payslip rows. Preview figures when the period is open, finalised
-    figures when the period is locked. Basic vs Additional earnings are
-    derived only by summing already-persisted PayslipLine rows.
+    Payslip rows.
+
+M6 Stage A adds:
+  - POST /{period_id}/preview: response is scope-filtered via apply_scope
+    on Payslip.employee_id. The CALCULATION remains company-wide
+    (payroll_runner.run_preview / _in_scope_employees unchanged) so a
+    branch-scoped HR trigger does not replace the company-wide preview
+    with a partial one.
+  - PreviewOut.raw_employee_count: authoritative company-wide employee
+    count from run.rules_snapshot["employee_count"].
+  - SalarySheetOut.figures_state gains "preview_out_of_scope" when a
+    preview exists but no employees are within the caller's scope.
 """
 from __future__ import annotations
 
@@ -21,7 +30,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from app.api.deps import TenantDbDep
 from app.api.v1.payroll_pay_periods_schemas import (
@@ -186,6 +195,9 @@ def preview_pay_period(
     if period is None:
         raise AppError("not_found", "Pay period not found", 404)
 
+    # M6 Stage A: the CALCULATION remains company-wide. run_preview and
+    # _in_scope_employees are untouched so a branch-scoped HR trigger does
+    # not replace the company-wide preview run with a partial one.
     run = run_preview(db, user, period)
     db.commit()
 
@@ -195,6 +207,10 @@ def preview_pay_period(
         .where(Payslip.payroll_run_id == run.id)
         .order_by(Payslip.id.asc())
     )
+    # M6 Stage A: the HTTP RESPONSE is scope-filtered. For payroll_admin
+    # and HR-without-scope rows this is a no-op; for scoped HR it narrows
+    # items to their authorised employees.
+    q = apply_scope(q, user, db, model=Payslip)
     if cursor is not None:
         q = q.where(Payslip.id > _decode_cursor(cursor))
     q = q.limit(limit + 1)
@@ -213,6 +229,7 @@ def preview_pay_period(
         unacknowledged_formulas=run.rules_snapshot.get("unacknowledged_formulas", []),
         items=items,
         next_cursor=next_cursor,
+        raw_employee_count=int(run.rules_snapshot.get("employee_count", 0) or 0),
     )
 
 
@@ -223,12 +240,7 @@ def _preview_as_of(
     employee_id: uuid.UUID,
     as_of: date | None = None,
 ) -> PreviewEmployeeOut:
-    """Read-only payslip-so-far for one employee, as of `as_of`.
-
-    Used by GET .../preview/{employee_id}?as_of=YYYY-MM-DD. Does not
-    persist anything (no PayrollRun, no Payslip, no audit). Delegates to
-    payroll_runner.run_preview_for_employee_as_of.
-    """
+    """Read-only payslip-so-far for one employee, as of `as_of`."""
     pay_period = db.get(PayPeriod, period_id)
     if pay_period is None:
         raise AppError("record_not_found", "Pay period not found", 404)
@@ -350,25 +362,12 @@ def get_salary_sheet(
     limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
     cursor: str | None = Query(None),
 ) -> SalarySheetOut:
-    """M5 — read-only monthly salary sheet.
+    """M5 + M6 Stage A — read-only monthly salary sheet.
 
     Reads persisted Payslip rows for the period; never calls the pipeline.
-    Preview payslips for an open period, current payslips for a locked one.
-    basic_earnings and additional_earnings are sums of PayslipLine amounts
-    split on source_ref.earning_type_code == 'BASE_MONTHLY'. Every other
-    figure is copied from Payslip, so it matches the payslip PDF exactly.
-
-    Ordering is (Employee.employee_code ASC, Payslip.id ASC). The cursor
-    encodes both fields and the filter is a compound predicate matching
-    that order — Payslip.id alone is insufficient because it is a random
-    UUID and does not track the employee_code-sorted position.
+    All figures come from Payslip / PayslipLine. Response is scope-filtered
+    via apply_scope(model=Payslip); payroll_admin sees the full company.
     """
-    # Normalise FastAPI Query defaults. When this handler is called through
-    # HTTP, FastAPI has already resolved these to plain str/int/None. When
-    # unit tests call the function directly, the parameter defaults are
-    # fastapi.params.Query objects rather than their resolved values; the
-    # isinstance checks below restore the intended defaults so the body of
-    # the function sees exactly what it would see over HTTP.
     q = q if isinstance(q, str) else None
     cursor = cursor if isinstance(cursor, str) else None
     limit = limit if isinstance(limit, int) else _DEFAULT_LIMIT
@@ -421,7 +420,6 @@ def get_salary_sheet(
         last_ps, last_emp = pairs[-1]
         next_cursor = _encode_sheet_cursor(last_emp.employee_code, last_ps.id)
 
-    # Sum PayslipLine rows for Basic vs Additional. One batched query.
     payslip_ids = [p.id for p, _e in pairs]
     split_by_ps: dict[uuid.UUID, tuple[Decimal, Decimal]] = {}
     if payslip_ids:
@@ -473,8 +471,23 @@ def get_salary_sheet(
             net=p.net,
         ))
 
+    # M6 Stage A: distinguish "no preview has been generated" from "a
+    # preview exists but no employees are within the caller's scope".
+    # Only applies to the preview state — finalised periods keep their
+    # existing figures_state="finalised" even if the caller's scope
+    # resolves to zero employees.
     if figures_state == "preview" and not items and not next_cursor:
-        figures_state = "no_preview"
+        raw_preview_count = db.scalar(
+            select(func.count())
+            .select_from(Payslip)
+            .where(
+                Payslip.pay_period_id == period.id,
+                Payslip.status == "preview",
+            )
+        ) or 0
+        figures_state = (
+            "preview_out_of_scope" if raw_preview_count > 0 else "no_preview"
+        )
 
     return SalarySheetOut(
         pay_period_id=period.id,

@@ -209,6 +209,12 @@ export function SalarySheetPage() {
         </Alert>
       ) : null}
 
+      {head?.figures_state === "preview_out_of_scope" ? (
+        <Alert color="yellow" data-testid="salary-sheet-preview-out-of-scope">
+          {strings.payPeriods.previewOutOfScope}
+        </Alert>
+      ) : null}
+
       <Paper withBorder p="md">
         <Stack gap="sm">
           <Group justify="space-between" align="end">
