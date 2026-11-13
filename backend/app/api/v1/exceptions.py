@@ -5,6 +5,13 @@ B-6 adds multi-value `type` filtering:
   ?type=missing_out&type=too_long      (repeated param)
   ?type=missing_out,too_long           (comma-separated)
 Both forms accepted; union is filtered. Unknown codes ignored.
+
+Stage A period protection: resolve_exception and bulk_resolve_exception
+both call payroll_period_guard.assert_dates_not_locked BEFORE any write
+(including before _approve_pending_segments on the overtime_unapproved
+path). This closes the confirmed Batch 2C gap where overtime approval
+could mutate AttendanceSegment.overtime_status on a date inside a locked
+PayPeriod without consulting PayPeriod.status.
 """
 from __future__ import annotations
 
@@ -35,6 +42,7 @@ from app.db.tenant.models.platform import AuditLog
 from app.api.v1.attendance_engine import (
     _day_snapshot, _persist_adjustment, _sync_exceptions, recompute_day,
 )
+from app.services.payroll_period_guard import assert_dates_not_locked
 from zoneinfo import ZoneInfo
 from app.db.tenant.models.people import Employee
 
@@ -410,6 +418,16 @@ def resolve_exception(
     employee = db.get(Employee, exc.employee_id)
     if employee is None:
         raise AppError("record_not_found", "Employee not found", 404)
+
+    # Stage A: reject before any write, including before the
+    # overtime_unapproved branch's direct _approve_pending_segments
+    # mutation. This is the confirmed Batch 2C bypass.
+    assert_dates_not_locked(
+        db,
+        employee_id=exc.employee_id,
+        dates=[exc.work_date],
+    )
+
     day = _day_for(db, exc.employee_id, exc.work_date)
     request_id = getattr(request.state, "request_id", None)
     adjustment_id: uuid.UUID | None = None
@@ -510,6 +528,20 @@ def _pre_validate_bulk_item(db, user, item, exc):
     day = _day_for(db, exc.employee_id, exc.work_date)
     if day is not None and day.locked:
         return "day_locked"
+    # Stage A: period-level protection. The day-level check above only
+    # catches dates whose AttendanceDay exists and has locked=True.
+    # Finalisation does not set AttendanceDay.locked; and rest days /
+    # non-working holidays have no AttendanceDay row at all. This call
+    # covers both cases by locking and inspecting the PayPeriod rows
+    # that cover the requested date.
+    try:
+        assert_dates_not_locked(
+            db,
+            employee_id=exc.employee_id,
+            dates=[exc.work_date],
+        )
+    except AppError as e:
+        return e.code
     if item.action == "dismiss":
         if item.note is None or len(item.note.strip()) < 3:
             return "note_required"

@@ -26,12 +26,40 @@ B2: work_date is the local date the shift STARTS. Segments carry local_date
 
 B-5/B-11: DayOut carries `site_timezone`, resolved once per request via
 app.services.site_timezone.site_timezone_map.
+
+Stage A (recompute period protection, Option 2):
+  The recompute endpoint calls payroll_period_guard.assert_dates_not_locked
+  once at the top of the request, over the FULL inclusive requested date
+  range, AFTER target selection / empty-target early return and BEFORE
+  ensure_days. It locks every overlapping PayPeriod row (open or locked)
+  FOR UPDATE in deterministic id order; if any is locked, the entire
+  request is rejected with 409 day_locked and nothing is written.
+
+  Consequence for the response contract: a request whose range straddles
+  an open period and a locked period is rejected as a whole — the caller
+  must split into per-period ranges. `skipped_locked` in RecomputeOut now
+  only counts days whose AttendanceDay.locked=True with a PayPeriod whose
+  status is NOT "locked"; that state does not occur in current production
+  code (finalisation sets PayPeriod.status, not AttendanceDay.locked), so
+  skipped_locked will normally be 0. The field is retained for response
+  compatibility.
+
+  Known residual race (accepted, not closed by Stage A): ensure_days calls
+  db.commit() at its end, releasing the guard's FOR UPDATE lock on the
+  PayPeriod rows before the first recompute_day executes. A concurrent
+  finalise on the same period can complete in that window, flipping status
+  to "locked"; the per-date recompute loop that follows would then write
+  to a day whose period just became locked. Fully closing this requires
+  either making ensure_days transaction-scoped (attendance_engine.py
+  change, out of Stage A scope) or introducing a request-scoped
+  transaction primitive. Documented and deferred.
 """
 from __future__ import annotations
 
 import base64
 import json
 import uuid
+from collections.abc import Iterator
 from datetime import date, timedelta
 from typing import Annotated, Any
 
@@ -53,6 +81,7 @@ from app.core.permissions import Permission, require_permission
 from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
 from app.db.tenant.models.attendance import AttendanceDay, AttendanceSegment
 from app.db.tenant.models.people import Employee
+from app.services.payroll_period_guard import assert_dates_not_locked
 from app.services.site_timezone import site_timezone_map
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
@@ -119,6 +148,13 @@ def _decode_cursor(cursor: str) -> tuple[date, uuid.UUID]:
         raise AppError(
             "invalid_cursor", "The pagination cursor is malformed", 400
         ) from None
+
+
+def _enumerate_dates(from_date: date, to_date: date) -> Iterator[date]:
+    cur = from_date
+    while cur <= to_date:
+        yield cur
+        cur += timedelta(days=1)
 
 
 @router.get("/day", response_model=DayListOut)
@@ -293,6 +329,25 @@ def recompute(
             from_date=payload.from_date,
             to_date=payload.to_date,
         )
+
+    # Stage A: reject the whole request if any requested date overlaps a
+    # locked pay period. Runs BEFORE ensure_days, so no AttendanceDay row
+    # is created and no recompute_day is called for a locked date.
+    #
+    # Residual race (accepted by Option 2, not closed by Stage A):
+    # ensure_days calls db.commit() at its end, which releases the
+    # FOR UPDATE locks this guard acquired on the PayPeriod rows. A
+    # concurrent finalise on the same period can complete between
+    # ensure_days' commit and the first recompute_day below, flipping
+    # PayPeriod.status to "locked"; the per-date recompute loop then
+    # runs without a period lock. Fully closing this requires making
+    # ensure_days transaction-scoped (an attendance_engine.py change
+    # out of Stage A scope) or a request-scoped transaction primitive.
+    assert_dates_not_locked(
+        db,
+        employee_id=None,
+        dates=_enumerate_dates(payload.from_date, payload.to_date),
+    )
 
     target_ids = [e.id for e in targets]
 

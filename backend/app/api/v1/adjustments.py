@@ -13,6 +13,14 @@ here and in the bulk endpoint.
 Locked days (C3): 409 day_locked with a message pointing to the payroll
 period feature for corrections after close.
 
+Stage A period protection: both the single endpoint and the bulk
+pre-validator call payroll_period_guard.assert_dates_not_locked, which
+locks every overlapping PayPeriod row (open or locked) FOR UPDATE in
+deterministic id order and raises day_locked if any is locked. This
+catches dates whose AttendanceDay.locked is False or absent (rest days,
+non-working holidays, un-materialised dates) that would otherwise slip
+past the day-level check.
+
 Reuses _apply_adjustment / _day_for / _validate_reason from exceptions.py so
 single adjustments and exception-driven adjustments produce identical audit
 rows and identical locked-day errors.
@@ -47,6 +55,7 @@ from app.core.permissions import Permission, require_permission
 from app.core.scope import ScopeViolation, assert_in_scope
 from app.db.tenant.models.attendance import Adjustment
 from app.db.tenant.models.people import Employee
+from app.services.payroll_period_guard import assert_dates_not_locked
 
 router = APIRouter(prefix="/attendance/adjustments", tags=["attendance-adjustments"])
 
@@ -108,6 +117,15 @@ def create_adjustment(
 ) -> AdjustmentResultOut:
     _require_not_self(user, payload.employee_id)
     _require_scope(db, user, payload.employee_id)
+    # Stage A: reject before any write if the date is inside a locked
+    # payroll period. Works even when AttendanceDay does not exist for
+    # this (employee, date). Holds a FOR UPDATE lock on the PayPeriod
+    # row(s) until this request's transaction commits or rolls back.
+    assert_dates_not_locked(
+        db,
+        employee_id=payload.employee_id,
+        dates=[payload.work_date],
+    )
     _validate_common(db, payload)
     request_id = getattr(request.state, "request_id", None)
     adj_id, day_status = _apply_adjustment(
@@ -148,6 +166,20 @@ def _pre_validate_adjust_item(db, user, item):
     day = _day_for(db, item.employee_id, item.work_date)
     if day is not None and day.locked:
         return "day_locked"
+    # Stage A: period-level protection. The day-level check above only
+    # catches dates whose AttendanceDay exists and has locked=True.
+    # Finalisation does not set AttendanceDay.locked; and rest days /
+    # non-working holidays have no AttendanceDay row at all. This call
+    # covers both cases by locking and inspecting the PayPeriod rows
+    # that cover the requested date.
+    try:
+        assert_dates_not_locked(
+            db,
+            employee_id=item.employee_id,
+            dates=[item.work_date],
+        )
+    except AppError as e:
+        return e.code
     try:
         _validate_reason(db, item.reason_code, item.note)
     except AppError as e:
@@ -263,5 +295,3 @@ def bulk_adjust(
         dry_run=False,
         token=computed,
     )
-
-# END OF FILE

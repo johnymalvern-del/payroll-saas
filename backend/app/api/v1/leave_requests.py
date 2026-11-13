@@ -31,6 +31,17 @@ approvers act on the same step concurrently — the second decider blocks
 until the first commits, then finds the step no longer pending and is
 refused with 409.
 
+Stage A (period protection): the approved-request branch of
+cancel_leave_request queries LeaveRequestDay once, computes taken_future,
+then calls check_days_not_locked BEFORE the first LeaveBalance mutation.
+A locked pay period rejects cancellation before any balance change,
+adjustment, attendance recompute, or request-status change. The guard's
+PayPeriod FOR UPDATE lock is held through _commit_or_map at the end of
+the endpoint. The approval path is protected via
+apply_leave_to_attendance's own check_days_not_locked call, so no change
+to decide_step / decide_shortcut / advance / _final_approval_side_effects
+is required.
+
 Errors:
   not_found                    - request/type/step missing or out of scope
   no_employee_record           - capture-on-behalf body missing employee_id
@@ -882,14 +893,16 @@ def cancel_leave_request(
         request.row_version = request.row_version + 1
         db.flush()
     elif request.status == "approved":
+        # Stage A: query the affected days once, reuse for taken_future and
+        # for the period-lock guard, so no duplicate query and no
+        # inconsistency between the two checks.
+        affected_days = list(db.scalars(
+            select(LeaveRequestDay)
+            .where(LeaveRequestDay.leave_request_id == request.id)
+            .order_by(LeaveRequestDay.work_date)
+        ))
         taken_future = [
-            d.work_date
-            for d in db.scalars(
-            select(LeaveRequestDay).where(
-                LeaveRequestDay.leave_request_id == request.id
-            )
-        )
-            if d.work_date <= date.today()
+            d.work_date for d in affected_days if d.work_date <= date.today()
         ]
         if taken_future:
             raise AppError(
@@ -898,6 +911,14 @@ def cancel_leave_request(
                 409,
                 {"started_days": [d.isoformat() for d in taken_future]},
             )
+        # Stage A: guard before the first LeaveBalance mutation. A locked
+        # period rejects cancellation before any balance change, any
+        # revert adjustment, any attendance recompute, and any
+        # request-status change. The same transaction holds the PayPeriod
+        # FOR UPDATE lock until _commit_or_map at the end of the endpoint.
+        check_days_not_locked(
+            db, request.employee_id, [d.work_date for d in affected_days]
+        )
         lt = _ensure_no_hour_type(db, request)
         balance = _ensure_balance(db, request, lt)
         balance.taken = max(_zero(), balance.taken - request.days_requested)
