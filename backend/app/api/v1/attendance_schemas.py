@@ -3,6 +3,17 @@
 B-5/B-11: DayOut carries `site_timezone` so the day list and day detail
 both surface the employee's site timezone (falling back to the company
 default). DayDetailOut inherits the field from DayOut.
+
+Stage B (day correction UI, D2=b): DayOut carries `period_locked`.
+This is the PayPeriod.status == "locked" state for the day, distinct
+from the day-level AttendanceDay.locked flag. Finalisation sets
+PayPeriod.status, not AttendanceDay.locked, so a day in a closed payroll
+period will normally have `locked=False, period_locked=True`. The day
+panel uses `period_locked` to disable the correction form with a clear
+reason instead of letting HR submit and receive a 409 day_locked.
+Populated in api/v1/attendance.py::get_day from a read-only PayPeriod
+lookup (no FOR UPDATE — the Stage A write guard remains the
+authoritative protection on the write paths).
 """
 from __future__ import annotations
 import uuid
@@ -46,6 +57,9 @@ class DayOut(BaseModel):
     computed_at: datetime
     # B-5/B-11: employee's site timezone, falling back to company default.
     site_timezone: str | None = None
+    # Stage B: PayPeriod.status == "locked" for this day, distinct from
+    # the day-level `locked` above. Populated by api/v1/attendance.py.
+    period_locked: bool = False
 
 
 class DayDetailOut(DayOut):

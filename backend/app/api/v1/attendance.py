@@ -53,6 +53,17 @@ Stage A (recompute period protection, Option 2):
   either making ensure_days transaction-scoped (attendance_engine.py
   change, out of Stage A scope) or introducing a request-scoped
   transaction primitive. Documented and deferred.
+
+Stage B (day correction UI, D2=b):
+  get_day now populates `period_locked` on DayDetailOut by checking
+  whether the day falls inside a PayPeriod with status == "locked". This
+  is a READ-ONLY query with NO `FOR UPDATE` — the Stage A write guard
+  remains the authoritative protection on write paths. The `period_locked`
+  field is presented to the frontend so it can disable the correction
+  form and explain why, instead of letting HR submit a correction and
+  receive a 409 day_locked. The day-level `locked` field
+  (AttendanceDay.locked) is unchanged and continues to be reported
+  separately.
 """
 from __future__ import annotations
 
@@ -80,6 +91,7 @@ from app.core.errors import AppError
 from app.core.permissions import Permission, require_permission
 from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
 from app.db.tenant.models.attendance import AttendanceDay, AttendanceSegment
+from app.db.tenant.models.pay import PayPeriod
 from app.db.tenant.models.people import Employee
 from app.services.payroll_period_guard import assert_dates_not_locked
 from app.services.site_timezone import site_timezone_map
@@ -94,6 +106,7 @@ def _to_out(
     d: AttendanceDay,
     *,
     site_timezone: str | None = None,
+    period_locked: bool = False,
 ) -> DayOut:
     return DayOut(
         id=d.id,
@@ -113,6 +126,7 @@ def _to_out(
         row_version=d.row_version,
         computed_at=d.computed_at,
         site_timezone=site_timezone,
+        period_locked=period_locked,
     )
 
 
@@ -155,6 +169,29 @@ def _enumerate_dates(from_date: date, to_date: date) -> Iterator[date]:
     while cur <= to_date:
         yield cur
         cur += timedelta(days=1)
+
+
+def _period_locked_for(db: Any, work_date: date) -> bool:
+    """Read-only check: does any PayPeriod with status='locked' cover work_date?
+
+    Deliberately NO FOR UPDATE — this is a read-only signal for the UI so
+    it can disable the correction form with a clear message. The Stage A
+    write guard (payroll_period_guard.assert_dates_not_locked) remains the
+    authoritative protection on write paths; this function does not, and
+    must not, provide any write guarantee.
+
+    A False return here does not mean a subsequent write will succeed:
+    the PayPeriod could flip to locked between this read and the write.
+    Stage A's write guard is what stops that — never this helper.
+    """
+    hit = db.scalar(
+        select(PayPeriod.id)
+        .where(PayPeriod.start_date <= work_date)
+        .where(PayPeriod.end_date >= work_date)
+        .where(PayPeriod.status == "locked")
+        .limit(1)
+    )
+    return hit is not None
 
 
 @router.get("/day", response_model=DayListOut)
@@ -299,7 +336,8 @@ def get_day(
         )
     ).all()
     tz = site_timezone_map(db, [employee_id]).get(employee_id)
-    base = _to_out(day, site_timezone=tz)
+    period_locked = _period_locked_for(db, work_date)
+    base = _to_out(day, site_timezone=tz, period_locked=period_locked)
     return DayDetailOut(
         **base.model_dump(),
         segments=[_seg_to_out(s) for s in segs],

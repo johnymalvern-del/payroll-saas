@@ -1,3 +1,4 @@
+
 export const EXCEPTION_TYPE_ORDER = [
   "missing_out",
   "missing_in",
@@ -184,6 +185,28 @@ export const strings = {
       confidence: "Confidence",
       exceptions: "Exceptions",
       noExceptions: "No exceptions.",
+      correctThisDay: "Correct this day",
+      correctExpand: "Correct this day",
+      correctCollapse: "Hide correction form",
+      correctSaveSuccess: "Correction saved.",
+      correctSaveError: "Could not save the correction.",
+      correctLockedDay: "This day is locked and cannot be corrected.",
+      correctLockedPeriod:
+        "The payroll period containing this day is closed. Reopen it to make corrections.",
+      correctErrorDayLocked:
+        "The payroll period is closed — reopen required.",
+      correctErrorInvalidReason:
+        "The reason code is no longer valid. Reload the form.",
+      correctErrorNoteRequired:
+        "A note of at least 10 characters is required for reason 'other'.",
+      correctErrorGeneric: "Could not save the correction.",
+      correctCancel: "Cancel",
+      correctConfirmTitle: "Review correction",
+      correctConfirmBody:
+        "Review the proposed correction before saving. This will write an adjustment and recalculate this day.",
+      correctBack: "Back",
+      correctSave: "Save correction",
+      correctSavedFor: (reasonLabel: string) => `Correction saved — ${reasonLabel}`,
     },
     daily: {
       status: "Status",

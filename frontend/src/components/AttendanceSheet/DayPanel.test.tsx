@@ -53,6 +53,7 @@ describe("DayPanel", () => {
           shift_id: "sh1", flags: [], source_version: 1, locked: false,
           row_version: 1, computed_at: "2026-11-05T06:00:00Z",
           site_timezone: "Africa/Johannesburg",
+          period_locked: false,
           segments: [
             { id: "sg1", attendance_day_id: "d1", local_date: "2026-11-04",
               day_type: "weekday", kind: "normal", tier: 1, minutes: 480,
@@ -69,16 +70,22 @@ describe("DayPanel", () => {
         return jr({ items: [], next_cursor: null });
       if (url.includes("/shifts"))
         return jr({ items: [{ id: "sh1", name: "Day 08:00-17:00" }] });
+      if (url.includes("/attendance/reason-codes"))
+        return jr({ items: [
+          { code: "system_correction", label: "System correction", requires_note: false },
+          { code: "forgot_clock", label: "Forgot clock", requires_note: false },
+        ]});
       return jr({});
     });
     renderPanel();
     expect(await screen.findByText("Thabo Mokoena")).toBeInTheDocument();
     expect(screen.getByText(/T001/)).toBeInTheDocument();
-    expect(await screen.findByText("worked")).toBeInTheDocument();
+    // "worked" appears twice once DayCorrection's AdjustmentForm mounts:
+    // the day-status badge, and the outcome Select option. We assert at
+    // least one match — the intent is that the day status is rendered.
+    expect((await screen.findAllByText("worked")).length).toBeGreaterThan(0);
     expect(screen.getByText("normal")).toBeInTheDocument();
     expect(screen.getByText("overtime")).toBeInTheDocument();
-    // Shift section: label is deterministic; name may be the resolved
-    // shift name OR the id-prefix fallback depending on query timing.
     expect(await screen.findByText("Shift:")).toBeInTheDocument();
     expect(
       screen.queryByText(/Day 08:00-17:00/) ?? screen.queryByText("sh1"),
@@ -97,6 +104,7 @@ describe("DayPanel", () => {
       if (url.includes("/attendance/exceptions"))
         return jr({ items: [], next_cursor: null });
       if (url.includes("/shifts")) return jr({ items: [] });
+      if (url.includes("/attendance/reason-codes")) return jr({ items: [] });
       return jr({});
     });
     renderPanel();
@@ -116,7 +124,9 @@ describe("DayPanel", () => {
           worked_minutes: 540, normal_minutes: 480, overtime_minutes: 60, raw_minutes: 540,
           shift_id: null, flags: ["missing_out"], source_version: 1, locked: false,
           row_version: 1, computed_at: "2026-11-05T06:00:00Z",
-          site_timezone: "Africa/Johannesburg", segments: [],
+          site_timezone: "Africa/Johannesburg",
+          period_locked: false,
+          segments: [],
         });
       }
       if (url.includes("/employees/e1"))
@@ -124,6 +134,7 @@ describe("DayPanel", () => {
       if (url.includes("/attendance/exceptions"))
         return jr({ items: [{ id: "ex1", type: "missing_out", message: "No clock-out", status: "open" }], next_cursor: null });
       if (url.includes("/shifts")) return jr({ items: [] });
+      if (url.includes("/attendance/reason-codes")) return jr({ items: [] });
       return jr({});
     });
     renderPanel();
@@ -141,7 +152,9 @@ describe("DayPanel", () => {
           worked_minutes: 540, normal_minutes: 480, overtime_minutes: 60, raw_minutes: 540,
           shift_id: null, flags: [], source_version: 1, locked: false,
           row_version: 1, computed_at: "2026-11-05T06:00:00Z",
-          site_timezone: "Africa/Johannesburg", segments: [],
+          site_timezone: "Africa/Johannesburg",
+          period_locked: false,
+          segments: [],
         });
       }
       if (url.includes("/employees/e1"))
@@ -149,10 +162,116 @@ describe("DayPanel", () => {
       if (url.includes("/attendance/exceptions"))
         return jr({ items: [], next_cursor: null });
       if (url.includes("/shifts")) return jr({ items: [] });
+      if (url.includes("/attendance/reason-codes")) return jr({ items: [] });
       return jr({});
     });
     renderPanel();
     expect(await screen.findByText("X Y")).toBeInTheDocument();
     expect(screen.queryByText(/adjusted/i)).not.toBeInTheDocument();
+  });
+
+  // ------------------------------------------------------------------
+  // Stage B additions: DayCorrection integration
+  // ------------------------------------------------------------------
+
+  it("renders the DayCorrection section when the day is not locked", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.includes("/attendance/day/")) {
+        return jr({
+          id: "d1", employee_id: "e1", work_date: "2026-11-04", status: "worked",
+          first_in: "2026-11-04T06:00:00Z", last_out: "2026-11-04T15:00:00Z",
+          worked_minutes: 540, normal_minutes: 480, overtime_minutes: 60, raw_minutes: 540,
+          shift_id: null, flags: [], source_version: 1, locked: false,
+          row_version: 1, computed_at: "2026-11-05T06:00:00Z",
+          site_timezone: "Africa/Johannesburg",
+          period_locked: false,
+          segments: [],
+        });
+      }
+      if (url.includes("/employees/e1"))
+        return jr({ id: "e1", first_name: "X", last_name: "Y", employee_code: "T001" });
+      if (url.includes("/attendance/exceptions"))
+        return jr({ items: [], next_cursor: null });
+      if (url.includes("/shifts")) return jr({ items: [] });
+      if (url.includes("/attendance/reason-codes"))
+        return jr({ items: [
+          { code: "system_correction", label: "System correction", requires_note: false },
+        ]});
+      return jr({});
+    });
+    renderPanel();
+    expect(await screen.findByTestId("day-correction-toggle")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("day-correction-locked-alert"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the period-locked state when period_locked is true", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.includes("/attendance/day/")) {
+        return jr({
+          id: "d1", employee_id: "e1", work_date: "2026-11-04", status: "worked",
+          first_in: "2026-11-04T06:00:00Z", last_out: "2026-11-04T15:00:00Z",
+          worked_minutes: 540, normal_minutes: 480, overtime_minutes: 60, raw_minutes: 540,
+          shift_id: null, flags: [], source_version: 1, locked: false,
+          row_version: 1, computed_at: "2026-11-05T06:00:00Z",
+          site_timezone: "Africa/Johannesburg",
+          period_locked: true,
+          segments: [],
+        });
+      }
+      if (url.includes("/employees/e1"))
+        return jr({ id: "e1", first_name: "X", last_name: "Y", employee_code: "T001" });
+      if (url.includes("/attendance/exceptions"))
+        return jr({ items: [], next_cursor: null });
+      if (url.includes("/shifts")) return jr({ items: [] });
+      if (url.includes("/attendance/reason-codes")) return jr({ items: [] });
+      return jr({});
+    });
+    renderPanel();
+    expect(await screen.findByTestId("day-correction-toggle")).toBeInTheDocument();
+    const toggle = screen.getByTestId("day-correction-toggle");
+    const button = toggle.closest("button") ?? toggle;
+    expect(
+      (button as HTMLButtonElement).disabled ||
+        button.getAttribute("data-disabled") !== null ||
+        button.getAttribute("aria-disabled") === "true",
+    ).toBe(true);
+  });
+
+  it("shows the day-locked state when locked is true", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      if (url.includes("/attendance/day/")) {
+        return jr({
+          id: "d1", employee_id: "e1", work_date: "2026-11-04", status: "worked",
+          first_in: "2026-11-04T06:00:00Z", last_out: "2026-11-04T15:00:00Z",
+          worked_minutes: 540, normal_minutes: 480, overtime_minutes: 60, raw_minutes: 540,
+          shift_id: null, flags: [], source_version: 1, locked: true,
+          row_version: 1, computed_at: "2026-11-05T06:00:00Z",
+          site_timezone: "Africa/Johannesburg",
+          period_locked: false,
+          segments: [],
+        });
+      }
+      if (url.includes("/employees/e1"))
+        return jr({ id: "e1", first_name: "X", last_name: "Y", employee_code: "T001" });
+      if (url.includes("/attendance/exceptions"))
+        return jr({ items: [], next_cursor: null });
+      if (url.includes("/shifts")) return jr({ items: [] });
+      if (url.includes("/attendance/reason-codes")) return jr({ items: [] });
+      return jr({});
+    });
+    renderPanel();
+    expect(await screen.findByTestId("day-correction-toggle")).toBeInTheDocument();
+    const toggle = screen.getByTestId("day-correction-toggle");
+    const button = toggle.closest("button") ?? toggle;
+    expect(
+      (button as HTMLButtonElement).disabled ||
+        button.getAttribute("data-disabled") !== null ||
+        button.getAttribute("aria-disabled") === "true",
+    ).toBe(true);
   });
 });

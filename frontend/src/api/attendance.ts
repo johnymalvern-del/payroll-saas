@@ -63,6 +63,23 @@ export type DayOut = {
   exceptions: ExceptionRow[];
   segments: SegmentOut[];
   shift_id: string | null;
+  /**
+   * Stage B: PayPeriod.status == "locked" for the day this response
+   * describes, as reported by GET /attendance/day/{id}/{date}.
+   *
+   * Distinct from `locked` (which is the day-level AttendanceDay.locked
+   * flag). Finalisation sets PayPeriod.status, not AttendanceDay.locked,
+   * so a day in a closed payroll period normally has
+   * locked=false, period_locked=true.
+   *
+   * The day-panel correction form uses this to disable itself with a
+   * clear message instead of letting HR submit and receive 409 day_locked.
+   *
+   * Optional for backward compatibility: `GET /attendance/day` list
+   * responses currently leave it undefined; only the day-detail endpoint
+   * populates it.
+   */
+  period_locked?: boolean;
 };
 
 export type SegmentOut = {
@@ -175,6 +192,8 @@ function normaliseDayOut(data: unknown): DayOut {
     exceptions: Array.isArray(obj.exceptions) ? (obj.exceptions as ExceptionRow[]) : [],
     segments: Array.isArray(obj.segments) ? (obj.segments as SegmentOut[]) : [],
     shift_id: typeof obj.shift_id === "string" ? obj.shift_id : null,
+    period_locked:
+      typeof obj.period_locked === "boolean" ? obj.period_locked : undefined,
   };
 }
 

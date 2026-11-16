@@ -12,6 +12,31 @@ both call payroll_period_guard.assert_dates_not_locked BEFORE any write
 path). This closes the confirmed Batch 2C gap where overtime approval
 could mutate AttendanceSegment.overtime_status on a date inside a locked
 PayPeriod without consulting PayPeriod.status.
+
+Stage B Batch 1 atomicity: _apply_adjustment now defers commits for the
+duration of the call by setting db.info["bulk_no_commit"]=True (or
+preserving it if the caller already set it — the bulk loops do), then
+flushes every write and commits once at the end. This closes the
+pre-existing two-commit gap where _persist_day would commit before
+adj.new_value and the AuditLog row were written: a crash between those
+two commits could leave the Adjustment applied without an audit trail.
+
+Callers that go through _apply_adjustment and are now atomic:
+  - adjustments.py::create_adjustment (single adjustment)
+  - exceptions.py::resolve_exception, action="custom"
+  - exceptions.py::resolve_exception, action="apply_suggestion"
+Callers that were already atomic (bulk_no_commit=True before the loop):
+  - adjustments.py::bulk_adjust
+  - exceptions.py::bulk_resolve_exception
+Caller that already added bulk_no_commit in Stage A:
+  - leave_apply.py::apply_leave_to_attendance
+  - leave_apply.py::revert_leave_from_attendance
+
+NOT covered by this fix (documented follow-ups):
+  - resolve_exception, overtime_unapproved branch (direct
+    _approve_pending_segments + recompute_day + commit; does not write an
+    Adjustment row, so no orphan-adjustment risk, but still two commits).
+  - attendance.py::recompute (deliberately partial; sweep operation).
 """
 from __future__ import annotations
 
@@ -294,6 +319,18 @@ def _serialize_adj(adj) -> dict:
 
 def _apply_adjustment(db, user, employee_id, work_date, custom,
                       *, batch_id=None, request_id=None):
+    """Persist one adjustment, recompute the day, snapshot, and write audit.
+
+    Atomicity (Stage B Batch 1): if the caller has not already asked us to
+    defer commits (bulk_no_commit=True), set it for the duration of this
+    function, flush every write, and commit once at the end. This closes
+    the pre-existing gap where _persist_day committed mid-flow before
+    adj.new_value and the AuditLog row were written.
+
+    If the caller already set bulk_no_commit=True (the bulk loops do), we
+    do not touch it, do not commit, and return with the writes flushed into
+    the caller's transaction — the caller's single commit covers everything.
+    """
     day_before = _day_for(db, employee_id, work_date)
     if day_before is not None and day_before.locked:
         raise AppError(
@@ -301,34 +338,54 @@ def _apply_adjustment(db, user, employee_id, work_date, custom,
             "The payroll period containing this day is closed; corrections after close come with the payroll period feature",
             status.HTTP_409_CONFLICT,
         )
-    adj = _persist_adjustment(
-        db,
-        employee_id=employee_id,
-        work_date=work_date,
-        outcome=custom.outcome,
-        time_in=custom.time_in,
-        time_out=custom.time_out,
-        reason_code=custom.reason_code,
-        note=custom.note,
-        created_by=getattr(user, "id", None),
-        batch_id=batch_id,
-    )
-    recompute_day(db, employee_id, work_date)
-    day_after = _day_for(db, employee_id, work_date)
-    adj.new_value = _day_snapshot(day_after)
-    db.add(AuditLog(
-        id=uuid.uuid4(),
-        actor_user_id=getattr(user, "id", None),
-        actor_role=getattr(user, "role", None),
-        entity_type="adjustment",
-        entity_id=str(adj.id),
-        action="attendance.adjustment.create",
-        old_value=adj.old_value,
-        new_value={"day": _day_snapshot(day_after), "adjustment": _serialize_adj(adj)},
-        request_id=request_id,
-    ))
-    if not db.info.get("bulk_no_commit"):
-        db.commit()
+
+    # If the caller already has bulk_no_commit set (bulk loops), preserve it
+    # exactly. Otherwise set it to True for the duration and restore prior
+    # state in finally.
+    prior_bulk = db.info.get("bulk_no_commit")
+    deferring = bool(prior_bulk)
+    if not deferring:
+        db.info["bulk_no_commit"] = True
+
+    try:
+        adj = _persist_adjustment(
+            db,
+            employee_id=employee_id,
+            work_date=work_date,
+            outcome=custom.outcome,
+            time_in=custom.time_in,
+            time_out=custom.time_out,
+            reason_code=custom.reason_code,
+            note=custom.note,
+            created_by=getattr(user, "id", None),
+            batch_id=batch_id,
+        )
+        recompute_day(db, employee_id, work_date)
+        day_after = _day_for(db, employee_id, work_date)
+        adj.new_value = _day_snapshot(day_after)
+        db.add(AuditLog(
+            id=uuid.uuid4(),
+            actor_user_id=getattr(user, "id", None),
+            actor_role=getattr(user, "role", None),
+            entity_type="adjustment",
+            entity_id=str(adj.id),
+            action="attendance.adjustment.create",
+            old_value=adj.old_value,
+            new_value={"day": _day_snapshot(day_after), "adjustment": _serialize_adj(adj)},
+            request_id=request_id,
+        ))
+        db.flush()
+        if not deferring:
+            db.commit()
+            db.refresh(adj)
+    except Exception:
+        if not deferring:
+            db.rollback()
+        raise
+    finally:
+        if not deferring:
+            db.info.pop("bulk_no_commit", None)
+
     return adj.id, (day_after.status if day_after else None)
 
 

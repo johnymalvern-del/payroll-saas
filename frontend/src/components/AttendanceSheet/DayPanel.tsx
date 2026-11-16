@@ -19,6 +19,7 @@ import {
   markReviewed,
   type SegmentOut,
 } from "../../api/attendance";
+import { DayCorrection } from "./DayCorrection";
 import { strings } from "../../lib/strings";
 import { colors } from "../../theme/colors";
 
@@ -302,6 +303,22 @@ export function DayPanel({ employeeId, workDate, onClose, reviewedOverride }: Pr
               </Stack>
             )}
           </Stack>
+
+          <Divider />
+
+          <DayCorrection
+            employeeId={employeeId}
+            workDate={workDate}
+            dayLocked={day.data.locked}
+            periodLocked={day.data.period_locked ?? false}
+            onSaved={() => {
+              qc.invalidateQueries({
+                queryKey: ["attendance", "day", employeeId, workDate],
+              });
+              qc.invalidateQueries({ queryKey: ["attendance", "sheet"] });
+              qc.invalidateQueries({ queryKey: ["attendance", "daily"] });
+            }}
+          />
 
           <Divider />
 

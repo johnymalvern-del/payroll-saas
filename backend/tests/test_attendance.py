@@ -18,6 +18,7 @@ from app.db.tenant.models.attendance import (
     AttendanceDay, CountryCalendar, Punch, Shift, ShiftRateRule,
 )
 from app.db.tenant.models.people import Employee, User
+from app.db.tenant.models.pay import PayPeriod
 from app.db.tenant.session import get_tenant_engine
 
 SA = ZoneInfo("Africa/Johannesburg")
@@ -116,6 +117,19 @@ def _mk_punch(session, employee_id, ts_utc):
 def _mk_day(session, employee_id, work_date, *, status="worked", normal=480, locked=False, shift_id=None):
     d = AttendanceDay(employee_id=employee_id, work_date=work_date, status=status, normal_minutes=normal, worked_minutes=normal, overtime_minutes=0, raw_minutes=normal, shift_id=shift_id, flags=[], source_version=0, locked=locked, row_version=1)
     session.add(d); session.commit(); return d
+
+
+def _mk_period(session, *, start, end, status="open"):
+    p = PayPeriod(
+        period_key=f"test-{uuid.uuid4().hex[:12]}",
+        start_date=start,
+        end_date=end,
+        pay_date=end,
+        status=status,
+        cutoff_at=datetime(end.year, end.month, end.day, 23, 59, tzinfo=timezone.utc),
+        row_version=1,
+    )
+    session.add(p); session.commit(); return p
 
 
 def _sa_utc(y, mo, d, h, mi):
@@ -229,5 +243,53 @@ def test_recompute_locked_skipped(api, db):
     r = client.post("/api/v1/attendance/recompute", headers=_auth(tok, tenant.slug), json={"employee_id": str(e.id), "from_date": "2024-05-01", "to_date": "2024-05-01"})
     assert r.status_code == 200, r.text
     assert r.json()["skipped_locked"] == 1
+
+
+def test_get_day_returns_period_locked_true(api, db):
+    """Stage B: get_day reports period_locked=True when the day falls
+    inside a locked PayPeriod.
+
+    The day-level `locked` flag (AttendanceDay.locked) is separate and
+    stays False — finalisation sets PayPeriod.status, not
+    AttendanceDay.locked.
+    """
+    client, tenant = api
+    tok = _admin_token(client, tenant.slug)
+    e = _mk_emp(db, "PL-T")
+    _mk_day(db, e.id, date(2024, 5, 15))
+    _mk_period(db, start=date(2024, 5, 1), end=date(2024, 5, 31), status="locked")
+    r = client.get(
+        f"/api/v1/attendance/day/{e.id}/2024-05-15",
+        headers=_auth(tok, tenant.slug),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["period_locked"] is True, (
+        f"expected period_locked=True for 2024-05-15, got {body}"
+    )
+    assert body["locked"] is False, (
+        "day-level locked must stay False — finalisation sets PayPeriod.status, "
+        "not AttendanceDay.locked"
+    )
+
+
+def test_get_day_returns_period_locked_false(api, db):
+    """Stage B: get_day reports period_locked=False when the day falls
+    inside an open PayPeriod.
+    """
+    client, tenant = api
+    tok = _admin_token(client, tenant.slug)
+    e = _mk_emp(db, "PL-F")
+    _mk_day(db, e.id, date(2024, 6, 15))
+    _mk_period(db, start=date(2024, 6, 1), end=date(2024, 6, 30), status="open")
+    r = client.get(
+        f"/api/v1/attendance/day/{e.id}/2024-06-15",
+        headers=_auth(tok, tenant.slug),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["period_locked"] is False, (
+        f"expected period_locked=False for 2024-06-15, got {body}"
+    )
 
 # END OF FILE
