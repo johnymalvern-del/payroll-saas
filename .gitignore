@@ -62,3 +62,8 @@ bundles/*.log
 
 # Runtime storage (LocalFileStorage writes here; never commit)
 backend/var/
+
+# Local dev artifacts
+att_probe.txt
+tools/
+*.probe.py
