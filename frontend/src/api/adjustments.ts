@@ -61,6 +61,52 @@ export async function createAdjustment(
   return (await res.json()) as AdjustmentResult;
 }
 
+// ----------------------------------------------------------------------
+// Stage B Batch B — per-day correction history
+// ----------------------------------------------------------------------
+
+export type AdjustmentHistoryRow = {
+  id: string;
+  employee_id: string;
+  work_date: string;
+  outcome: string;
+  time_in: string | null;
+  time_out: string | null;
+  minutes: number | null;
+  reason_code: string;
+  note: string | null;
+  batch_id: string | null;
+  created_by: string | null;
+  created_by_name: string | null;
+  created_at: string;
+  old_value: Record<string, unknown> | null;
+  new_value: Record<string, unknown> | null;
+};
+
+export type AdjustmentHistoryOut = {
+  items: AdjustmentHistoryRow[];
+};
+
+export async function fetchAdjustmentHistory(
+  employeeId: string,
+  workDate: string,
+): Promise<AdjustmentHistoryOut> {
+  const qs = new URLSearchParams();
+  qs.set("employee_id", employeeId);
+  qs.set("work_date", workDate);
+  const res = await wrappedFetch(
+    new Request(
+      absoluteUrl(`/api/v1/attendance/adjustments/history?${qs.toString()}`),
+      { credentials: "include" },
+    ),
+  );
+  if (!res.ok) {
+    throw new Error(`history fetch failed: ${res.status}`);
+  }
+  const data = (await res.json()) as AdjustmentHistoryOut;
+  return { items: Array.isArray(data?.items) ? data.items : [] };
+}
+
 export type BulkAdjustItemIn = {
   employee_id: string;
   work_date: string;
@@ -97,12 +143,22 @@ export class AdjustBulkError extends Error {
   code: string;
   status: number;
   results?: BulkAdjustItemOut[];
-  constructor(code: string, status: number, results?: BulkAdjustItemOut[]) {
+  backendMessage?: string;
+  failedIndex?: number;
+  constructor(
+    code: string,
+    status: number,
+    results?: BulkAdjustItemOut[],
+    backendMessage?: string,
+    failedIndex?: number,
+  ) {
     super(code);
     this.name = "AdjustBulkError";
     this.code = code;
     this.status = status;
     this.results = results;
+    this.backendMessage = backendMessage;
+    this.failedIndex = failedIndex;
   }
 }
 
@@ -117,12 +173,22 @@ export async function bulkAdjust(body: BulkAdjustIn): Promise<BulkAdjustOut> {
   );
   if (!res.ok) {
     const detail = (await res.json().catch(() => ({}))) as {
-      error?: { code?: string; details?: { results?: BulkAdjustItemOut[] } };
+      error?: {
+        code?: string;
+        message?: string;
+        details?: {
+          results?: BulkAdjustItemOut[];
+          failed_index?: number;
+          code?: string;
+        };
+      };
     };
     throw new AdjustBulkError(
       detail.error?.code ?? `http_${res.status}`,
       res.status,
       detail.error?.details?.results,
+      detail.error?.message,
+      detail.error?.details?.failed_index,
     );
   }
   return (await res.json()) as BulkAdjustOut;

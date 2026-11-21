@@ -1,14 +1,19 @@
 """Adjustment endpoints (Chapter 2C).
 
-Two endpoints:
+Three endpoints:
   POST /attendance/adjustments        single adjustment
   POST /attendance/adjustments/bulk   dry-run + token (C1)
+  GET  /attendance/adjustments/history per-day correction history (Batch B)
 
 Adjustments are append-only (C6). outcome='revert' restores the punch-based
 computation; the adjustment history stays in the audit log.
 
 Self-adjust (C8): a user cannot adjust their own employee record. Enforced
-here and in the bulk endpoint.
+here and in the bulk endpoint. A3: the guard is scoped by the
+ATTENDANCE_ADJUST_SELF permission — roles that hold it (hr, payroll_admin)
+may adjust their own attendance; every other role remains blocked and sees
+the same "cannot_adjust_own" 403 as before. The permission never bypasses
+_require_scope or assert_dates_not_locked; those run in the same order.
 
 Locked days (C3): 409 day_locked with a message pointing to the payroll
 period feature for corrections after close.
@@ -24,19 +29,47 @@ past the day-level check.
 Reuses _apply_adjustment / _day_for / _validate_reason from exceptions.py so
 single adjustments and exception-driven adjustments produce identical audit
 rows and identical locked-day errors.
+
+Stage B Batch B — history endpoint:
+  GET /attendance/adjustments/history?employee_id=<uuid>&work_date=YYYY-MM-DD
+  returns the append-only Adjustment rows for that (employee, date) newest
+  first, with the creator's display name resolved from User. Permissioned
+  to ATTENDANCE_VIEW, and scope-checked via assert_in_scope — HR sees only
+  history for employees they are already authorised to view. Tenant
+  isolation is the TenantDbDep session. old_value/new_value snapshots are
+  returned intact; no AuditLog read, no AUDIT_VIEW needed.
+
+Stage B Batch C — shift override:
+  create_adjustment resolves payload.shift_id (if set) to a Shift row and
+  passes both shift_id and shift_name into _apply_adjustment, which stores
+  shift_id on the Adjustment row and shift_name inside new_value.shift_name.
+  This lets HR record "the shift should have been X" as part of a correction
+  and lets the day panel display the HR-selected shift even if the Shift row
+  is later hard-deleted (FK ON DELETE SET NULL). Resolution is done here,
+  not in the engine, so the engine stays free of Shift-name lookup concerns.
+  History rows expose shift_id and shift_name (shift_name prefers the
+  snapshot's value, falling back to a live Shift lookup).
+
+  Bulk adjustments do NOT carry a shift override in this batch. Bulk items
+  go through _to_custom, which drops shift_id; the bulk path continues to
+  behave exactly as before. Bulk shift override is a separate follow-up.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import uuid
+from datetime import date
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
+from sqlalchemy import select
 
 from app.api.deps import TenantDbDep
 from app.api.v1.adjustments_schemas import (
     AdjustmentCreateIn,
+    AdjustmentHistoryListOut,
+    AdjustmentHistoryRowOut,
     AdjustmentOut,
     AdjustmentResultOut,
     BulkAdjustIn,
@@ -51,10 +84,10 @@ from app.api.v1.exceptions import (
 )
 from app.api.v1.exceptions_schemas import CustomAdjustmentIn
 from app.core.errors import AppError
-from app.core.permissions import Permission, require_permission
+from app.core.permissions import Permission, check_permission, require_permission
 from app.core.scope import ScopeViolation, assert_in_scope
-from app.db.tenant.models.attendance import Adjustment
-from app.db.tenant.models.people import Employee
+from app.db.tenant.models.attendance import Adjustment, Shift
+from app.db.tenant.models.people import Employee, User
 from app.services.payroll_period_guard import assert_dates_not_locked
 
 router = APIRouter(prefix="/attendance/adjustments", tags=["attendance-adjustments"])
@@ -74,12 +107,22 @@ def _to_adj_out(a: Adjustment) -> AdjustmentOut:
         batch_id=a.batch_id,
         created_by=a.created_by,
         period_id=a.period_id,
+        shift_id=a.shift_id,
         created_at=a.created_at,
     )
 
 
 def _require_not_self(user, employee_id) -> None:
+    """A3: the self-adjust restriction is scoped by ATTENDANCE_ADJUST_SELF.
+
+    Callers that hold the permission may proceed to adjust their own
+    employee record; every other caller sees the existing 403. The
+    permission does not bypass _require_scope or assert_dates_not_locked,
+    which run after this function.
+    """
     if getattr(user, "employee_id", None) is not None and user.employee_id == employee_id:
+        if check_permission(user, Permission.ATTENDANCE_ADJUST_SELF):
+            return
         raise AppError(
             "cannot_adjust_own",
             "A user cannot adjust their own attendance",
@@ -108,6 +151,111 @@ def _validate_common(db, payload) -> None:
     _validate_reason(db, payload.reason_code, payload.note)
 
 
+def _resolve_creator_name(user: User | None) -> str | None:
+    """Best-effort display name for an Adjustment's created_by user.
+
+    Returns None if the user has been deleted (created_by is FK ON DELETE
+    SET NULL, so the User row may not exist). If the user row exists but
+    lacks first/last name, falls back to username. If even username is
+    missing, returns None so the frontend renders its own fallback.
+    """
+    if user is None:
+        return None
+    first = getattr(user, "first_name", None) or ""
+    last = getattr(user, "last_name", None) or ""
+    label = f"{first} {last}".strip()
+    if label:
+        return label
+    return getattr(user, "username", None) or None
+
+
+def _resolve_shift_name_for_history(db, adj: Adjustment) -> str | None:
+    """Resolve the display name for an adjustment's shift override.
+
+    Stage B Batch C: prefer the name captured at write time inside
+    new_value.shift_name (survives a later hard-delete of the Shift row).
+    Fall back to a live Shift lookup when the snapshot lacks it (older
+    rows written before Batch C, or rows where the caller did not pass a
+    name). Return None when there is no shift override.
+
+    Ordering matters: the snapshot is checked FIRST, before the
+    adj.shift_id is None guard. A hard-deleted Shift row nulls
+    Adjustment.shift_id via FK ON DELETE SET NULL, but the captured name
+    in new_value.shift_name must still be returned — that is the whole
+    point of storing it in the snapshot.
+    """
+    snap = adj.new_value or {}
+    if isinstance(snap, dict):
+        name = snap.get("shift_name")
+        if isinstance(name, str) and name:
+            return name
+    if adj.shift_id is None:
+        return None
+    shift = db.get(Shift, adj.shift_id)
+    return shift.name if shift is not None else None
+
+
+@router.get("/history", response_model=AdjustmentHistoryListOut)
+def get_adjustment_history(
+    db: TenantDbDep,
+    user: Annotated[Any, Depends(require_permission(Permission.ATTENDANCE_VIEW))],
+    employee_id: uuid.UUID = Query(...),
+    work_date: date = Query(...),
+) -> AdjustmentHistoryListOut:
+    """Append-only history of adjustments for (employee_id, work_date).
+
+    Newest first by (created_at DESC, id DESC). The Adjustment table is the
+    authoritative log: every correction creates exactly one row, and rows
+    are never edited or deleted. old_value / new_value are the snapshots
+    captured by _apply_adjustment.
+
+    Scope and tenant isolation:
+      - apply_scope / assert_in_scope prevents HR from reading history
+        for an employee outside their authorised scope (404 not 403, to
+        avoid confirming existence).
+      - TenantDbDep binds the session to the active tenant, so no
+        cross-tenant rows can be reached.
+    """
+    try:
+        assert_in_scope(user, employee_id, db)
+    except ScopeViolation:
+        raise AppError("record_not_found", "Employee not found", 404) from None
+
+    rows = db.execute(
+        select(Adjustment, User)
+        .outerjoin(User, User.id == Adjustment.created_by)
+        .where(
+            Adjustment.employee_id == employee_id,
+            Adjustment.work_date == work_date,
+        )
+        .order_by(Adjustment.created_at.desc(), Adjustment.id.desc())
+    ).all()
+
+    items = [
+        AdjustmentHistoryRowOut(
+            id=adj.id,
+            employee_id=adj.employee_id,
+            work_date=adj.work_date,
+            outcome=adj.outcome,
+            time_in=adj.time_in,
+            time_out=adj.time_out,
+            minutes=adj.minutes,
+            reason_code=adj.reason_code,
+            note=adj.note,
+            batch_id=adj.batch_id,
+            created_by=adj.created_by,
+            created_by_name=_resolve_creator_name(usr),
+            shift_id=adj.shift_id,
+            shift_name=_resolve_shift_name_for_history(db, adj),
+            created_at=adj.created_at,
+            old_value=adj.old_value,
+            new_value=adj.new_value,
+        )
+        for adj, usr in rows
+    ]
+    return AdjustmentHistoryListOut(items=items)
+
+
 @router.post("", response_model=AdjustmentResultOut, status_code=status.HTTP_201_CREATED)
 def create_adjustment(
     payload: AdjustmentCreateIn,
@@ -128,9 +276,31 @@ def create_adjustment(
     )
     _validate_common(db, payload)
     request_id = getattr(request.state, "request_id", None)
+
+    # Stage B Batch C: resolve the HR-selected shift override, if any.
+    # The name is captured now and stored inside new_value.shift_name by
+    # _apply_adjustment, so a later hard-delete of the Shift row does not
+    # erase the label. An unknown shift_id is rejected before any write
+    # rather than being silently dropped — the correction would otherwise
+    # record "no override" while the user believed they had chosen one.
+    shift_id = payload.shift_id
+    shift_name: str | None = None
+    if shift_id is not None:
+        shift = db.get(Shift, shift_id)
+        if shift is None:
+            raise AppError(
+                "invalid_shift",
+                "shift_id does not refer to an existing shift",
+                status.HTTP_400_BAD_REQUEST,
+                {"shift_id": str(shift_id)},
+            )
+        shift_name = shift.name
+
     adj_id, day_status = _apply_adjustment(
         db, user, payload.employee_id, payload.work_date, _to_custom(payload),
         request_id=request_id,
+        shift_id=shift_id,
+        shift_name=shift_name,
     )
     adj = db.get(Adjustment, adj_id)
     day = _day_for(db, payload.employee_id, payload.work_date)
@@ -156,8 +326,17 @@ def _compute_adjust_bulk_token(items) -> str:
 
 
 def _pre_validate_adjust_item(db, user, item):
-    """Read-only validation. Returns an error code or None."""
-    if getattr(user, "employee_id", None) is not None and user.employee_id == item.employee_id:
+    """Read-only validation. Returns an error code or None.
+
+    A3: the self-adjust restriction is scoped by ATTENDANCE_ADJUST_SELF.
+    Callers that hold the permission pass this check for their own record;
+    every other caller still sees "cannot_adjust_own".
+    """
+    if (
+        getattr(user, "employee_id", None) is not None
+        and user.employee_id == item.employee_id
+        and not check_permission(user, Permission.ATTENDANCE_ADJUST_SELF)
+    ):
         return "cannot_adjust_own"
     try:
         assert_in_scope(user, item.employee_id, db)

@@ -39,6 +39,13 @@ dayjs.extend(timezone);
 
 const BULK_CAP = 200;
 
+function describeBulkError(err: AdjustBulkError): string {
+  if (err.code === "batch_failed" && err.backendMessage) {
+    return err.backendMessage;
+  }
+  return mapBulkAdjustError(err.code);
+}
+
 function mapBulkAdjustError(code: string): string {
   switch (code) {
     case "bulk_validation_failed":
@@ -213,7 +220,7 @@ export function AdjustmentsPage() {
     } catch (err) {
       setError(
         err instanceof AdjustBulkError
-          ? mapBulkAdjustError(err.code)
+          ? describeBulkError(err)
           : strings.genericError,
       );
     } finally {
@@ -236,7 +243,7 @@ export function AdjustmentsPage() {
     } catch (err) {
       setConfirmOpen(false);
       if (err instanceof AdjustBulkError) {
-        setError(mapBulkAdjustError(err.code));
+        setError(describeBulkError(err));
         if (err.code === "bulk_validation_failed" && err.results) {
           setDryRun({
             results: err.results,

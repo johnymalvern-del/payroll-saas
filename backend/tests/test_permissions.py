@@ -83,6 +83,7 @@ SECTION_6_MATRIX: dict[Permission, dict[str, bool]] = {
     Permission.LEAVE_APPROVE:  {"employee": False, "manager": True, "hr": True, "payroll_admin": True, "auditor": False},
     Permission.SICK_NOTE_VIEW: {"employee": False, "manager": False, "hr": True, "payroll_admin": True, "auditor": False},
     Permission.ATTENDANCE_ADJUST: {"employee": False, "manager": True, "hr": True, "payroll_admin": True, "auditor": False},
+    Permission.ATTENDANCE_ADJUST_SELF: {"employee": False, "manager": False, "hr": True, "payroll_admin": True, "auditor": False},
     Permission.OVERTIME_APPROVE: {"employee": False, "manager": True, "hr": True, "payroll_admin": True, "auditor": False},
     Permission.EXCEPTION_RESOLVE: {"employee": False, "manager": True, "hr": True, "payroll_admin": True, "auditor": False},
     Permission.ADVANCE_DECIDE: {"employee": False, "manager": False, "hr": True, "payroll_admin": True, "auditor": False},
@@ -156,6 +157,28 @@ def test_bank_detail_request_and_approve_are_disjoint() -> None:
             Permission.BANK_DETAIL_REQUEST in perms
             and Permission.BANK_DETAIL_APPROVE in perms
         )
+
+
+def test_attendance_adjust_self_grants_only_hr_and_payroll_admin() -> None:
+    """A3: only the two roles that already adjust others' attendance may
+    self-adjust. Manager and employee remain blocked; auditor has no
+    attendance-adjust capability at all.
+    """
+    for role in ("hr", "payroll_admin"):
+        assert Permission.ATTENDANCE_ADJUST_SELF in ROLE_PERMISSIONS[role]
+    for role in ("employee", "manager", "auditor"):
+        assert Permission.ATTENDANCE_ADJUST_SELF not in ROLE_PERMISSIONS[role]
+
+
+def test_attendance_adjust_self_requires_attendance_adjust() -> None:
+    """A3: ATTENDANCE_ADJUST_SELF is an extension of ATTENDANCE_ADJUST, not
+    an independent permission. A role must never hold the self variant
+    without the base adjust capability."""
+    for role, perms in ROLE_PERMISSIONS.items():
+        if Permission.ATTENDANCE_ADJUST_SELF in perms:
+            assert Permission.ATTENDANCE_ADJUST in perms, (
+                f"{role} holds ATTENDANCE_ADJUST_SELF without ATTENDANCE_ADJUST"
+            )
 
 
 # ---------------------------------------------------------------------------

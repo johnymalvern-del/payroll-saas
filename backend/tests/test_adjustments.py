@@ -1,3 +1,4 @@
+﻿
 """Adjustment endpoint tests (Chapter 2C, 2C-4d-ii).
 
 Part 1: fixtures, helpers, and 4 single-adjustment tests.
@@ -213,7 +214,7 @@ def test_single_adjustment_self_adjust_403(api, db):
     client, tenant = api
     emp = _mk_emp(db, "SA1")
     _mk_cal(db, 2024)
-    _mk_user(db, username="hr-self", role="hr", password="HrSelfPass1234!",
+    _mk_user(db, username="hr-self", role="manager", password="HrSelfPass1234!",
              employee_id=emp.id)
     tok = _login(client, tenant.slug, "hr-self", "HrSelfPass1234!")
     payload = _adj_payload(emp.id, date(2024, 5, 1), "day_off",

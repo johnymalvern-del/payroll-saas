@@ -20,6 +20,7 @@ import {
   type SegmentOut,
 } from "../../api/attendance";
 import { DayCorrection } from "./DayCorrection";
+import { DayHistory } from "./DayHistory";
 import { strings } from "../../lib/strings";
 import { colors } from "../../theme/colors";
 
@@ -112,14 +113,40 @@ export function DayPanel({ employeeId, workDate, onClose, reviewedOverride }: Pr
         </Group>
       ) : is404 ? (
         <Stack gap="md">
-          <Text fw={600}>{employeeName || employeeId}</Text>
-          <Text size="sm" c="dimmed">
-            {employeeCode ? employeeCode + " \u00b7 " : ""}
-            {dateLabel}
-          </Text>
-          <Alert color={colors.inactive}>
-            No attendance record for this day.
-          </Alert>
+          <Stack gap={2}>
+            <Text fw={600}>{employeeName || employeeId}</Text>
+            <Text size="sm" c="dimmed">
+              {employeeCode ? employeeCode + " \u00b7 " : ""}
+              {dateLabel}
+            </Text>
+          </Stack>
+
+          <Divider />
+
+          <DayCorrection
+            employeeId={employeeId}
+            workDate={workDate}
+            dayLocked={false}
+            periodLocked={false}
+            onSaved={() => {
+              qc.invalidateQueries({
+                queryKey: ["attendance", "day", employeeId, workDate],
+              });
+              qc.invalidateQueries({ queryKey: ["attendance", "sheet"] });
+              qc.invalidateQueries({ queryKey: ["attendance", "daily"] });
+              qc.invalidateQueries({
+                queryKey: [
+                  "attendance",
+                  "adjustments",
+                  "history",
+                  employeeId,
+                  workDate,
+                ],
+              });
+            }}
+          />
+
+          <DayHistory employeeId={employeeId} workDate={workDate} />
         </Stack>
       ) : day.isError || !day.data ? (
         <Text c={colors.problem}>{strings.attendance.dayPanel.error}</Text>
@@ -317,8 +344,13 @@ export function DayPanel({ employeeId, workDate, onClose, reviewedOverride }: Pr
               });
               qc.invalidateQueries({ queryKey: ["attendance", "sheet"] });
               qc.invalidateQueries({ queryKey: ["attendance", "daily"] });
+              qc.invalidateQueries({
+                queryKey: ["attendance", "adjustments", "history", employeeId, workDate],
+              });
             }}
           />
+
+          <DayHistory employeeId={employeeId} workDate={workDate} />
 
           <Divider />
 

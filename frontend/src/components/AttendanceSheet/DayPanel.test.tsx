@@ -94,7 +94,7 @@ describe("DayPanel", () => {
     expect(screen.getByText("540")).toBeInTheDocument();
   });
 
-  it("shows friendly 404 message when day does not exist", async () => {
+  it("opens the editing UI for a missing day (task 1 §2)", async () => {
     global.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);
       if (url.includes("/attendance/day/"))
@@ -104,14 +104,28 @@ describe("DayPanel", () => {
       if (url.includes("/attendance/exceptions"))
         return jr({ items: [], next_cursor: null });
       if (url.includes("/shifts")) return jr({ items: [] });
-      if (url.includes("/attendance/reason-codes")) return jr({ items: [] });
+      if (url.includes("/attendance/reason-codes"))
+        return jr({ items: [{ code: "forgot_clock", label: "Forgot clock", requires_note: false }] });
+      if (url.includes("/attendance/adjustments/history"))
+        return jr({ items: [] });
       return jr({});
     });
     renderPanel();
+
+    // Employee name present; the dead-end alert must be gone (section 2 hard rule).
     expect(await screen.findByText("Nomsa Botha")).toBeInTheDocument();
     expect(
-      await screen.findByText(/No attendance record for this day/),
-    ).toBeInTheDocument();
+      screen.queryByText(/No attendance record for this day/),
+    ).not.toBeInTheDocument();
+
+    // Correction accordion present and enabled — parity with a recorded day.
+    const toggle = await screen.findByTestId("day-correction-toggle");
+    const btn = toggle.closest("button") ?? toggle;
+    expect((btn as HTMLButtonElement).disabled).toBe(false);
+
+    // History section present, showing its empty state.
+    expect(screen.getByTestId("day-history-toggle")).toBeInTheDocument();
+    expect(await screen.findByTestId("day-history-empty")).toBeInTheDocument();
   });
 
   it("renders exceptions list when present", async () => {

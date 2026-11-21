@@ -88,12 +88,12 @@ describe("AdjustmentsPage (bulk)", () => {
     global.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
       if (url.includes("/attendance/reason-codes")) {
-      return jr({ items: [
-        { code: "system_correction", label: "System correction", requires_note: false },
-        { code: "other", label: "Other", requires_note: true },
-      ] });
-    }
-    if (url.includes("/api/v1/employees")) {
+        return jr({ items: [
+          { code: "system_correction", label: "System correction", requires_note: false },
+          { code: "other", label: "Other", requires_note: true },
+        ] });
+      }
+      if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -146,12 +146,12 @@ describe("AdjustmentsPage (bulk)", () => {
         });
       }
       if (url.includes("/attendance/reason-codes")) {
-      return jr({ items: [
-        { code: "system_correction", label: "System correction", requires_note: false },
-        { code: "other", label: "Other", requires_note: true },
-      ] });
-    }
-    if (url.includes("/api/v1/employees")) {
+        return jr({ items: [
+          { code: "system_correction", label: "System correction", requires_note: false },
+          { code: "other", label: "Other", requires_note: true },
+        ] });
+      }
+      if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -228,12 +228,12 @@ describe("AdjustmentsPage (bulk)", () => {
         });
       }
       if (url.includes("/attendance/reason-codes")) {
-      return jr({ items: [
-        { code: "system_correction", label: "System correction", requires_note: false },
-        { code: "other", label: "Other", requires_note: true },
-      ] });
-    }
-    if (url.includes("/api/v1/employees")) {
+        return jr({ items: [
+          { code: "system_correction", label: "System correction", requires_note: false },
+          { code: "other", label: "Other", requires_note: true },
+        ] });
+      }
+      if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -298,12 +298,12 @@ describe("AdjustmentsPage (bulk)", () => {
         });
       }
       if (url.includes("/attendance/reason-codes")) {
-      return jr({ items: [
-        { code: "system_correction", label: "System correction", requires_note: false },
-        { code: "other", label: "Other", requires_note: true },
-      ] });
-    }
-    if (url.includes("/api/v1/employees")) {
+        return jr({ items: [
+          { code: "system_correction", label: "System correction", requires_note: false },
+          { code: "other", label: "Other", requires_note: true },
+        ] });
+      }
+      if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -355,12 +355,12 @@ describe("AdjustmentsPage (bulk)", () => {
         });
       }
       if (url.includes("/attendance/reason-codes")) {
-      return jr({ items: [
-        { code: "system_correction", label: "System correction", requires_note: false },
-        { code: "other", label: "Other", requires_note: true },
-      ] });
-    }
-    if (url.includes("/api/v1/employees")) {
+        return jr({ items: [
+          { code: "system_correction", label: "System correction", requires_note: false },
+          { code: "other", label: "Other", requires_note: true },
+        ] });
+      }
+      if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -409,12 +409,12 @@ describe("AdjustmentsPage (bulk)", () => {
         });
       }
       if (url.includes("/attendance/reason-codes")) {
-      return jr({ items: [
-        { code: "system_correction", label: "System correction", requires_note: false },
-        { code: "other", label: "Other", requires_note: true },
-      ] });
-    }
-    if (url.includes("/api/v1/employees")) {
+        return jr({ items: [
+          { code: "system_correction", label: "System correction", requires_note: false },
+          { code: "other", label: "Other", requires_note: true },
+        ] });
+      }
+      if (url.includes("/api/v1/employees")) {
         return jr({ items: [EMP], next_cursor: null });
       }
       return jr({}, 200);
@@ -437,6 +437,87 @@ describe("AdjustmentsPage (bulk)", () => {
 
     const err = await screen.findByTestId("adjustments-bulk-error");
     expect(err.textContent ?? "").toMatch(/re-run the dry run/i);
+  });
+
+  it("batch_failed surfaces the backend message in the error alert", async () => {
+    // D2: when the backend reports a batch failure, its message names the
+    // failing item and the underlying cause. The frontend must show that
+    // message instead of the generic "batch failed unexpectedly" string.
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      const method = requestMethod(input);
+      let body = "";
+      if (
+        method !== "GET" &&
+        typeof Request !== "undefined" &&
+        input instanceof Request
+      ) {
+        body = await input.clone().text();
+      }
+      if (url.includes("/attendance/adjustments/bulk")) {
+        const parsed = JSON.parse(body) as {
+          items: { employee_id: string; work_date: string }[];
+          token?: string;
+        };
+        if (parsed.token) {
+          return jr(
+            {
+              error: {
+                code: "batch_failed",
+                message:
+                  "Batch aborted at item 1: holiday_calendar_missing. Nothing was applied.",
+                details: {
+                  failed_index: 1,
+                  code: "holiday_calendar_missing",
+                },
+              },
+            },
+            409,
+          );
+        }
+        const results = parsed.items.map((it, i) => ({
+          index: i,
+          employee_id: it.employee_id,
+          work_date: it.work_date,
+          ok: true,
+        }));
+        return jr({
+          results,
+          applied: 0,
+          dry_run: true,
+          token: "T1",
+        });
+      }
+      if (url.includes("/attendance/reason-codes")) {
+        return jr({ items: [
+          { code: "system_correction", label: "System correction", requires_note: false },
+          { code: "other", label: "Other", requires_note: true },
+        ] });
+      }
+      if (url.includes("/api/v1/employees")) {
+        return jr({ items: [EMP], next_cursor: null });
+      }
+      return jr({}, 200);
+    }) as unknown as typeof fetch;
+
+    renderPage();
+    await pickEmployee();
+    await pickReason("System correction");
+    fireEvent.click(screen.getByTestId("adjustments-bulk-dry-run"));
+    await screen.findByTestId("adjustments-bulk-results");
+
+    const confirmBtn = screen.getByTestId(
+      "adjustments-bulk-confirm",
+    ) as HTMLButtonElement;
+    await waitFor(() => expect(confirmBtn.disabled).toBe(false));
+    fireEvent.click(confirmBtn);
+    fireEvent.click(
+      await screen.findByTestId("adjustments-bulk-confirm-apply"),
+    );
+
+    const err = await screen.findByTestId("adjustments-bulk-error");
+    expect(err.textContent ?? "").toMatch(/Batch aborted at item 1/);
+    expect(err.textContent ?? "").toMatch(/holiday_calendar_missing/);
   });
 
   it("over-cap shows warning and disables dry run", async () => {

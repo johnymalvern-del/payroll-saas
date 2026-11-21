@@ -37,6 +37,22 @@ NOT covered by this fix (documented follow-ups):
     _approve_pending_segments + recompute_day + commit; does not write an
     Adjustment row, so no orphan-adjustment risk, but still two commits).
   - attendance.py::recompute (deliberately partial; sweep operation).
+
+Stage B Batch C: _apply_adjustment accepts optional shift_id and
+shift_name kwargs and passes them through to _persist_adjustment.
+shift_id is stored on the Adjustment row; shift_name is stored inside
+new_value.shift_name (via _day_snapshot(day_after, shift_name=...)) so
+that a hard-deleted Shift row (FK ON DELETE SET NULL) does not erase the
+identity of the shift HR selected. The caller (adjustments.py) is
+responsible for resolving shift_id → shift_name before calling here.
+
+A3: _apply_adjustment classifies self-overrides for audit. When the
+actor's employee_id equals the target employee_id and the actor holds
+ATTENDANCE_ADJUST_SELF, the AuditLog action becomes
+"attendance.adjustment.self_override" and new_value gains
+"self_override": True. Non-self adjustments remain
+"attendance.adjustment.create" with no flag, so downstream audit consumers
+that filter on ".create" are unaffected.
 """
 from __future__ import annotations
 
@@ -57,7 +73,7 @@ from app.api.v1.exceptions_schemas import (
     ResolveIn, ResolveOut,
 )
 from app.core.errors import AppError
-from app.core.permissions import Permission, require_permission
+from app.core.permissions import Permission, check_permission, require_permission
 from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
 from app.db.tenant.models.attendance import (
     Adjustment, AttendanceDay, AttendanceSegment, ExceptionItem, Shift,
@@ -318,7 +334,8 @@ def _serialize_adj(adj) -> dict:
 
 
 def _apply_adjustment(db, user, employee_id, work_date, custom,
-                      *, batch_id=None, request_id=None):
+                      *, batch_id=None, request_id=None,
+                      shift_id=None, shift_name=None):
     """Persist one adjustment, recompute the day, snapshot, and write audit.
 
     Atomicity (Stage B Batch 1): if the caller has not already asked us to
@@ -330,6 +347,19 @@ def _apply_adjustment(db, user, employee_id, work_date, custom,
     If the caller already set bulk_no_commit=True (the bulk loops do), we
     do not touch it, do not commit, and return with the writes flushed into
     the caller's transaction — the caller's single commit covers everything.
+
+    Stage B Batch C: shift_id (optional) is the HR-selected shift override
+    to record on the Adjustment row. shift_name (optional) is the resolved
+    display name for that shift, stored inside new_value.shift_name so a
+    later hard-delete of the Shift row (FK ON DELETE SET NULL) does not
+    erase the label. The caller resolves shift_id → shift_name.
+
+    A3: when the actor's employee_id equals the target employee_id and the
+    actor holds ATTENDANCE_ADJUST_SELF, the AuditLog action is
+    "attendance.adjustment.self_override" and new_value.self_override is
+    True. All other callers write the normal "attendance.adjustment.create"
+    action with no flag, so downstream consumers of ".create" are
+    unaffected.
     """
     day_before = _day_for(db, employee_id, work_date)
     if day_before is not None and day_before.locked:
@@ -359,19 +389,44 @@ def _apply_adjustment(db, user, employee_id, work_date, custom,
             note=custom.note,
             created_by=getattr(user, "id", None),
             batch_id=batch_id,
+            shift_id=shift_id,
+            shift_name=shift_name,
         )
         recompute_day(db, employee_id, work_date)
         day_after = _day_for(db, employee_id, work_date)
-        adj.new_value = _day_snapshot(day_after)
+        adj.new_value = _day_snapshot(day_after, shift_name=shift_name)
+
+        # A3: detect self-override for audit classification. The guard
+        # at the endpoint level may have already allowed the actor to
+        # self-adjust (permission present); this flag distinguishes the
+        # action in the AuditLog without changing the Adjustment row,
+        # which still carries created_by for the "who did it" record.
+        is_self_override = (
+            getattr(user, "employee_id", None) is not None
+            and user.employee_id == employee_id
+            and check_permission(user, Permission.ATTENDANCE_ADJUST_SELF)
+        )
+        audit_action = (
+            "attendance.adjustment.self_override"
+            if is_self_override
+            else "attendance.adjustment.create"
+        )
+        audit_new_value = {
+            "day": _day_snapshot(day_after, shift_name=shift_name),
+            "adjustment": _serialize_adj(adj),
+        }
+        if is_self_override:
+            audit_new_value["self_override"] = True
+
         db.add(AuditLog(
             id=uuid.uuid4(),
             actor_user_id=getattr(user, "id", None),
             actor_role=getattr(user, "role", None),
             entity_type="adjustment",
             entity_id=str(adj.id),
-            action="attendance.adjustment.create",
+            action=audit_action,
             old_value=adj.old_value,
-            new_value={"day": _day_snapshot(day_after), "adjustment": _serialize_adj(adj)},
+            new_value=audit_new_value,
             request_id=request_id,
         ))
         db.flush()
@@ -466,7 +521,13 @@ def resolve_exception(
             f"Exception is already {exc.status}",
             status.HTTP_409_CONFLICT,
         )
-    if getattr(user, "employee_id", None) is not None and user.employee_id == exc.employee_id:
+    # A3: self-adjust is scoped by ATTENDANCE_ADJUST_SELF. The permission
+    # only bypasses the self-check; scope and period locks still run below.
+    if (
+        getattr(user, "employee_id", None) is not None
+        and user.employee_id == exc.employee_id
+        and not check_permission(user, Permission.ATTENDANCE_ADJUST_SELF)
+    ):
         raise AppError(
             "cannot_adjust_own",
             "A user cannot adjust their own attendance",
@@ -571,10 +632,19 @@ def _compute_bulk_token(items) -> str:
 
 
 def _pre_validate_bulk_item(db, user, item, exc):
-    """Return an error code (str) if invalid, else None. Read-only."""
+    """Return an error code (str) if invalid, else None. Read-only.
+
+    A3: the self-adjust restriction is scoped by ATTENDANCE_ADJUST_SELF.
+    Callers that hold the permission pass this check for their own
+    employee record; every other caller still sees "cannot_adjust_own".
+    """
     if exc is None:
         return "record_not_found"
-    if getattr(user, "employee_id", None) is not None and user.employee_id == exc.employee_id:
+    if (
+        getattr(user, "employee_id", None) is not None
+        and user.employee_id == exc.employee_id
+        and not check_permission(user, Permission.ATTENDANCE_ADJUST_SELF)
+    ):
         return "cannot_adjust_own"
     try:
         assert_in_scope(user, exc.employee_id, db)

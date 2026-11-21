@@ -24,11 +24,20 @@ ORG_VIEW (organisation read: branches, sites, departments) and ORG_MANAGE
 The scope rules decide *which* branches each role sees; the permission only
 decides whether the role may call the endpoint at all.
 
-ATTENDANCE_VIEW (Chapter 2A, A10). Per section 6, "Own payslips,
-attendance, leave balances" grants attendance viewing to employee, manager,
-hr and payroll_admin; the auditor is not granted attendance view. The
-actual scope (own / team / company) is enforced per endpoint with
-apply_scope and assert_in_scope, not by this permission.
+ATTENDANCE_VIEW (Chapter 2A, A10). Per section 6, "Own payslips, attendance,
+leave balances" grants attendance viewing to employee, manager, hr and
+payroll_admin; the auditor is not granted attendance view. The actual scope
+(own / team / company) is enforced per endpoint with apply_scope and
+assert_in_scope, not by this permission.
+
+ATTENDANCE_ADJUST_SELF (A3). Extends ATTENDANCE_ADJUST so that the roles
+that may adjust attendance in the first place (hr, payroll_admin) may also
+adjust their *own* attendance when linked to an employee record. It never
+bypasses tenant isolation, employee scope, or payroll-period locks — those
+guards run in the same order as before. It also never extends to `manager`
+or `employee`: those roles remain subject to the self-adjust restriction.
+The A3 audit trail distinguishes self-overrides via AuditLog.action =
+"attendance.adjustment.self_override" and new_value.self_override = True.
 """
 from __future__ import annotations
 
@@ -48,6 +57,7 @@ class Permission(str, Enum):
     LEAVE_APPROVE = "leave_approve"
     SICK_NOTE_VIEW = "sick_note_view"
     ATTENDANCE_ADJUST = "attendance_adjust"
+    ATTENDANCE_ADJUST_SELF = "attendance_adjust_self"
     OVERTIME_APPROVE = "overtime_approve"
     EXCEPTION_RESOLVE = "exception_resolve"
     ADVANCE_DECIDE = "advance_decide"
@@ -104,6 +114,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.LEAVE_APPROVE,
         Permission.SICK_NOTE_VIEW,
         Permission.ATTENDANCE_ADJUST,
+        Permission.ATTENDANCE_ADJUST_SELF,
         Permission.OVERTIME_APPROVE,
         Permission.EXCEPTION_RESOLVE,
         Permission.ADVANCE_DECIDE,
@@ -125,6 +136,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.LEAVE_APPROVE,
         Permission.SICK_NOTE_VIEW,
         Permission.ATTENDANCE_ADJUST,
+        Permission.ATTENDANCE_ADJUST_SELF,
         Permission.OVERTIME_APPROVE,
         Permission.EXCEPTION_RESOLVE,
         Permission.ADVANCE_DECIDE,

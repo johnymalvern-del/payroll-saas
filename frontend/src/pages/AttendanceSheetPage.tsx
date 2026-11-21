@@ -18,6 +18,7 @@ import {
   fetchSheet,
   fetchSites,
 } from "../api/attendance";
+import { AnnualView } from "../components/AttendanceSheet/AnnualView";
 import { DailyList } from "../components/AttendanceSheet/DailyList";
 import { DayPanel } from "../components/AttendanceSheet/DayPanel";
 import { FilterBar } from "../components/AttendanceSheet/FilterBar";
@@ -27,7 +28,7 @@ import { strings } from "../lib/strings";
 import { toCsv, downloadCsv } from "../lib/csv";
 
 const PAGE_SIZE = 50;
-type View = "monthly" | "daily";
+type View = "monthly" | "daily" | "annual";
 
 export function AttendanceSheetPage() {
   const [view, setView] = useState<View>("monthly");
@@ -38,6 +39,8 @@ export function AttendanceSheetPage() {
     dayjs().endOf("month").toDate(),
   );
   const [dailyDate, setDailyDate] = useState<Date | null>(dayjs().toDate());
+  const [annualYear, setAnnualYear] = useState<number>(dayjs().year());
+  const [annualEmployeeId, setAnnualEmployeeId] = useState<string | null>(null);
   const [branchId, setBranchId] = useState<string | null>(null);
   const [siteId, setSiteId] = useState<string | null>(null);
   const [departmentId, setDepartmentId] = useState<string | null>(null);
@@ -161,6 +164,7 @@ export function AttendanceSheetPage() {
           data={[
             { label: strings.attendance.viewMonthly, value: "monthly" },
             { label: strings.attendance.viewDaily, value: "daily" },
+            { label: strings.attendance.viewAnnual, value: "annual" },
           ]}
         />
       </Group>
@@ -208,14 +212,25 @@ export function AttendanceSheetPage() {
               onCellClick={openDay}
             />
           )
-        ) : daily.isLoading ? (
-          <Group justify="center" p="xl"><Loader /></Group>
-        ) : daily.isError ? (
-          <Text c="red">{strings.attendance.dailyError}</Text>
+        ) : view === "daily" ? (
+          daily.isLoading ? (
+            <Group justify="center" p="xl"><Loader /></Group>
+          ) : daily.isError ? (
+            <Text c="red">{strings.attendance.dailyError}</Text>
+          ) : (
+            <DailyList
+              rows={daily.data?.items ?? []}
+              onRowClick={(empId, date) => openDay(empId, date)}
+            />
+          )
         ) : (
-          <DailyList
-            rows={daily.data?.items ?? []}
-            onRowClick={(empId, date) => openDay(empId, date)}
+          <AnnualView
+            year={annualYear}
+            onYearChange={setAnnualYear}
+            employeeId={annualEmployeeId}
+            onEmployeeChange={setAnnualEmployeeId}
+            attendanceStatus={attendanceStatus}
+            onCellClick={openDay}
           />
         )}
       </Paper>

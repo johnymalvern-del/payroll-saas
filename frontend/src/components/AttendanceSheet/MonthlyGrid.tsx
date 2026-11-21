@@ -63,9 +63,26 @@ function CellView({
 }) {
   if (!cell) {
     return (
-      <Text size="xs" c="dimmed">
-        {"\u2014"}
-      </Text>
+      <div
+        role={onCellClick ? "button" : undefined}
+        tabIndex={onCellClick ? 0 : undefined}
+        data-testid={`cell-${employeeId}-${workDate}`}
+        onClick={() => onCellClick?.(employeeId, workDate)}
+        onKeyDown={(e) => {
+          if (!onCellClick) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onCellClick(employeeId, workDate);
+          }
+        }}
+        style={{ cursor: onCellClick ? "pointer" : "default" }}
+      >
+        <Group gap={4} wrap="nowrap" justify="center">
+          <Text size="xs" c="dimmed">
+            {"\u2014"}
+          </Text>
+        </Group>
+      </div>
     );
   }
   const lines: string[] = [statusLabel(cell.status)];
