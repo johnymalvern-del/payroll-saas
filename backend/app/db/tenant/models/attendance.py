@@ -448,6 +448,12 @@ class Adjustment(Base):
     outcome='revert' restores the punch-based computation. Never edited
     or deleted. old_value and new_value capture the attendance_day snapshot
     before and after so audit drill-down shows exactly what changed.
+
+    Stage B Batch C: shift_id captures an HR-selected shift override.
+    NULL means "no override — use the detected shift". ON DELETE SET NULL:
+    if a Shift row is hard-deleted, the adjustment's shift_id becomes NULL,
+    but the shift's name is preserved in new_value.shift_name (captured at
+    write time in _apply_adjustment, not read time).
     """
 
     __tablename__ = "adjustment"
@@ -481,6 +487,11 @@ class Adjustment(Base):
     new_value: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     period_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
+    )
+    shift_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("shift.id", ondelete="SET NULL"),
+        nullable=True,
     )
     leave_request_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

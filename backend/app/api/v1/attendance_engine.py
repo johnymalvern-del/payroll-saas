@@ -18,6 +18,14 @@ excess beyond grace counts.
 
 B13: rounding applies to clock-in and clock-out before session build.
 nearest = half up. No rounding at segment level.
+
+Stage B Batch C: shift override. If the latest Adjustment for a day has
+shift_id set, recompute_day uses that shift for every session of the day
+instead of detect_shift. _day_snapshot and _persist_adjustment capture the
+shift's name at write time so that a hard-deleted Shift row does not erase
+the identity of the shift HR selected. Deactivated shifts (is_active=False)
+remain usable when recomputing historical attendance; only the frontend
+correction UI hides them for new corrections.
 """
 from __future__ import annotations
 
@@ -785,6 +793,12 @@ def recompute_day(db, employee_id, work_date):
 
     adj = _load_adjustments(db, employee_id, work_date)
 
+    # Stage B Batch C: HR-selected shift override on the latest adjustment,
+    # if any. Applies to all sessions of the day. Deactivated shifts are
+    # honoured here (recompute is historical); the correction UI hides them
+    # for new corrections.
+    override_shift_id = adj.shift_id if adj is not None and adj.shift_id is not None else None
+
     win_start = datetime.combine(work_date - timedelta(days=1), time(20, 0), tzinfo=tz)
     win_end = datetime.combine(work_date + timedelta(days=2), time(6, 0), tzinfo=tz)
     punch_rows = db.scalars(select(Punch).where(
@@ -817,7 +831,21 @@ def recompute_day(db, employee_id, work_date):
     all_shifts = {k: v for k, v in all_shifts.items() if v is not None}
 
     for s in day_sessions:
-        if s.shift_id is None:
+        if override_shift_id is not None:
+            # Shift override: use it for every session, skip detect_shift.
+            s.shift_id = override_shift_id
+            if override_shift_id not in all_shifts:
+                # Override may point at a deactivated shift not returned by
+                # _load_shift_candidates (which filters on is_active). Load
+                # it explicitly so recompute honours it. If the shift row is
+                # genuinely gone (hard-deleted, FK SET NULL), override_shift_id
+                # would already have been nulled by the FK — we would not
+                # reach this branch. So a lookup miss here means inactive,
+                # not deleted.
+                sh = db.get(Shift, override_shift_id)
+                if sh is not None:
+                    all_shifts[override_shift_id] = sh
+        elif s.shift_id is None:
             local_in = s.start.astimezone(tz)
             sid, outside = detect_shift(
                 local_in, candidates, tolerance_minutes=60,
@@ -901,10 +929,17 @@ def _load_adjustments(db, employee_id, work_date):
     )
 
 
-def _day_snapshot(day):
+def _day_snapshot(day, *, shift_name: str | None = None):
+    """Snapshot an AttendanceDay for audit drill-down.
+
+    Stage B Batch C: shift_name is stored alongside shift_id so that a
+    hard-deleted Shift row (FK ON DELETE SET NULL) does not erase the
+    identity of the shift that was in effect. Callers that have the shift
+    name should pass it; otherwise the snapshot records shift_id only.
+    """
     if day is None:
         return None
-    return {
+    snap = {
         "id": str(day.id),
         "employee_id": str(day.employee_id),
         "work_date": day.work_date.isoformat(),
@@ -920,22 +955,32 @@ def _day_snapshot(day):
         "source_version": day.source_version,
         "locked": day.locked,
     }
+    if shift_name is not None:
+        snap["shift_name"] = shift_name
+    return snap
 
 
 def _persist_adjustment(db, *, employee_id, work_date, outcome, time_in, time_out,
-                        reason_code, note, created_by, batch_id=None):
+                        reason_code, note, created_by, batch_id=None,
+                        shift_id=None, shift_name=None):
     """Insert one Adjustment (append-only). Returns the row.
 
     Caller orchestrates: check day is not locked, call this, call
     recompute_day, refetch the day, set adj.new_value from the snapshot,
     then commit. reason_code validation is the endpoint's job, not this
     helper's (C7).
+
+    Stage B Batch C: shift_id records an HR-selected shift override (None
+    means "no override"). shift_name is a human-readable label captured at
+    write time, stored inside old_value / new_value snapshots by the
+    caller (see _apply_adjustment) so a hard-deleted Shift row does not
+    erase the label.
     """
     day_before = db.scalar(select(AttendanceDay).where(
         AttendanceDay.employee_id == employee_id,
         AttendanceDay.work_date == work_date,
     ))
-    old_snapshot = _day_snapshot(day_before) if day_before is not None else None
+    old_snapshot = _day_snapshot(day_before, shift_name=None) if day_before is not None else None
     minutes = None
     if outcome == "worked" and time_in is not None and time_out is not None:
         minutes = max(0, int((time_out - time_in).total_seconds() / 60))
@@ -950,6 +995,7 @@ def _persist_adjustment(db, *, employee_id, work_date, outcome, time_in, time_ou
         note=note,
         created_by=created_by,
         batch_id=batch_id,
+        shift_id=shift_id,
         old_value=old_snapshot,
     )
     db.add(adj)
@@ -964,6 +1010,10 @@ def _build_day_from_adjustment_only(db, employee, work_date, holidays, today_loc
     Called only when an adjustment exists, is not 'revert', and there are
     no punch rows. leave/sick/absent/day_off are handled directly; 'worked'
     synthesises a session from the adjustment's times.
+
+    Stage B Batch C: if adj.shift_id is set, prefer it over default_shift_id
+    and expected_shift_id so HR's override is honoured on this no-punch path
+    too.
     """
     if adj.outcome in ("leave", "sick", "absent", "day_off"):
         flags = ["unreconciled_leave"] if adj.outcome in ("leave", "sick") else []
@@ -978,9 +1028,12 @@ def _build_day_from_adjustment_only(db, employee, work_date, holidays, today_loc
             shift_id=None, flags=["incomplete_adjustment"], segments=[],
             existing=existing)
     shift = None
-    if default_shift_id is not None:
+    override_shift_id = adj.shift_id if getattr(adj, "shift_id", None) is not None else None
+    if override_shift_id is not None:
+        shift = db.get(Shift, override_shift_id)
+    if shift is None and default_shift_id is not None:
         shift = db.get(Shift, default_shift_id)
-    elif expected_shift_id is not None:
+    if shift is None and expected_shift_id is not None:
         shift = db.get(Shift, expected_shift_id)
     if shift is None:
         candidates = _load_shift_candidates(db)

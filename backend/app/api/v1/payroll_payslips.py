@@ -1,3 +1,4 @@
+
 """Payslip read endpoints (Chapter 4 Bundle 004b-b + Chapter 4H B-3).
 
 Chapter 4H B-3 additions (round-2 amendments §12–§14):

@@ -1,4 +1,15 @@
-'''Shift CRUD endpoints (Chapter 2A).'''
+'''Shift CRUD endpoints (Chapter 2A).
+
+Stage B Batch C: list_shifts accepts an explicit `active_only` query
+parameter (default false). The attendance day-panel's shift picker passes
+active_only=true to hide deactivated shifts while still allowing
+historical attendance (which references deactivated shifts through
+AttendanceDay.shift_id) to render its shift name. `active_only` is
+deliberately separate from the existing `include_inactive` flag: they
+express opposite intents, and active_only wins if both are passed, so a
+picker built on active_only can never accidentally show a deactivated
+shift.
+'''
 from __future__ import annotations
 
 import base64
@@ -98,10 +109,22 @@ def list_shifts(
     limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
     cursor: str | None = Query(None),
     include_inactive: bool = Query(False),
+    active_only: bool = Query(False),
     include_total: bool = Query(False),
 ) -> ShiftListOut:
+    """List shifts.
+
+    Precedence: when active_only=true, only is_active=True rows are
+    returned, regardless of include_inactive. When active_only=false
+    (default), the existing include_inactive flag controls whether
+    deactivated shifts are included. This keeps every existing caller
+    byte-identical while giving the correction UI's picker an explicit
+    "never show a deactivated shift" switch.
+    """
     q = select(Shift)
-    if not include_inactive:
+    if active_only:
+        q = q.where(Shift.is_active.is_(True))
+    elif not include_inactive:
         q = q.where(Shift.is_active.is_(True))
     if cursor is not None:
         ts, cid = _decode_cursor(cursor)
@@ -116,7 +139,9 @@ def list_shifts(
     total = None
     if include_total:
         tq = select(func.count()).select_from(Shift)
-        if not include_inactive:
+        if active_only:
+            tq = tq.where(Shift.is_active.is_(True))
+        elif not include_inactive:
             tq = tq.where(Shift.is_active.is_(True))
         total = int(db.scalar(tq) or 0)
     return ShiftListOut(items=[_to_out(r) for r in rows], next_cursor=next_cursor, total=total)

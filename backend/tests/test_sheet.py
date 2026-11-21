@@ -3,6 +3,9 @@
 Part 1: fixtures, helpers, 2 tests (basic sheet, C2 any-role).
 Part 2 (2C-5d-ii): daily one-row-per-employee, mark_reviewed happy path,
 mark_reviewed refuses open exceptions.
+Part 3 (Stage B Batch A): sheet endpoint accepts a 366-day range so the
+annual employee view can be served from the same endpoint; sheet endpoint
+filters by employee_id for the annual single-employee fetch.
 """
 from __future__ import annotations
 import uuid
@@ -99,7 +102,7 @@ def _mk_emp(session, code, *, dflt_shift=None):
 
 
 def _mk_shift(session):
-    s = Shift(name=f"S-{uuid.uuid4().hex[:6]}", start_time=time(8, 0), length_minutes=480, unpaid_break_minutes=60, paid_break_minutes=0, grace_late_minutes=0, grace_early_minutes=0, grace_mode="threshold", rounding_minutes=0, rounding_mode="nearest", min_overtime_minutes=0, overtime_requires_approval=False, max_shift_minutes=720, match_tolerance_minutes=60, salaried_premium_mode="full", pay_early_arrival=False, is_active=True, row_version=1)
+    s = Shift(name=f"S-{uuid.uuid4().hex[:6]}", start_time=time(8, 0), length_minutes=480, unpaid_break_minutes=60, paid_break_minutes=0, grace_late_minutes=0,grace_early_minutes=0, grace_mode="threshold", rounding_minutes=0, rounding_mode="nearest", min_overtime_minutes=0, overtime_requires_approval=False, max_shift_minutes=720, match_tolerance_minutes=60, salaried_premium_mode="full", pay_early_arrival=False, is_active=True, row_version=1)
     session.add(s); session.commit(); return s
 
 
@@ -217,7 +220,6 @@ def test_sheet_no_adjustment_fields_any_role(api, db):
     _mk_user(db, username="sht-mgr", role="manager", password="ShtMgr12345678!")
     _mk_user(db, username="sht-emp", role="employee", password="ShtEmp12345678!", employee_id=emp.id)
     _mk_user(db, username="sht-aud", role="auditor", password="ShtAud12345678!")
-
     roles = [
         ("payroll_admin", "sht-pa", "ShtPa12345678!"),
         ("hr", "sht-hr", "ShtHr12345678!"),
@@ -352,5 +354,80 @@ def test_mark_reviewed_refuses_open_exceptions(api, db):
     by_code = {row["employee_code"]: row for row in r.json()["items"]}
     assert by_code["MR3-1"]["reviewed"] is True
     assert by_code["MR3-2"]["reviewed"] is False
+
+
+# ----------------------------------------------------------------------
+# Stage B Batch A: 366-day range for the annual view
+# ----------------------------------------------------------------------
+
+def test_get_sheet_accepts_year_range(api, db):
+    """Stage B Batch A: the sheet endpoint accepts a 366-day range (was 31)
+    so the annual employee view can be served from the same endpoint.
+
+    A 2024 year query returns one cell per day for the seeded employee,
+    including the leap day (2024-02-29). Also proves the endpoint is not
+    silently off-by-one at the year boundary.
+    """
+    client, tenant = api
+    tok = _admin_token(client, tenant.slug)
+    emp, _ = _setup_worked_day(db)
+    r = client.get(
+        "/api/v1/attendance/sheet?from_date=2024-01-01&to_date=2024-12-31",
+        headers=_auth(tok, tenant.slug),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["items"]) == 1
+    item = body["items"][0]
+    assert item["employee_id"] == str(emp.id)
+    # 2024 is a leap year — 366 days inclusive of Jan 1 and Dec 31.
+    assert len(item["days"]) == 366, f"expected 366 cells, got {len(item['days'])}"
+    assert item["days"][0]["work_date"] == "2024-01-01"
+    assert item["days"][-1]["work_date"] == "2024-12-31"
+    leap_day = [c for c in item["days"] if c["work_date"] == "2024-02-29"]
+    assert len(leap_day) == 1, "leap day 2024-02-29 must appear exactly once"
+
+
+# ----------------------------------------------------------------------
+# Stage B Batch A: sheet endpoint filters by employee_id
+# ----------------------------------------------------------------------
+
+def test_get_sheet_filters_by_employee_id(api, db):
+    """Stage B Batch A: when employee_id is supplied, only that employee's
+    row is returned. Used by the annual view to fetch one employee's year.
+    """
+    client, tenant = api
+    tok = _admin_token(client, tenant.slug)
+    emp1, _ = _setup_worked_day(db, code="F1")
+    emp2, _ = _setup_worked_day(db, code="F2")
+
+    # Without filter: both employees returned.
+    r = client.get(
+        "/api/v1/attendance/sheet?from_date=2024-05-01&to_date=2024-05-01",
+        headers=_auth(tok, tenant.slug),
+    )
+    assert r.status_code == 200, r.text
+    codes_all = {item["employee_code"] for item in r.json()["items"]}
+    assert codes_all == {"F1", "F2"}
+
+    # With filter: only the requested employee.
+    r = client.get(
+        f"/api/v1/attendance/sheet?from_date=2024-05-01&to_date=2024-05-01&employee_id={emp1.id}",
+        headers=_auth(tok, tenant.slug),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["items"]) == 1
+    assert body["items"][0]["employee_id"] == str(emp1.id)
+    assert body["items"][0]["employee_code"] == "F1"
+
+    # include_total also honours the filter.
+    r = client.get(
+        f"/api/v1/attendance/sheet?from_date=2024-05-01&to_date=2024-05-01&employee_id={emp1.id}&include_total=true",
+        headers=_auth(tok, tenant.slug),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 1
 
 # END OF FILE

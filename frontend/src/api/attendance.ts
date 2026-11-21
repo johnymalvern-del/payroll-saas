@@ -200,6 +200,7 @@ function normaliseDayOut(data: unknown): DayOut {
 export async function fetchSheet(params: {
   fromDate: string;
   toDate: string;
+  employeeId?: string | null;
   siteId?: string | null;
   branchId?: string | null;
   departmentId?: string | null;
@@ -210,6 +211,7 @@ export async function fetchSheet(params: {
   const qs = new URLSearchParams();
   qs.set("from_date", params.fromDate);
   qs.set("to_date", params.toDate);
+  if (params.employeeId) qs.set("employee_id", params.employeeId);
   if (params.siteId) qs.set("site_id", params.siteId);
   if (params.branchId) qs.set("branch_id", params.branchId);
   if (params.departmentId) qs.set("department_id", params.departmentId);

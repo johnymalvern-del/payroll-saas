@@ -1,3 +1,4 @@
+
 """Defensive audit writer for payroll endpoints (Chapter 4).
 
 The control audit table's exact column set is not fully probed yet; this

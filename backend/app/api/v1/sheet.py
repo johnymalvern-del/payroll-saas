@@ -8,7 +8,16 @@ Three endpoints (this file part 1: sheet; part 2: daily, mark_reviewed):
 C2 compliance: no field in any response identifies a day as adjusted.
 Adjustments are visible only through the audit log.
 
-C9 limits: sheet page size default 50, max 200; date range max 31 days.
+C9 limits: sheet page size default 50, max 200; date range max 366 days.
+The range cap was widened from 31 to 366 in Stage B Batch A to support the
+annual employee view. 366 still bounds the endpoint against unbounded range
+queries; the previous 31-day cap had no test coverage and was never a
+data-integrity guard.
+
+Stage B Batch A: `get_sheet` also accepts an optional `employee_id` query
+parameter. When supplied, the result is restricted to that single employee.
+This is needed for the annual view, which fetches one employee's full year
+in a single call. Existing callers that omit `employee_id` are unaffected.
 
 B-5/B-11: each row carries `site_timezone` resolved once per request via
 app.services.site_timezone.site_timezone_map.
@@ -47,7 +56,7 @@ router = APIRouter(prefix="/attendance", tags=["attendance-sheet"])
 
 _DEFAULT_SHEET_LIMIT = 50
 _MAX_SHEET_LIMIT = 200
-_MAX_RANGE_DAYS = 31
+_MAX_RANGE_DAYS = 366
 
 
 def _validate_range(from_date: date, to_date: date) -> None:
@@ -134,6 +143,7 @@ def get_sheet(
     user: Annotated[Any, Depends(require_permission(Permission.ATTENDANCE_VIEW))],
     from_date: date,
     to_date: date,
+    employee_id: uuid.UUID | None = Query(None),
     site_id: uuid.UUID | None = Query(None),
     branch_id: uuid.UUID | None = Query(None),
     department_id: uuid.UUID | None = Query(None),
@@ -148,6 +158,8 @@ def get_sheet(
         site_id=site_id, branch_id=branch_id, department_id=department_id,
         include_terminated=include_terminated,
     )
+    if employee_id is not None:
+        q = q.where(Employee.id == employee_id)
     if cursor is not None:
         cid = _decode_emp_cursor(cursor)
         q = q.where(Employee.id > cid)
@@ -198,6 +210,8 @@ def get_sheet(
             site_id=site_id, branch_id=branch_id, department_id=department_id,
             include_terminated=include_terminated,
         )
+        if employee_id is not None:
+            tq = tq.where(Employee.id == employee_id)
         count_q = select(func.count()).select_from(tq.subquery())
         total = int(db.scalar(count_q) or 0)
 
