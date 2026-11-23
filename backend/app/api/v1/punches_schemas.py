@@ -25,13 +25,17 @@ branch the employee clocked at ("Hotel Branch - Cape Town", per the
 location-confirmation requirement) without a second round trip to
 /org/sites. It is display data only; site_id remains the identifier.
 
-ten_0030 (privacy policy s5): PunchOut gains distance_band. The exact
-distance_m is purged with the coordinates after the retention window,
-so the band is what an auditor sees for an older punch. It is a coarse
-geometry descriptor and never localises an employee: 'within' (inside
-the fence), 'near' (outside but within twice the radius), 'distant'
-(beyond that), and 'unknown' for punches with no fix, no site radius,
-or captured before ten_0030.
+ten_0030 (privacy policy s5): PunchOut gains a nested location object
+holding the raw fix, and distance_band alongside it. These are transitional
+shapes. location is the destination -- it is what survives ten_0031, when
+punch.latitude, punch.longitude, punch.gps_accuracy_m and punch.distance_m
+are dropped. The four flat fields remain until then so this change is purely
+additive and no reader has to switch at the same moment.
+
+After ten_0031 the flat fields are always None, so clients should read
+location and distance_band. location being null means either no fix was
+captured or retention has already deleted it; those are indistinguishable to
+a reader and deliberately so -- the punch never recorded which.
 '''
 from __future__ import annotations
 
@@ -40,7 +44,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import AwareDatetime, BaseModel, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 _DEVICE_METHODS = ('fingerprint', 'face', 'code')
 
@@ -71,6 +75,24 @@ class PunchBatchIn(BaseModel):
     punches: list[PunchIn] = Field(..., max_length=500)
 
 
+class PunchLocationOut(BaseModel):
+    """The raw GPS fix for one punch.
+
+    Absent once retention deletes it. Deliberately has no 'purged' flag:
+    after ten_0031 nothing distinguishes "never captured" from "expired",
+    and pretending otherwise would need a marker column that is itself
+    retained personal metadata.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    latitude: Decimal
+    longitude: Decimal
+    gps_accuracy_m: Decimal | None = None
+    distance_m: Decimal | None = None
+    captured_at: datetime
+
+
 class PunchOut(BaseModel):
     id: uuid.UUID
     client_punch_id: uuid.UUID
@@ -87,6 +109,7 @@ class PunchOut(BaseModel):
     match_score: Decimal | None = None
     liveness_passed: bool | None = None
     photo_object_key: str | None = None
+    # Transitional: populated from punch until ten_0031 drops those columns.
     latitude: Decimal | None = None
     longitude: Decimal | None = None
     gps_accuracy_m: Decimal | None = None
@@ -94,6 +117,8 @@ class PunchOut(BaseModel):
     geofence_reason: str | None = None
     distance_m: Decimal | None = None
     distance_band: str | None = None
+    # Destination shape: the fix, or null once retention has removed it.
+    location: PunchLocationOut | None = None
     status: str
     flags: list[str]
     raw_payload: dict[str, Any]

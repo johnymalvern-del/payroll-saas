@@ -23,6 +23,12 @@ punch, so privacy-policy section 5 retention can delete it without touching
 the append-only punch row. It inherits Base only: a row is inserted once and
 later deleted, never updated, and a database trigger refuses UPDATE. Its two
 CHECK constraints are enforced by ten_0030.
+
+Punch.location is viewonly and lazily loaded. viewonly because the write path
+inserts the row explicitly and the relationship must never try to manage it;
+lazy because recompute_day queries Punch on every punch and has no use for
+the coordinates -- an eager load would add a query to the attendance engine's
+hot path. Callers that read a list of punches should use selectinload.
 """
 from __future__ import annotations
 
@@ -200,7 +206,11 @@ class PublicHolidayTenant(Base, TimestampMixin):
 class Punch(Base):
     """One punch event. Insert-only; never updated or deleted (see module
     docstring). The append-only rule is enforced by migration 0012 and by
-    convention in every code path."""
+    convention in every code path.
+
+    location is the GPS fix, held in a separate table because it must be
+    deletable under privacy policy section 5 while this row is not.
+    """
 
     __tablename__ = "punch"
     __table_args__ = (
@@ -271,6 +281,13 @@ class Punch(Base):
     raw_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    location: Mapped["PunchLocation | None"] = relationship(
+        "PunchLocation",
+        uselist=False,
+        lazy="select",
+        viewonly=True,
     )
 
 
