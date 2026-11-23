@@ -34,8 +34,20 @@ could be reached. A site with no geofence radius produces no distance, but
 the employee's position was still captured, and retention policy applies to
 it on the same 30-day schedule as any other. Gating the write on having a
 distance would mean ten_0031 destroyed those coordinates abruptly at the
-column drop instead of expiring them on schedule -- an unpredictable
-deletion is worse than a predictable one.
+column drop instead of expiring them on schedule.
+
+PunchOut.location is the transitional read shape: the fix is exposed as a
+nested object while the flat latitude/longitude/gps_accuracy_m/distance_m
+fields still mirror punch. After ten_0031 those columns are gone, the flat
+fields become permanently None, and location is the only place to read a
+fix from. Clients should prefer location already.
+
+list_punches eager-loads the relationship with selectinload -- 100 rows each
+needing one lazily-loaded location would be 100 extra queries. Single-punch
+reads use the default lazy load, one query each, which is correct there. The
+write path deliberately reads the value off the payload rather than the
+relationship: the row is in the session and unflushed to the relationship,
+so a lazy load at that moment could legitimately miss it.
 """
 from __future__ import annotations
 
@@ -47,6 +59,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import func, or_, select
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import ScannerDep, StorageDep, TenantDbDep, TenantDep
 from app.api.v1.device_auth import DeviceDep
@@ -65,6 +78,7 @@ from app.api.v1.punches_schemas import (
     PunchBatchOut,
     PunchIn,
     PunchListOut,
+    PunchLocationOut,
     PunchOut,
 )
 from app.core.errors import AppError
@@ -120,6 +134,18 @@ def _distance_band(distance_m: float | None, radius_m: float | None) -> str:
     return 'distant'
 
 
+def _location_out(loc: PunchLocation | None) -> PunchLocationOut | None:
+    if loc is None:
+        return None
+    return PunchLocationOut(
+        latitude=loc.latitude,
+        longitude=loc.longitude,
+        gps_accuracy_m=loc.gps_accuracy_m,
+        distance_m=loc.distance_m,
+        captured_at=loc.captured_at,
+    )
+
+
 def _site_name(db: Any, site_id: uuid.UUID | None, cache: dict | None = None) -> str | None:
     """Display name for a site id, memoised for batch reuse.
 
@@ -138,7 +164,12 @@ def _site_name(db: Any, site_id: uuid.UUID | None, cache: dict | None = None) ->
     return name
 
 
-def _to_out(p: Punch, *, site_name: str | None = None) -> PunchOut:
+def _to_out(
+    p: Punch,
+    *,
+    site_name: str | None = None,
+    location: PunchLocation | None = None,
+) -> PunchOut:
     return PunchOut(
         id=p.id, client_punch_id=p.client_punch_id, employee_id=p.employee_id,
         device_id=p.device_id, site_id=p.site_id, site_name=site_name,
@@ -152,6 +183,7 @@ def _to_out(p: Punch, *, site_name: str | None = None) -> PunchOut:
         geofence_reason=p.geofence_reason,
         distance_m=p.distance_m,
         distance_band=p.distance_band,
+        location=_location_out(location),
         status=p.status,
         flags=list(p.flags or []), raw_payload=p.raw_payload, created_at=p.created_at,
     )
@@ -221,6 +253,8 @@ def list_punches(
     if cursor is not None:
         ts, cid = _decode_cursor(cursor)
         q = q.where(or_(Punch.created_at > ts, (Punch.created_at == ts) & (Punch.id > cid)))
+    # One extra query for the whole page rather than one per punch.
+    q = q.options(selectinload(Punch.location))
     q = q.order_by(Punch.created_at.asc(), Punch.id.asc()).limit(limit + 1)
     rows = list(db.scalars(q).all())
     next_cursor = None
@@ -247,7 +281,14 @@ def list_punches(
         total = int(db.scalar(tq) or 0)
     name_cache: dict = {}
     return PunchListOut(
-        items=[_to_out(r, site_name=_site_name(db, r.site_id, name_cache)) for r in rows],
+        items=[
+            _to_out(
+                r,
+                site_name=_site_name(db, r.site_id, name_cache),
+                location=r.location,
+            )
+            for r in rows
+        ],
         next_cursor=next_cursor,
         total=total,
     )
@@ -392,15 +433,17 @@ def _process_punch(
     # site with no radius yields no distance, but the position was still
     # captured and must expire on the normal schedule rather than vanish
     # when ten_0031 drops the columns from punch.
+    location_row: PunchLocation | None = None
     if payload.latitude is not None and payload.longitude is not None:
-        db.add(PunchLocation(
+        location_row = PunchLocation(
             punch_id=punch.id,
             latitude=payload.latitude,
             longitude=payload.longitude,
             gps_accuracy_m=accuracy_val,
             distance_m=distance_val,
             captured_at=punch.effective_time,
-        ))
+        )
+        db.add(location_row)
 
     db.add(AuditLog(
         id=uuid.uuid4(), actor_user_id=None, actor_role=None,
@@ -429,6 +472,7 @@ def _process_punch(
         warnings = ["attendance_recompute_failed"]
         print(f"[TRIGGER FAILED] {type(e).__name__}: {e}", file=_sys.stderr)
         _tb.print_exc(file=_sys.stderr)
+    punch.__dict__['_si_location'] = location_row
     return punch, warnings
 
 
@@ -445,7 +489,11 @@ def submit_punch(
     server_received_at = datetime.now(timezone.utc)
     request_id = getattr(request.state, 'request_id', None)
     punch, warnings = _process_punch(db, device, None, payload, request_id, server_received_at, tenant.crypto, storage, scanner)
-    out = _to_out(punch, site_name=_site_name(db, punch.site_id))
+    out = _to_out(
+        punch,
+        site_name=_site_name(db, punch.site_id),
+        location=punch.__dict__.get('_si_location'),
+    )
     out.warnings = warnings
     return out
 
@@ -473,7 +521,11 @@ def submit_punch_batch(
                 rejected += 1
             else:
                 accepted += 1
-            item_out = _to_out(punch, site_name=_site_name(db, punch.site_id, name_cache))
+            item_out = _to_out(
+                punch,
+                site_name=_site_name(db, punch.site_id, name_cache),
+                location=punch.__dict__.get('_si_location'),
+            )
             item_out.warnings = warnings
             results.append(PunchBatchItemOut(index=i, ok=True, punch=item_out, error=None))
         except AppError as e:
@@ -496,6 +548,6 @@ def get_punch(
         assert_in_scope(user, punch.employee_id, db)
     except ScopeViolation:
         raise AppError('record_not_found', 'Punch not found', 404) from None
-    return _to_out(punch, site_name=_site_name(db, punch.site_id))
+    return _to_out(punch, site_name=_site_name(db, punch.site_id), location=punch.location)
 
 # END OF FILE
