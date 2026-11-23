@@ -403,4 +403,51 @@ describe("ClockInPage", () => {
     // The accuracy is still reported, because a fix *was* obtained.
     expect(v).toHaveTextContent(/accurate to 12 m/i);
   });
+
+  it("reads accuracy and distance from the nested location object", async () => {
+    // After the destructive migration the flat fields are permanently null,
+    // so a page reading only those would silently lose the accuracy and
+    // distance from the verdict -- no error, just quietly degraded output.
+    stubGeo({ kind: "ok", accuracy: 12 });
+    stubFetch({
+      ...BASE_PUNCH,
+      site_name: "Bellville",
+      geofence_result: "outside",
+      geofence_reason: "outside_geofence",
+      gps_accuracy_m: null,
+      distance_m: null,
+      location: {
+        latitude: "-33.923900",
+        longitude: "18.424100",
+        gps_accuracy_m: "9.00",
+        distance_m: "19152.30",
+        captured_at: "2026-11-10T08:00:00Z",
+      },
+    });
+    renderPage();
+    await clockInFlow();
+    const v = await screen.findByTestId("clockin-verdict");
+    expect(v).toHaveTextContent(/accurate to 9 m/i);
+    expect(v).toHaveTextContent(/19152 m from site/i);
+  });
+
+  it("falls back to the locally measured accuracy when no fix is returned", async () => {
+    // A punch recorded before the location table existed has no nested
+    // object and null flat fields. Showing nothing would hide a usable
+    // measurement the device already took.
+    stubGeo({ kind: "ok", accuracy: 7 });
+    stubFetch({
+      ...BASE_PUNCH,
+      site_name: "Hotel Branch",
+      geofence_result: "inside",
+      geofence_reason: "within_geofence",
+      gps_accuracy_m: null,
+      distance_m: null,
+      location: null,
+    });
+    renderPage();
+    await clockInFlow();
+    const v = await screen.findByTestId("clockin-verdict");
+    expect(v).toHaveTextContent(/accurate to 7 m/i);
+  });
 });

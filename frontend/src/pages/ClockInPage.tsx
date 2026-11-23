@@ -102,6 +102,20 @@ function describeLocationProblem(pos: PositionResult | null): string | null {
   }
 }
 
+/**
+ * Read a numeric field that may be absent, null, or a decimal string.
+ *
+ * The API serialises NUMERIC columns as strings. Number("") is 0 and
+ * Number(null) is 0, so a naive Number() would turn "no value" into "zero
+ * metres" -- showing an employee "accurate to 0 m" when their accuracy is
+ * simply unknown.
+ */
+function num(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function ClockInPage() {
   const me = useMe();
   const [deviceKey, setDeviceKeyState] = useState<string | null>(getDeviceKey());
@@ -234,17 +248,28 @@ export function ClockInPage() {
       );
 
       const t = new Date(out.effective_time).toLocaleTimeString();
+
+      // The fix now lives in a nested object, because `punch` is append-only
+      // and the coordinates must be deletable on a retention schedule. The
+      // flat fields are transitional: they mirror `punch` until the
+      // destructive migration drops those columns, after which they are
+      // permanently null. Prefer `location`, fall back to the flat fields so
+      // this works on both sides of that migration, and use the locally
+      // measured fix as a last resort.
+      const fix = out.location ?? null;
       const accuracy =
-        out.gps_accuracy_m != null ? Number(out.gps_accuracy_m) : pos.ok ? pos.gps_accuracy_m : null;
-      const distance = out.distance_m != null ? Number(out.distance_m) : null;
+        num(fix?.gps_accuracy_m) ??
+        num(out.gps_accuracy_m) ??
+        (pos.ok ? pos.gps_accuracy_m : null);
+      const distance = num(fix?.distance_m) ?? num(out.distance_m);
 
       setVerdict({
         time: t,
         siteName: out.site_name ?? null,
         result: out.geofence_result ?? null,
         reason: out.geofence_reason ?? null,
-        accuracy: Number.isFinite(accuracy as number) ? accuracy : null,
-        distance: Number.isFinite(distance as number) ? distance : null,
+        accuracy,
+        distance,
         locationProblem: describeLocationProblem(pos),
       });
 

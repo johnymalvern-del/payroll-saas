@@ -24,6 +24,26 @@ export type PunchIn = {
   gps_accuracy_m?: number | string | null;
 };
 
+/**
+ * The raw GPS fix for one punch.
+ *
+ * Lives in its own table because `punch` is append-only -- UPDATE and DELETE
+ * are revoked and a trigger raises -- so a column that must eventually be
+ * deleted cannot live there. Retention deletes this object outright 30 days
+ * after capture; the punch and its verdict survive.
+ *
+ * A null `location` therefore means either "no fix was captured" or "the fix
+ * has expired". Those two cases are deliberately indistinguishable: telling
+ * them apart would need a marker that is itself retained personal metadata.
+ */
+export type PunchLocationOut = {
+  latitude: string;
+  longitude: string;
+  gps_accuracy_m?: string | null;
+  distance_m?: string | null;
+  captured_at: string;
+};
+
 export type PunchOut = {
   id: string;
   effective_time: string;
@@ -31,12 +51,19 @@ export type PunchOut = {
   flags: string[];
   site_id?: string | null;
   site_name?: string | null;
+  /**
+   * Transitional. Populated from `punch` until the destructive migration
+   * drops those columns, after which they are permanently null. Read
+   * `location` instead.
+   */
   latitude?: string | null;
   longitude?: string | null;
   gps_accuracy_m?: string | null;
+  distance_m?: string | null;
   geofence_result?: string | null;
   geofence_reason?: string | null;
-  distance_m?: string | null;
+  distance_band?: string | null;
+  location?: PunchLocationOut | null;
   warnings?: string[];
 };
 
