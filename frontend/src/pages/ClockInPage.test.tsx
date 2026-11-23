@@ -382,4 +382,25 @@ describe("ClockInPage", () => {
     expect(v).toHaveTextContent(/No location recorded/i);
     expect(v).toHaveTextContent(/permission was refused/i);
   });
+
+  it("blames the site, not the phone, when the site has no radius", async () => {
+    // The fix was good; the site record is what cannot be compared against it.
+    // Saying "No location recorded" here would send the employee to report a
+    // working phone.
+    stubGeo({ kind: "ok", accuracy: 12 });
+    stubFetch({
+      ...BASE_PUNCH,
+      site_name: "Hotel Branch",
+      geofence_result: "unavailable",
+      geofence_reason: "site_radius_not_configured",
+      gps_accuracy_m: "12.00",
+    });
+    renderPage();
+    await clockInFlow();
+    const v = await screen.findByTestId("clockin-verdict");
+    expect(v).toHaveTextContent(/This site has no location configured/i);
+    expect(v).not.toHaveTextContent(/No location recorded/i);
+    // The accuracy is still reported, because a fix *was* obtained.
+    expect(v).toHaveTextContent(/accurate to 12 m/i);
+  });
 });

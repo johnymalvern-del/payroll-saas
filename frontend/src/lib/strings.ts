@@ -85,9 +85,9 @@ export const strings = {
 
     // Identity disclosure. This terminal proves which machine a punch came
     // from and, from Phase 2 onward, where it came from -- but the employee
-    // code is self-declared and the photo is stored, not compared. Saying so
-    // plainly is better than letting "clock in with a photo" be mistaken for
-    // biometric verification.
+    // code is self-declared and the photo is stored only long enough to be
+    // validated and scanned. Saying so plainly is better than letting
+    // "clock in with a photo" be mistaken for biometric verification.
     identityNotice:
       "This terminal records your employee code, a photo and your location. It does not verify your identity biometrically. Anyone who knows your employee code could clock in as you, and HR can review every punch.",
 
@@ -110,6 +110,10 @@ export const strings = {
     verdictOutside: "Outside the authorised area",
     verdictInconclusive: "Location could not be verified",
     verdictUnavailable: "No location recorded",
+    // Distinct from verdictUnavailable: the fix arrived, but the site record
+    // has no coordinates or radius to compare it against. Blaming the phone
+    // here sends employees to report a device that is working correctly.
+    verdictSiteMissing: "This site has no location configured",
   },
   devices: {
     title: "Devices",

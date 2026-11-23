@@ -51,7 +51,22 @@ type Verdict = {
   locationProblem: string | null;
 };
 
-function verdictLabel(result: string | null): string {
+/**
+ * Reasons where the *site* is at fault, not the employee's device.
+ *
+ * The server returns "unavailable" for several distinct reasons. Only some of
+ * them mean no location was recorded; the ones below mean a location arrived
+ * perfectly well and the site record cannot be compared against it. Telling an
+ * employee "No location recorded" in those cases sends them to report a phone
+ * that is working correctly.
+ */
+const SITE_FAULT_REASONS = new Set([
+  "site_radius_not_configured",
+  "site_coordinates_missing",
+  "site_record_missing",
+]);
+
+function verdictLabel(result: string | null, reason: string | null): string {
   switch (result) {
     case "inside":
       return strings.clockIn.verdictInside;
@@ -60,6 +75,9 @@ function verdictLabel(result: string | null): string {
     case "inconclusive":
       return strings.clockIn.verdictInconclusive;
     default:
+      if (reason !== null && SITE_FAULT_REASONS.has(reason)) {
+        return strings.clockIn.verdictSiteMissing;
+      }
       return strings.clockIn.verdictUnavailable;
   }
 }
@@ -292,7 +310,7 @@ export function ClockInPage() {
     if (verdict.result === "outside" && verdict.distance != null) {
       verdictParts.push(strings.clockIn.distanceFromSite(Math.round(verdict.distance)));
     }
-    verdictParts.push(verdictLabel(verdict.result));
+    verdictParts.push(verdictLabel(verdict.result, verdict.reason));
   }
 
   return (
