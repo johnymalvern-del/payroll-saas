@@ -491,7 +491,11 @@ def _suggested_adjustment_for(db, exc, day, employee):
             "no_shift_match requires choosing a shift via 'custom'",
             status.HTTP_400_BAD_REQUEST,
         )
-    if t in ("low_confidence", "overtime_unapproved", "device_clock_gap", "duplicate", "employee_query"):
+    if t in (
+        "low_confidence", "overtime_unapproved", "device_clock_gap", "duplicate",
+        "employee_query", "liveness_failed", "geofence_outside",
+        "geofence_inconclusive",
+    ):
         return None
     raise AppError(
         "unknown_suggestion",

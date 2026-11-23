@@ -11,6 +11,19 @@ service computes effective_time and offset_ms from them.
 A6: photo_base64 (JPEG/PNG), raw_payload (<=8KB, no biometric-shaped
 keys) are validated by the service, not by the schema, because they
 need byte-level inspection.
+
+Phase 2: gps_accuracy_m carries the device's reported horizontal
+accuracy alongside latitude/longitude. It is intentionally NOT part of
+canonical_payload_hash -- see punches.py -- so a retry of an
+already-accepted punch keeps the same payload_hash and is recognised as
+a duplicate rather than a conflict. It is also deliberately unconstrained
+in sign: a device reporting nonsense is a device we want to record and
+flag as inconclusive, not one whose clock-in we want to reject outright.
+
+Phase 5: PunchOut gains site_name so the clock-in screen can name the
+branch the employee clocked at ("Hotel Branch - Cape Town", per the
+location-confirmation requirement) without a second round trip to
+/org/sites. It is display data only; site_id remains the identifier.
 '''
 from __future__ import annotations
 
@@ -35,6 +48,7 @@ class PunchIn(BaseModel):
     photo_base64: str | None = None
     latitude: Decimal | None = None
     longitude: Decimal | None = None
+    gps_accuracy_m: Decimal | None = None
     raw_payload: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator('method')
@@ -55,6 +69,7 @@ class PunchOut(BaseModel):
     employee_id: uuid.UUID
     device_id: uuid.UUID | None = None
     site_id: uuid.UUID | None = None
+    site_name: str | None = None
     server_received_at: datetime
     device_time: datetime
     device_now_at_send: datetime | None = None
@@ -66,6 +81,10 @@ class PunchOut(BaseModel):
     photo_object_key: str | None = None
     latitude: Decimal | None = None
     longitude: Decimal | None = None
+    gps_accuracy_m: Decimal | None = None
+    geofence_result: str | None = None
+    geofence_reason: str | None = None
+    distance_m: Decimal | None = None
     status: str
     flags: list[str]
     raw_payload: dict[str, Any]

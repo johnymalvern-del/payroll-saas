@@ -3,6 +3,18 @@
 The matrix below is written out independently of ROLE_PERMISSIONS. It is the
 literal transcription of section 6 of the master brief. If the code and this
 matrix disagree, one of them is wrong and the test fails.
+
+The three Biometric Attendance Programme permissions (ATTENDANCE_CLOCK,
+BIOMETRIC_ENROL, DEVICE_MANAGE) are not part of section 6 -- they extend it.
+They are listed here in the same independent-transcription style so the
+same guarantee holds: code and test must agree.
+
+NOTE: SECTION_6_MATRIX does not enumerate every Permission. PAYSLIP_VIEW and
+EMPLOYEE_CRUD are absent, a pre-existing gap in this file rather than an
+intentional exclusion. There is deliberately no "matrix covers every
+Permission" assertion, because adding one would fail on those two and
+inventing their rows would put unverified content into a document that
+claims to be a literal transcription.
 """
 from __future__ import annotations
 
@@ -72,7 +84,8 @@ def disposable_tenant() -> Iterator[_DisposableTenant]:
 
 
 # ---------------------------------------------------------------------------
-# Independent transcription of the section-6 matrix.
+# Independent transcription of the section-6 matrix, plus the biometric
+# attendance programme extensions.
 # ---------------------------------------------------------------------------
 
 ALL_ROLES = ("employee", "manager", "hr", "payroll_admin", "auditor")
@@ -104,6 +117,15 @@ SECTION_6_MATRIX: dict[Permission, dict[str, bool]] = {
     Permission.ATTENDANCE_VIEW: {"employee": True, "manager": True, "hr": True, "payroll_admin": True, "auditor": False},
     Permission.INTELLIGENCE_VIEW: {"employee": False, "manager": False, "hr": True, "payroll_admin": True, "auditor": True},
     Permission.INTELLIGENCE_MANAGE: {"employee": False, "manager": False, "hr": False, "payroll_admin": True, "auditor": False},
+
+    # --- Biometric Attendance Programme (Phase 3). Extensions, not section 6.
+    # Clocking is self-service and is not the same act as adjusting another
+    # person's attendance, so it is a separate permission from ATTENDANCE_ADJUST.
+    Permission.ATTENDANCE_CLOCK: {"employee": True, "manager": True, "hr": True, "payroll_admin": True, "auditor": False},
+    # Enrolment and device custody both touch special personal information or
+    # security credentials; restricted to the two administrative roles.
+    Permission.BIOMETRIC_ENROL: {"employee": False, "manager": False, "hr": True, "payroll_admin": True, "auditor": False},
+    Permission.DEVICE_MANAGE: {"employee": False, "manager": False, "hr": True, "payroll_admin": True, "auditor": False},
 }
 
 
@@ -179,6 +201,60 @@ def test_attendance_adjust_self_requires_attendance_adjust() -> None:
             assert Permission.ATTENDANCE_ADJUST in perms, (
                 f"{role} holds ATTENDANCE_ADJUST_SELF without ATTENDANCE_ADJUST"
             )
+
+
+# ---------------------------------------------------------------------------
+# Biometric Attendance Programme permissions
+# ---------------------------------------------------------------------------
+
+
+def test_attendance_clock_grants_every_employee_role_but_not_auditor() -> None:
+    """Clocking is self-service, so every role that is an employee of the
+    tenant may clock. The auditor may not, for exactly the reason they have
+    no SELF_VIEW: an auditor is not an employee of the company they audit.
+    """
+    for role in ("employee", "manager", "hr", "payroll_admin"):
+        assert Permission.ATTENDANCE_CLOCK in ROLE_PERMISSIONS[role], role
+    assert Permission.ATTENDANCE_CLOCK not in ROLE_PERMISSIONS["auditor"]
+
+
+def test_attendance_clock_does_not_imply_attendance_adjust() -> None:
+    """Clocking your own time must never be a path to correcting it.
+
+    employee holds ATTENDANCE_CLOCK and must not hold ATTENDANCE_ADJUST.
+    If this ever fails, a plain employee has gained the ability to rewrite
+    attendance -- which is the single most dangerous regression possible in
+    this permission set.
+    """
+    assert Permission.ATTENDANCE_CLOCK in ROLE_PERMISSIONS["employee"]
+    assert Permission.ATTENDANCE_ADJUST not in ROLE_PERMISSIONS["employee"]
+
+
+def test_biometric_enrol_is_administrative_only() -> None:
+    """Enrolment requires a second party to confirm the biometric belongs to
+    the employee, so self-enrolment is never granted."""
+    for role in ("hr", "payroll_admin"):
+        assert Permission.BIOMETRIC_ENROL in ROLE_PERMISSIONS[role], role
+    for role in ("employee", "manager", "auditor"):
+        assert Permission.BIOMETRIC_ENROL not in ROLE_PERMISSIONS[role], role
+
+
+def test_device_manage_is_administrative_only() -> None:
+    for role in ("hr", "payroll_admin"):
+        assert Permission.DEVICE_MANAGE in ROLE_PERMISSIONS[role], role
+    for role in ("employee", "manager", "auditor"):
+        assert Permission.DEVICE_MANAGE not in ROLE_PERMISSIONS[role], role
+
+
+def test_biometric_permissions_never_reach_the_auditor() -> None:
+    """Privacy: the auditor is excluded from attendance view already, and
+    must not gain a side door via enrolment or device administration."""
+    for permission in (
+        Permission.ATTENDANCE_CLOCK,
+        Permission.BIOMETRIC_ENROL,
+        Permission.DEVICE_MANAGE,
+    ):
+        assert permission not in ROLE_PERMISSIONS["auditor"], permission.value
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +483,7 @@ def test_every_route_has_an_auth_dependency_or_is_allow_listed() -> None:
 # SECTION_6_MATRIX above tests check_permission() in isolation. These tests
 # check that each HTTP endpoint is wired to the right Permission. A 403 means
 # "permission explicitly denied". Scope violations are 404 in this codebase,
-# so allowed roles may legitimately see 404 for single-row endpoints — but
+# so allowed roles may legitimately see 404 for single-row endpoints - but
 # never 403.
 # ---------------------------------------------------------------------------
 

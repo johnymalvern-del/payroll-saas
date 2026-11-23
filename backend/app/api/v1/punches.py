@@ -1,4 +1,20 @@
-"""Punch endpoints (Chapter 2A)."""
+"""Punch endpoints (Chapter 2A).
+
+Phase 2 (biometric attendance programme): punches are now evaluated
+against the geofence of the site their *device* is registered to, and the
+verdict is persisted on the punch row.
+
+The verdict never changes the punch status. An out-of-fence or
+inconclusive punch is still accepted, flagged, and left for HR to
+resolve. Rejecting it here would discard the employee's clock-in, and a
+missing clock-in is a worse outcome than an exception somebody can look
+at -- that is also the safeguard that stops a GPS or biometric problem
+from silently becoming an unpaid deduction downstream.
+
+Phase 5: PunchOut carries site_name so the clock-in screen can confirm the
+branch by name. The lookup is cached per request because a batch shares a
+single device and therefore a single site.
+"""
 from __future__ import annotations
 
 import base64
@@ -33,9 +49,11 @@ from app.core.errors import AppError
 from app.core.permissions import Permission, require_permission
 from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
 from app.db.tenant.models.attendance import Punch
+from app.db.tenant.models.organisation import Site
 from app.db.tenant.models.people import Employee
 from app.db.tenant.models.platform import AuditLog
 from app.scanner.base import VirusScanner
+from app.services.geofence import GeofenceVerdict, evaluate_geofence
 from app.storage.base import Storage
 
 router = APIRouter(prefix='/punches', tags=['punches'])
@@ -46,16 +64,45 @@ _BATCH_BODY_MAX_BYTES = 5 * 1024 * 1024
 _PHOTO_MAX_BYTES = 300 * 1024
 _RAW_PAYLOAD_MAX_BYTES = 8 * 1024
 
+# Upper bound that fits punch.gps_accuracy_m NUMERIC(6,2) without
+# overflow. A device reporting beyond this is either broken or lying; we
+# keep the punch and record the verdict as inconclusive rather than
+# letting a bad number abort the insert.
+_ACCURACY_MAX_STORABLE = 9999
 
-def _to_out(p: Punch) -> PunchOut:
+
+def _site_name(db: Any, site_id: uuid.UUID | None, cache: dict | None = None) -> str | None:
+    """Display name for a site id, memoised for batch reuse.
+
+    A batch of 500 punches from one device shares one site, so without a
+    cache this would be 500 identical db.get() calls. The identity map
+    would make them cheap but not free.
+    """
+    if site_id is None:
+        return None
+    if cache is not None and site_id in cache:
+        return cache[site_id]
+    site = db.get(Site, site_id)
+    name = site.name if site is not None else None
+    if cache is not None:
+        cache[site_id] = name
+    return name
+
+
+def _to_out(p: Punch, *, site_name: str | None = None) -> PunchOut:
     return PunchOut(
         id=p.id, client_punch_id=p.client_punch_id, employee_id=p.employee_id,
-        device_id=p.device_id, site_id=p.site_id,
+        device_id=p.device_id, site_id=p.site_id, site_name=site_name,
         server_received_at=p.server_received_at, device_time=p.device_time,
         device_now_at_send=p.device_now_at_send, effective_time=p.effective_time,
         offset_ms=p.offset_ms, method=p.method, match_score=p.match_score,
         liveness_passed=p.liveness_passed, photo_object_key=p.photo_object_key,
-        latitude=p.latitude, longitude=p.longitude, status=p.status,
+        latitude=p.latitude, longitude=p.longitude,
+        gps_accuracy_m=p.gps_accuracy_m,
+        geofence_result=p.geofence_result,
+        geofence_reason=p.geofence_reason,
+        distance_m=p.distance_m,
+        status=p.status,
         flags=list(p.flags or []), raw_payload=p.raw_payload, created_at=p.created_at,
     )
 
@@ -148,7 +195,12 @@ def list_punches(
             tq = tq.where(Punch.status == status_filter)
         tq = apply_scope(tq, user, db, model=Punch)
         total = int(db.scalar(tq) or 0)
-    return PunchListOut(items=[_to_out(r) for r in rows], next_cursor=next_cursor, total=total)
+    name_cache: dict = {}
+    return PunchListOut(
+        items=[_to_out(r, site_name=_site_name(db, r.site_id, name_cache)) for r in rows],
+        next_cursor=next_cursor,
+        total=total,
+    )
 
 
 def _process_punch(
@@ -193,6 +245,50 @@ def _process_punch(
         flags.append(f)
         if status_val == 'accepted':
             status_val = 'low_confidence'
+
+    # --- Phase 2: geofence verdict --------------------------------------
+    # The fence tested is the *device's* site, not the employee's. Using
+    # the employee's primary site would be circular reasoning: anyone
+    # clocking at their own branch would be "inside" by construction, and
+    # an employee clocking from home would be judged against a fence they
+    # were never near anyway.
+    raw_accuracy = payload.gps_accuracy_m
+    accuracy_val = raw_accuracy
+    if accuracy_val is not None and (accuracy_val < 0 or accuracy_val > _ACCURACY_MAX_STORABLE):
+        # Unstorable or implausible: keep it out of the column (NUMERIC(6,2)
+        # would raise), but still hand the raw value to the evaluator so the
+        # reason tag records that the device reported nonsense.
+        accuracy_val = None
+    geofence_result_val = None
+    geofence_reason_val = None
+    distance_val = None
+    if device.site_id is None:
+        geofence_result_val = GeofenceVerdict.UNAVAILABLE.value
+        geofence_reason_val = 'device_site_not_specified'
+    else:
+        site = db.get(Site, device.site_id)
+        if site is None:
+            geofence_result_val = GeofenceVerdict.UNAVAILABLE.value
+            geofence_reason_val = 'site_record_missing'
+        else:
+            geo = evaluate_geofence(
+                latitude=payload.latitude,
+                longitude=payload.longitude,
+                accuracy_m=raw_accuracy,
+                site_latitude=site.latitude,
+                site_longitude=site.longitude,
+                geofence_radius_m=site.geofence_radius_m,
+            )
+            geofence_result_val = geo.verdict.value
+            geofence_reason_val = geo.reason
+            distance_val = None if geo.distance_m is None else round(geo.distance_m, 2)
+
+    # A location verdict never flips status. See the module docstring.
+    if geofence_result_val == GeofenceVerdict.OUTSIDE.value:
+        flags.append('geofence_outside')
+    elif geofence_result_val == GeofenceVerdict.INCONCLUSIVE.value:
+        flags.append('geofence_inconclusive')
+
     photo_object_key = None
     if photo_bytes is not None:
         scan_result = scanner.scan(photo_bytes)
@@ -218,6 +314,10 @@ def _process_punch(
         photo_object_key=photo_object_key,
         latitude=payload.latitude,
         longitude=payload.longitude,
+        gps_accuracy_m=accuracy_val,
+        geofence_result=geofence_result_val,
+        geofence_reason=geofence_reason_val,
+        distance_m=distance_val,
         status=status_val,
         flags=flags,
         raw_payload=payload.raw_payload,
@@ -267,7 +367,7 @@ def submit_punch(
     server_received_at = datetime.now(timezone.utc)
     request_id = getattr(request.state, 'request_id', None)
     punch, warnings = _process_punch(db, device, None, payload, request_id, server_received_at, tenant.crypto, storage, scanner)
-    out = _to_out(punch)
+    out = _to_out(punch, site_name=_site_name(db, punch.site_id))
     out.warnings = warnings
     return out
 
@@ -287,6 +387,7 @@ def submit_punch_batch(
     accepted = 0
     rejected = 0
     results: list[PunchBatchItemOut] = []
+    name_cache: dict = {}
     for i, p in enumerate(payload.punches):
         try:
             punch, warnings = _process_punch(db, device, None, p, request_id, server_received_at, tenant.crypto, storage, scanner)
@@ -294,7 +395,7 @@ def submit_punch_batch(
                 rejected += 1
             else:
                 accepted += 1
-            item_out = _to_out(punch)
+            item_out = _to_out(punch, site_name=_site_name(db, punch.site_id, name_cache))
             item_out.warnings = warnings
             results.append(PunchBatchItemOut(index=i, ok=True, punch=item_out, error=None))
         except AppError as e:
@@ -317,6 +418,6 @@ def get_punch(
         assert_in_scope(user, punch.employee_id, db)
     except ScopeViolation:
         raise AppError('record_not_found', 'Punch not found', 404) from None
-    return _to_out(punch)
+    return _to_out(punch, site_name=_site_name(db, punch.site_id))
 
 # END OF FILE

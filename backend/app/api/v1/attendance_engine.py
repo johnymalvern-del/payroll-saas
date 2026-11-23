@@ -1070,6 +1070,23 @@ _EXCEPTION_TYPES_FROM_STATUS = {
 }
 
 
+# Phase 4: punch-level flags that warrant an HR-visible exception but are
+# not derivable from day.flags. Keyed by the flag name written by
+# punches.py; the value is the exception vocabulary name.
+#
+# "clock_gap" is the flag name; "device_clock_gap" is the exception name
+# that already existed in exceptions.py and demo_seed.py but was never
+# emitted by anything until this mapping existed. Renaming the flag instead
+# would have orphaned flags already persisted on historical punches, so the
+# mapping is the safer of the two.
+_EXCEPTION_TYPES_FROM_PUNCH_FLAGS = {
+    "clock_gap": "device_clock_gap",
+    "liveness_failed": "liveness_failed",
+    "geofence_outside": "geofence_outside",
+    "geofence_inconclusive": "geofence_inconclusive",
+}
+
+
 def _expected_exception_types(db, employee_id, work_date, day):
     """Return the set of exception types currently warranted by the day.
 
@@ -1109,6 +1126,24 @@ def _expected_exception_types(db, employee_id, work_date, day):
     )
     if (lc or 0) > 0:
         types.add("low_confidence")
+    # Phase 4: punch flags. Same +-1 day UTC window as the low-confidence
+    # query above, for the same reason: work_date is a tenant-local date
+    # and the punch column is UTC.
+    for row_flags in db.scalars(
+        select(Punch.flags).where(
+            Punch.employee_id == employee_id,
+            Punch.effective_time >= datetime.combine(
+                work_date - timedelta(days=1), time(0, 0)
+            ).replace(tzinfo=timezone.utc),
+            Punch.effective_time < datetime.combine(
+                work_date + timedelta(days=2), time(0, 0)
+            ).replace(tzinfo=timezone.utc),
+        )
+    ).all():
+        for f in row_flags or []:
+            mapped = _EXCEPTION_TYPES_FROM_PUNCH_FLAGS.get(f)
+            if mapped:
+                types.add(mapped)
     return types
 
 
@@ -1120,6 +1155,10 @@ def _suggested_fix(exception_type):
         "absent_expected": {"action": "mark_day_off"},
         "overtime_unapproved": {"action": "approve_overtime"},
         "low_confidence": {"action": "accept_punch"},
+        "liveness_failed": {"action": "reject_punch"},
+        "device_clock_gap": {"action": "review_device_clock"},
+        "geofence_outside": {"action": "review_location"},
+        "geofence_inconclusive": {"action": "review_location"},
     }.get(exception_type, {})
 
 

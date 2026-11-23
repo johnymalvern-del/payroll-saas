@@ -33,11 +33,38 @@ assert_in_scope, not by this permission.
 ATTENDANCE_ADJUST_SELF (A3). Extends ATTENDANCE_ADJUST so that the roles
 that may adjust attendance in the first place (hr, payroll_admin) may also
 adjust their *own* attendance when linked to an employee record. It never
-bypasses tenant isolation, employee scope, or payroll-period locks — those
+bypasses tenant isolation, employee scope, or payroll-period locks -- those
 guards run in the same order as before. It also never extends to `manager`
 or `employee`: those roles remain subject to the self-adjust restriction.
 The A3 audit trail distinguishes self-overrides via AuditLog.action =
 "attendance.adjustment.self_override" and new_value.self_override = True.
+
+Biometric Attendance Programme (Phases 1-9). Three permissions are defined
+here ahead of the code that enforces them, so that later phases reference a
+matrix-tested capability instead of retrofitting one. They are inert until
+an endpoint depends on them.
+
+  ATTENDANCE_CLOCK
+      May submit a clock-in/clock-out. Separate from ATTENDANCE_VIEW
+      (reading the register) and from ATTENDANCE_ADJUST (correcting it):
+      clocking one's own time is not the same act as correcting someone
+      else's. Held by every role that is an employee of the tenant. The
+      auditor does not hold it -- auditors are not employees of the company
+      they audit, which is the same reasoning that keeps SELF_VIEW off
+      their list.
+
+  BIOMETRIC_ENROL
+      May enrol, re-enrol and revoke an employee's biometric credential.
+      Restricted to hr and payroll_admin. Deliberately NOT granted to
+      `employee`: self-enrolment would defeat the purpose of enroling, which
+      is to have a second party confirm that the biometric belongs to the
+      person holding the employee record. The matching consent record lives
+      in public.biometric_consent.
+
+  DEVICE_MANAGE
+      May register, assign, disable and rotate credentials for attendance
+      devices. Held by hr and payroll_admin, mirroring ORG_MANAGE, because a
+      device is site infrastructure in the same sense that a site is.
 """
 from __future__ import annotations
 
@@ -85,6 +112,11 @@ class Permission(str, Enum):
     INTELLIGENCE_VIEW = "intelligence_view"
     INTELLIGENCE_MANAGE = "intelligence_manage"
 
+    # --- Biometric Attendance Programme (defined in Phase 3, enforced later)
+    ATTENDANCE_CLOCK = "attendance_clock"
+    BIOMETRIC_ENROL = "biometric_enrol"
+    DEVICE_MANAGE = "device_manage"
+
 
 # Role -> set of permissions. Mirrors section 6 of the master brief.
 # Any change here MUST be mirrored in tests/test_permissions.py's own matrix.
@@ -95,6 +127,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.PAYSLIP_VIEW,
         Permission.ORG_VIEW,
         Permission.ATTENDANCE_VIEW,
+        Permission.ATTENDANCE_CLOCK,
     }),
     "manager": frozenset({
         Permission.SELF_VIEW,
@@ -106,6 +139,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.EXCEPTION_RESOLVE,
         Permission.ORG_VIEW,
         Permission.ATTENDANCE_VIEW,
+        Permission.ATTENDANCE_CLOCK,
     }),
     "hr": frozenset({
         Permission.SELF_VIEW,
@@ -128,6 +162,9 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.ORG_MANAGE,
         Permission.ATTENDANCE_VIEW,
         Permission.INTELLIGENCE_VIEW,
+        Permission.ATTENDANCE_CLOCK,
+        Permission.BIOMETRIC_ENROL,
+        Permission.DEVICE_MANAGE,
     }),
     "payroll_admin": frozenset({
         Permission.SELF_VIEW,
@@ -155,10 +192,14 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
         Permission.ATTENDANCE_VIEW,
         Permission.INTELLIGENCE_VIEW,
         Permission.INTELLIGENCE_MANAGE,
+        Permission.ATTENDANCE_CLOCK,
+        Permission.BIOMETRIC_ENROL,
+        Permission.DEVICE_MANAGE,
     }),
     # Auditor: read-only audit and payslip viewing. No SELF_VIEW (auditors
     # are not employees of the company they audit), no SELF_SUBMIT.
-    # No ATTENDANCE_VIEW per section 6.
+    # No ATTENDANCE_VIEW per section 6. No ATTENDANCE_CLOCK for the same
+    # reason: an auditor does not clock in.
     "auditor": frozenset({
         Permission.PAYSLIP_VIEW,
         Permission.AUDIT_VIEW,

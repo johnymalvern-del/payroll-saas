@@ -244,6 +244,10 @@ class Punch(Base):
     photo_object_key: Mapped[str | None] = mapped_column(String(400), nullable=True)
     latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6), nullable=True)
     longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6), nullable=True)
+    gps_accuracy_m: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    geofence_result: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    geofence_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    distance_m: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     flags: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=list,
