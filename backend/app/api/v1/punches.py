@@ -14,6 +14,19 @@ from silently becoming an unpaid deduction downstream.
 Phase 5: PunchOut carries site_name so the clock-in screen can confirm the
 branch by name. The lookup is cached per request because a batch shares a
 single device and therefore a single site.
+
+Photo retention (policy s1): raw facial photographs are no longer stored.
+A submitted photo is still decoded, validated and virus-scanned, and is
+still required by device.require_photo_for_code -- but the bytes are
+discarded once those checks pass, and photo_object_key is always None for
+new punches. Existing stored photographs and their keys are untouched;
+removing those needs the dependency investigation required by policy s1
+and is deliberately not attempted here.
+
+Note that storage: Storage remains in _process_punch's signature although
+this endpoint no longer writes to it. The parameter is retained so call
+sites and the dependency wiring stay unchanged; it will become redundant
+once the payslip and punch-photo paths are separated.
 """
 from __future__ import annotations
 
@@ -289,14 +302,17 @@ def _process_punch(
     elif geofence_result_val == GeofenceVerdict.INCONCLUSIVE.value:
         flags.append('geofence_inconclusive')
 
+    # --- Photo: validate, scan, discard ---------------------------------
+    # Policy s1 forbids retaining raw facial photographs once processing is
+    # complete. The scan still runs -- an unchecked upload is a security
+    # problem regardless of whether we keep it -- but the bytes are dropped
+    # and photo_object_key is left None.
     photo_object_key = None
     if photo_bytes is not None:
         scan_result = scanner.scan(photo_bytes)
         if not scan_result.clean:
             raise AppError('photo_scan_failed', 'Photo failed virus scan', 400)
-        key = f'punches/{device.id}/{uuid.uuid4().hex}.jpg'
-        storage.save(key, photo_bytes, content_type="image/jpeg")
-        photo_object_key = key
+
     payload_hash = canonical_payload_hash(payload.model_dump())
     punch = Punch(
         client_punch_id=payload.client_punch_id,

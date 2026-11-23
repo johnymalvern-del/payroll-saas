@@ -5,9 +5,16 @@ list-scope tests in test_punch_scope.py do not: device authentication, A3
 idempotency, A4 status/flags, A5 employee and code-only policy, A6 raw_payload
 and photo validation, and per-item batch results.
 
-Photo happy-path is deliberately not tested here: a valid photo would write
-to StorageDep and leave files behind. The service-level photo validation is
-tested in test_punch_service.py; the wire-level failure paths are tested here.
+Photo handling changed under the biometric privacy policy (docs/
+BIOMETRIC_PRIVACY_AND_RETENTION_POLICY.md, section 1): a submitted photo is
+still decoded, validated, virus-scanned and required where the device demands
+one, but the bytes are discarded rather than stored. The tests below assert
+that the controls survive and that nothing is retained: photo_object_key is
+None for new punches and Storage.save is never called.
+
+The Milestone 2 regression guard is preserved -- a photo-bearing punch must
+still return 201, not the old HTTP 500 caused by calling storage.put() on a
+Storage class that only implements save/load/delete/exists/signed_url.
 """
 from __future__ import annotations
 
@@ -27,10 +34,10 @@ from app.db.tenant.models.organisation import Branch, Site
 from app.db.tenant.models.people import Employee
 from app.db.tenant.session import get_tenant_engine
 
-# Tiny valid JPEG (1x1 pixel) base64-encoded. Used in Milestone 2 regression
-# test that previously failed with HTTP 500 because punches.py called
-# storage.put() on a Storage class that only implements save/load/delete/
-# exists/signed_url.
+# Tiny valid JPEG (1x1 pixel) base64-encoded. Used in the Milestone 2
+# regression test that previously failed with HTTP 500 because punches.py
+# called storage.put() on a Storage class that only implements
+# save/load/delete/exists/signed_url.
 _TINY_JPEG_B64 = (
     "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8U"
     "HRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAARCAABAAEDASIA"
@@ -42,8 +49,6 @@ _TINY_JPEG_B64 = (
     "AAAAAAAAAAAAAAAA/9oACAEDAQE/EH//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEC"
     "AQE/EH//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/EH//2Q=="
 )
-
-
 
 
 @dataclass
@@ -375,19 +380,26 @@ def test_submit_batch_mixed_200(api, db):
     assert out['results'][1]['ok'] is False
     assert out['results'][1]['error']['code'] == 'unknown_employee'
 
-# END OF FILE
 
 # ---------------------------------------------------------------------------
 # Milestone 2 regression tests
 # ---------------------------------------------------------------------------
 
 
-def test_submit_punch_with_valid_photo_persists(api, db):
-    """Punch with valid photo must persist and return photo_object_key.
+def test_submit_punch_with_valid_photo_discards_it(api, db):
+    """A valid photo must not break ingest, and must not be retained.
 
-    Regression: pre-fix, punches.py called storage.put() which does not exist
-    on the Storage base class (only save/load/delete/exists/signed_url). Result
-    was AttributeError -> HTTP 500 for every photo-bearing punch.
+    Two separate concerns, deliberately kept in one test because they are
+    two halves of the same behaviour change:
+
+    1. Regression (Milestone 2): pre-fix, punches.py called storage.put(),
+       which does not exist on the Storage base class (only
+       save/load/delete/exists/signed_url). Result was AttributeError ->
+       HTTP 500 for every photo-bearing punch. A photo must still return
+       201.
+
+    2. Privacy policy section 1: the photo is decoded, validated and
+       virus-scanned, then discarded. photo_object_key is None.
     """
     client, tenant = api
     site = _mk_branch_site(db)
@@ -397,8 +409,50 @@ def test_submit_punch_with_valid_photo_persists(api, db):
     r = _post(client, tenant.slug, raw, payload)
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body['photo_object_key'] is not None, body
-    assert body['photo_object_key'].startswith('punches/')
+    assert body['photo_object_key'] is None, body
+
+
+def test_submit_punch_never_writes_a_photo_to_storage(api, db, monkeypatch):
+    """The policy guarantee itself: Storage.save is never invoked.
+
+    The previous test asserts the visible symptom (no object key). This one
+    asserts the mechanism, so a future change that stores the bytes under a
+    differently-shaped key cannot slip through unnoticed.
+
+    deps.py does `from app.storage.factory import get_storage` and calls it
+    inside the _storage provider, so patching the name in app.api.deps is
+    what intercepts the request-time lookup.
+    """
+    saved: list[tuple] = []
+
+    class _SpyStorage:
+        def save(self, key, data, content_type=None):  # noqa: ANN001
+            saved.append((key, len(data), content_type))
+            return key
+
+        def load(self, key):  # noqa: ANN001, ARG002
+            raise AssertionError('storage.load called')
+
+        def delete(self, key):  # noqa: ANN001, ARG002
+            raise AssertionError('storage.delete called')
+
+        def exists(self, key):  # noqa: ANN001, ARG002
+            return False
+
+        def signed_url(self, key, expires=3600):  # noqa: ANN001, ARG002
+            return ''
+
+    monkeypatch.setattr('app.api.deps.get_storage', lambda: _SpyStorage())
+
+    client, tenant = api
+    site = _mk_branch_site(db)
+    _dev, raw = _mk_device(db, site.id)
+    emp = _mk_employee(db, 'PHOTO-2', site_id=site.id)
+    payload = _payload(emp.id, photo_base64=_TINY_JPEG_B64)
+    r = _post(client, tenant.slug, raw, payload)
+    assert r.status_code == 201, r.text
+    assert r.json()['photo_object_key'] is None
+    assert saved == [], f'photo bytes were written to storage: {saved}'
 
 
 def test_submit_punch_surfaces_recompute_warning(api, db):
