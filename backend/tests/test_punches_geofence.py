@@ -1,19 +1,18 @@
-"""Geofence verdict tests for POST /punches (Phase 2, plus ten_0030).
+"""Geofence verdict tests for POST /punches (Phase 2, plus ten_0030/ten_0031).
 
 test_punches.py proves the geofence block does not crash. This file proves
 it produces the *right answer*: given a device at a known site, a known
 punch location and a known accuracy, the persisted verdict must be the one
 the Phase 1 evaluator specifies.
 
-It also covers the location row introduced by ten_0030 (privacy policy
-section 5). The raw fix now lives in punch_location rather than on the
+It also covers the location row introduced by ten_0030 and made the sole copy
+by ten_0031. The raw fix lives in punch_location rather than on the
 append-only punch, and that row is what retention later deletes.
 
-The fixtures here are deliberately self-contained rather than imported
-from test_punches.py. Module-level pytest fixtures are not visible across
-test modules, and hoisting them into conftest.py would couple this file to
-a file this phase is not meant to touch. The duplication is a handful of
-small helpers; the decoupling is worth it.
+After ten_0031 the flat latitude/longitude/gps_accuracy_m/distance_m fields
+are gone from PunchOut, so anything reading a fix reads body['location'].
+The assertions that used to read the flat fields still assert exactly the
+same numbers -- only the source moved.
 
 The most important test in this file is
 test_outside_geofence_still_accepted_and_flagged: an out-of-fence punch
@@ -237,7 +236,7 @@ def test_inside_geofence_accepted(api, db):
     assert body['status'] == 'accepted'
     assert 'geofence_outside' not in body['flags']
     assert 'geofence_inconclusive' not in body['flags']
-    assert 0.0 < _num(body['distance_m']) < 100.0
+    assert 0.0 < _num(body['location']['distance_m']) < 100.0
 
 
 def test_outside_geofence_still_accepted_and_flagged(api, db):
@@ -258,7 +257,7 @@ def test_outside_geofence_still_accepted_and_flagged(api, db):
     assert body['geofence_reason'] == 'outside_geofence'
     assert body['status'] == 'accepted', 'outside-geofence must not reject the punch'
     assert 'geofence_outside' in body['flags']
-    assert _num(body['distance_m']) > 18_000
+    assert _num(body['location']['distance_m']) > 18_000
 
 
 def test_poor_accuracy_is_inconclusive(api, db):
@@ -287,7 +286,7 @@ def test_missing_accuracy_is_inconclusive_not_inside(api, db):
     body = r.json()
     assert body['geofence_result'] == 'inconclusive'
     assert body['geofence_reason'] == 'gps_accuracy_unknown'
-    assert body['gps_accuracy_m'] is None
+    assert body['location']['gps_accuracy_m'] is None
 
 
 def test_site_without_radius_is_unavailable(api, db):
@@ -308,7 +307,7 @@ def test_site_without_radius_is_unavailable(api, db):
 # ---------------------------------------------------------------------------
 
 
-def test_verdict_and_accuracy_persisted_on_row(api, db):
+def test_verdict_and_accuracy_persisted(api, db):
     client, tenant, _site, raw, employee = _setup(api, db)
     cpid = str(uuid.uuid4())
     r = _post(
@@ -325,8 +324,10 @@ def test_verdict_and_accuracy_persisted_on_row(api, db):
     assert row is not None
     assert row.geofence_result == 'inside'
     assert row.geofence_reason == 'within_geofence'
-    assert float(row.gps_accuracy_m) == pytest.approx(7.5)
-    assert float(row.distance_m) > 0.0
+    # The fix lives on punch_location now, reachable through the relationship.
+    assert row.location is not None
+    assert float(row.location.gps_accuracy_m) == pytest.approx(7.5)
+    assert float(row.location.distance_m) > 0.0
 
 
 def test_idempotent_replay_preserves_verdict_and_writes_one_row(api, db):
@@ -398,7 +399,7 @@ def test_different_payload_same_uuid_still_conflicts(api, db):
 
 
 # ---------------------------------------------------------------------------
-# Location row (policy s5, ten_0030)
+# Location row (policy s5, ten_0030/ten_0031)
 # ---------------------------------------------------------------------------
 
 

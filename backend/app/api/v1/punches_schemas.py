@@ -20,22 +20,24 @@ a duplicate rather than a conflict. It is also deliberately unconstrained
 in sign: a device reporting nonsense is a device we want to record and
 flag as inconclusive, not one whose clock-in we want to reject outright.
 
-Phase 5: PunchOut gains site_name so the clock-in screen can name the
-branch the employee clocked at ("Hotel Branch - Cape Town", per the
-location-confirmation requirement) without a second round trip to
-/org/sites. It is display data only; site_id remains the identifier.
+Note PunchIn KEEPS latitude, longitude and gps_accuracy_m. Those are the
+request: how a device reports where it is. ten_0031 dropped them from the
+punch TABLE, not from the wire format.
 
-ten_0030 (privacy policy s5): PunchOut gains a nested location object
-holding the raw fix, and distance_band alongside it. These are transitional
-shapes. location is the destination -- it is what survives ten_0031, when
-punch.latitude, punch.longitude, punch.gps_accuracy_m and punch.distance_m
-are dropped. The four flat fields remain until then so this change is purely
-additive and no reader has to switch at the same moment.
+Phase 5: PunchOut carries site_name so the clock-in screen can name the
+branch the employee clocked at without a second round trip to /org/sites.
+It is display data only; site_id remains the identifier.
 
-After ten_0031 the flat fields are always None, so clients should read
-location and distance_band. location being null means either no fix was
-captured or retention has already deleted it; those are indistinguishable to
-a reader and deliberately so -- the punch never recorded which.
+ten_0030/ten_0031 (privacy policy s5): PunchOut no longer carries flat
+latitude, longitude, gps_accuracy_m or distance_m. The fix is a nested
+location object, or null -- either because none was captured or because
+retention has deleted it. Those two cases are deliberately indistinguishable:
+telling them apart would need a marker that is itself retained personal
+metadata.
+
+distance_band survives permanently on the punch. It is coarse geometry
+(within / near / distant) and defends the verdict without localising the
+employee.
 '''
 from __future__ import annotations
 
@@ -78,10 +80,8 @@ class PunchBatchIn(BaseModel):
 class PunchLocationOut(BaseModel):
     """The raw GPS fix for one punch.
 
-    Absent once retention deletes it. Deliberately has no 'purged' flag:
-    after ten_0031 nothing distinguishes "never captured" from "expired",
-    and pretending otherwise would need a marker column that is itself
-    retained personal metadata.
+    Absent once retention deletes it. A null parent `location` means the
+    fix is gone or was never captured.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -109,15 +109,9 @@ class PunchOut(BaseModel):
     match_score: Decimal | None = None
     liveness_passed: bool | None = None
     photo_object_key: str | None = None
-    # Transitional: populated from punch until ten_0031 drops those columns.
-    latitude: Decimal | None = None
-    longitude: Decimal | None = None
-    gps_accuracy_m: Decimal | None = None
     geofence_result: str | None = None
     geofence_reason: str | None = None
-    distance_m: Decimal | None = None
     distance_band: str | None = None
-    # Destination shape: the fix, or null once retention has removed it.
     location: PunchLocationOut | None = None
     status: str
     flags: list[str]

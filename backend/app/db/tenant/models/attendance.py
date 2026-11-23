@@ -18,17 +18,20 @@ unique index uq_shift_name_lower_active because it is on lower(btrim(name))
 WHERE is_active=true, which SQLAlchemy cannot express as a UniqueConstraint.
 Uniqueness is enforced by migration 0012 at the DB level.
 
-PunchLocation (migration ten_0030) holds the raw GPS fix separately from the
-punch, so privacy-policy section 5 retention can delete it without touching
-the append-only punch row. It inherits Base only: a row is inserted once and
-later deleted, never updated, and a database trigger refuses UPDATE. Its two
-CHECK constraints are enforced by ten_0030.
+PunchLocation (ten_0030) holds the raw GPS fix, separately from the punch.
+ten_0031 then dropped latitude, longitude, gps_accuracy_m and distance_m from
+punch itself -- they could never be deleted in place, because punch is
+append-only. What punch keeps is the audit conclusion: geofence_result,
+geofence_reason, and the coarse distance_band.
+
+PunchLocation inherits Base only: a row is inserted once and later deleted,
+never updated, and a database trigger refuses UPDATE.
 
 Punch.location is viewonly and lazily loaded. viewonly because the write path
 inserts the row explicitly and the relationship must never try to manage it;
 lazy because recompute_day queries Punch on every punch and has no use for
 the coordinates -- an eager load would add a query to the attendance engine's
-hot path. Callers that read a list of punches should use selectinload.
+hot path. Callers reading a list of punches should use selectinload.
 """
 from __future__ import annotations
 
@@ -208,8 +211,11 @@ class Punch(Base):
     docstring). The append-only rule is enforced by migration 0012 and by
     convention in every code path.
 
-    location is the GPS fix, held in a separate table because it must be
-    deletable under privacy policy section 5 while this row is not.
+    The raw fix is NOT here -- see PunchLocation. ten_0031 removed
+    latitude, longitude, gps_accuracy_m and distance_m from this table
+    because an append-only row can never have a column deleted from it.
+    What remains is the audit conclusion: geofence_result, geofence_reason
+    and the coarse distance_band.
     """
 
     __tablename__ = "punch"
@@ -260,16 +266,11 @@ class Punch(Base):
     )
     liveness_passed: Mapped[bool | None] = mapped_column(Boolean(), nullable=True)
     photo_object_key: Mapped[str | None] = mapped_column(String(400), nullable=True)
-    latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6), nullable=True)
-    longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6), nullable=True)
-    gps_accuracy_m: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
     geofence_result: Mapped[str | None] = mapped_column(String(20), nullable=True)
     geofence_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    distance_m: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
-    # Privacy-policy section 5: the exact distance is purged with the
-    # coordinates, so a coarse band is what survives permanently. Written at
-    # capture time. 'unknown' is the honest value for punches that predate
-    # ten_0030 -- backfilling them would need UPDATE on an append-only table.
+    # Privacy-policy section 5: the exact distance is deleted with the
+    # coordinates, so a coarse band is what survives permanently. 'unknown'
+    # covers no fix, no site radius, and every punch captured before ten_0030.
     distance_band: Mapped[str] = mapped_column(
         String(16), nullable=False, default="unknown", server_default="unknown"
     )
@@ -292,12 +293,12 @@ class Punch(Base):
 
 
 class PunchLocation(Base):
-    """The raw GPS fix for one punch, held separately so it can be deleted.
+    """The raw GPS fix for one punch -- the only copy that now exists.
 
     punch is append-only: UPDATE and DELETE are both revoked and a trigger
-    raises. A mutable column therefore cannot live there, which is why the
-    coordinates moved here in ten_0030. Retention deletes this row; the punch
-    and its verdict stay untouched.
+    raises, so a column that must expire cannot live there. ten_0030 created
+    this table; ten_0031 dropped the duplicates from punch. Retention deletes
+    this row; the punch and its verdict stay untouched.
 
     Inherits Base only -- inserted once, deleted once, never updated. The
     database trigger trg_punch_location_no_update enforces that as a second

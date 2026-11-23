@@ -9,11 +9,12 @@ The properties that matter here are not "does it delete rows" but:
   * dry_run touches nothing and is the default
   * a second sweep is a no-op
 
-The old version of this file asserted that latitude/longitude on punch
-became NULL after a sweep. That design was impossible: punch is append-only,
-UPDATE is revoked and a trigger raises. Those tests were written against a
-table that could not be written to, and they are replaced rather than
-adjusted, because the correct behaviour is a DELETE from punch_location.
+ten_0031 dropped latitude, longitude, gps_accuracy_m and distance_m from
+punch entirely, so there is nothing left on the punch to update. The purge is
+a DELETE from punch_location and only a DELETE: punch is append-only, UPDATE
+is revoked and a trigger raises. An earlier version of this file asserted
+that latitude/longitude on punch became NULL after a sweep; that design was
+impossible and the tests were replaced rather than adjusted.
 """
 from __future__ import annotations
 
@@ -118,8 +119,9 @@ def _mk_emp(session, code):
 def _mk_punch(session, employee_id, ts, *, with_location=True):
     """A punch plus, optionally, its punch_location row.
 
-    Mirrors what _process_punch writes: the verdict lives on the punch, the
-    raw fix lives in its own table.
+    Mirrors what _process_punch writes after ten_0031: the verdict lives on
+    the punch, the raw fix lives in its own table, and nothing that must
+    expire is on the punch.
     """
     punch = Punch(
         client_punch_id=uuid.uuid4(),
@@ -134,7 +136,6 @@ def _mk_punch(session, employee_id, ts, *, with_location=True):
         raw_payload={},
         geofence_result="outside" if with_location else None,
         geofence_reason="outside_geofence" if with_location else None,
-        distance_m=Decimal("19152.30") if with_location else None,
         distance_band="distant" if with_location else "unknown",
     )
     session.add(punch)
@@ -216,7 +217,7 @@ def test_purges_expired_location_but_keeps_punch_and_verdict(db):
     db.expire_all()
     assert _locations_for(db, punch.id) == []
 
-    # The punct record and its audit conclusion survive untouched.
+    # The punch record and its audit conclusion survive untouched.
     row = db.get(Punch, punch.id)
     assert row is not None
     assert row.geofence_result == "outside"

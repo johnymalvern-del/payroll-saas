@@ -19,35 +19,25 @@ Photo retention (policy s1): raw facial photographs are no longer stored.
 A submitted photo is still decoded, validated and virus-scanned, and is
 still required by device.require_photo_for_code -- but the bytes are
 discarded once those checks pass, and photo_object_key is always None for
-new punches. Existing stored photographs and their keys are untouched;
-removing those needs the dependency investigation required by policy s1
-and is deliberately not attempted here.
+new punches.
 
-GPS retention (policy s5, ten_0030): the raw fix is written to
-punch_location in the same transaction as the punch, because punch itself
-is append-only and a mutable column cannot live there. The punch keeps a
-coarse distance_band permanently; the exact distance and accuracy are
-deleted with the coordinates when retention expires.
+GPS retention (policy s5): the raw fix is written to punch_location in the
+same transaction as the punch. punch is append-only, so ten_0031 removed
+latitude, longitude, gps_accuracy_m and distance_m from it entirely -- a
+column that must expire cannot live on a row that can never be updated.
+What punch keeps is the audit conclusion: geofence_result, geofence_reason
+and the coarse distance_band.
 
 The location row is written whenever a fix exists, even when no verdict
 could be reached. A site with no geofence radius produces no distance, but
 the employee's position was still captured, and retention policy applies to
-it on the same 30-day schedule as any other. Gating the write on having a
-distance would mean ten_0031 destroyed those coordinates abruptly at the
-column drop instead of expiring them on schedule.
-
-PunchOut.location is the transitional read shape: the fix is exposed as a
-nested object while the flat latitude/longitude/gps_accuracy_m/distance_m
-fields still mirror punch. After ten_0031 those columns are gone, the flat
-fields become permanently None, and location is the only place to read a
-fix from. Clients should prefer location already.
+it on the same 30-day schedule as any other.
 
 list_punches eager-loads the relationship with selectinload -- 100 rows each
 needing one lazily-loaded location would be 100 extra queries. Single-punch
-reads use the default lazy load, one query each, which is correct there. The
-write path deliberately reads the value off the payload rather than the
-relationship: the row is in the session and unflushed to the relationship,
-so a lazy load at that moment could legitimately miss it.
+reads use the default lazy load. The write path deliberately reads the value
+off the object it just created rather than triggering a lazy load, because at
+that moment the relationship may not resolve yet.
 """
 from __future__ import annotations
 
@@ -100,7 +90,7 @@ _BATCH_BODY_MAX_BYTES = 5 * 1024 * 1024
 _PHOTO_MAX_BYTES = 300 * 1024
 _RAW_PAYLOAD_MAX_BYTES = 8 * 1024
 
-# Upper bound that fits punch.gps_accuracy_m NUMERIC(6,2) without
+# Upper bound that fits punch_location.gps_accuracy_m NUMERIC(6,2) without
 # overflow. A device reporting beyond this is either broken or lying; we
 # keep the punch and record the verdict as inconclusive rather than
 # letting a bad number abort the insert.
@@ -110,20 +100,19 @@ _ACCURACY_MAX_STORABLE = 9999
 def _distance_band(distance_m: float | None, radius_m: float | None) -> str:
     """Coarse, permanently-retained descriptor of how far outside a fence.
 
-    Privacy policy section 5: the exact distance is purged with the
-    coordinates, so what survives must be enough to defend the verdict
-    without localising the employee. "near" vs "distant" preserves the
-    distinction an auditor needs; neither pins a position.
+    Privacy policy section 5: the exact distance is deleted with the
+    coordinates, so what survives must defend the verdict without localising
+    the employee. "near" vs "distant" preserves the distinction an auditor
+    needs; neither pins a position.
 
-    'unknown' covers three cases -- no fix, no site radius, or a verdict
-    that never produced a distance. It is also the value every punch
-    captured before ten_0030 carries, because backfilling them would
-    require UPDATE on an append-only table.
+    'unknown' covers no fix, no site radius, or a verdict that never produced
+    a distance. It is also the value every punch captured before ten_0030
+    carries, because backfilling would have needed UPDATE on an append-only
+    table.
 
-    Note the band describes geometry while the verdict describes
-    decidability, so they can disagree by design: distance 95 m against a
-    100 m radius is 'within', yet the verdict may be INCONCLUSIVE because
-    the accuracy was 40 m. Neither is wrong.
+    Band describes geometry; the verdict describes decidability. They can
+    disagree by design: 95 m against a 100 m radius is 'within', yet the
+    verdict may be INCONCLUSIVE because accuracy was 40 m.
     """
     if distance_m is None or radius_m is None or radius_m <= 0:
         return 'unknown'
@@ -150,8 +139,7 @@ def _site_name(db: Any, site_id: uuid.UUID | None, cache: dict | None = None) ->
     """Display name for a site id, memoised for batch reuse.
 
     A batch of 500 punches from one device shares one site, so without a
-    cache this would be 500 identical db.get() calls. The identity map
-    would make them cheap but not free.
+    cache this would be 500 identical db.get() calls.
     """
     if site_id is None:
         return None
@@ -177,11 +165,8 @@ def _to_out(
         device_now_at_send=p.device_now_at_send, effective_time=p.effective_time,
         offset_ms=p.offset_ms, method=p.method, match_score=p.match_score,
         liveness_passed=p.liveness_passed, photo_object_key=p.photo_object_key,
-        latitude=p.latitude, longitude=p.longitude,
-        gps_accuracy_m=p.gps_accuracy_m,
         geofence_result=p.geofence_result,
         geofence_reason=p.geofence_reason,
-        distance_m=p.distance_m,
         distance_band=p.distance_band,
         location=_location_out(location),
         status=p.status,
@@ -340,9 +325,7 @@ def _process_punch(
     # --- Phase 2: geofence verdict --------------------------------------
     # The fence tested is the *device's* site, not the employee's. Using
     # the employee's primary site would be circular reasoning: anyone
-    # clocking at their own branch would be "inside" by construction, and
-    # an employee clocking from home would be judged against a fence they
-    # were never near anyway.
+    # clocking at their own branch would be "inside" by construction.
     raw_accuracy = payload.gps_accuracy_m
     accuracy_val = raw_accuracy
     if accuracy_val is not None and (accuracy_val < 0 or accuracy_val > _ACCURACY_MAX_STORABLE):
@@ -387,8 +370,7 @@ def _process_punch(
     # --- Photo: validate, scan, discard ---------------------------------
     # Policy s1 forbids retaining raw facial photographs once processing is
     # complete. The scan still runs -- an unchecked upload is a security
-    # problem regardless of whether we keep it -- but the bytes are dropped
-    # and photo_object_key is left None.
+    # problem regardless of whether we keep it -- but the bytes are dropped.
     photo_object_key = None
     if photo_bytes is not None:
         scan_result = scanner.scan(photo_bytes)
@@ -410,12 +392,8 @@ def _process_punch(
         match_score=payload.match_score,
         liveness_passed=payload.liveness_passed,
         photo_object_key=photo_object_key,
-        latitude=payload.latitude,
-        longitude=payload.longitude,
-        gps_accuracy_m=accuracy_val,
         geofence_result=geofence_result_val,
         geofence_reason=geofence_reason_val,
-        distance_m=distance_val,
         distance_band=_distance_band(distance_val, radius_val),
         status=status_val,
         flags=flags,
@@ -431,8 +409,7 @@ def _process_punch(
     #
     # Gated on the *fix* existing, not on a distance being computable. A
     # site with no radius yields no distance, but the position was still
-    # captured and must expire on the normal schedule rather than vanish
-    # when ten_0031 drops the columns from punch.
+    # captured and must expire on the normal schedule.
     location_row: PunchLocation | None = None
     if payload.latitude is not None and payload.longitude is not None:
         location_row = PunchLocation(
@@ -472,6 +449,9 @@ def _process_punch(
         warnings = ["attendance_recompute_failed"]
         print(f"[TRIGGER FAILED] {type(e).__name__}: {e}", file=_sys.stderr)
         _tb.print_exc(file=_sys.stderr)
+    # Handed back so the caller can serialise it without triggering a lazy
+    # load on a relationship that may not resolve yet. Private by convention:
+    # it is consumed by submit_punch and submit_punch_batch only.
     punch.__dict__['_si_location'] = location_row
     return punch, warnings
 
