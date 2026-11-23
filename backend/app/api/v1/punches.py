@@ -29,10 +29,13 @@ is append-only and a mutable column cannot live there. The punch keeps a
 coarse distance_band permanently; the exact distance and accuracy are
 deleted with the coordinates when retention expires.
 
-Note that storage: Storage remains in _process_punch's signature although
-this endpoint no longer writes to it. The parameter is retained so call
-sites and the dependency wiring stay unchanged; it will become redundant
-once the payslip and punch-photo paths are separated.
+The location row is written whenever a fix exists, even when no verdict
+could be reached. A site with no geofence radius produces no distance, but
+the employee's position was still captured, and retention policy applies to
+it on the same 30-day schedule as any other. Gating the write on having a
+distance would mean ten_0031 destroyed those coordinates abruptly at the
+column drop instead of expiring them on schedule -- an unpredictable
+deletion is worse than a predictable one.
 """
 from __future__ import annotations
 
@@ -102,6 +105,11 @@ def _distance_band(distance_m: float | None, radius_m: float | None) -> str:
     that never produced a distance. It is also the value every punch
     captured before ten_0030 carries, because backfilling them would
     require UPDATE on an append-only table.
+
+    Note the band describes geometry while the verdict describes
+    decidability, so they can disagree by design: distance 95 m against a
+    100 m radius is 'within', yet the verdict may be INCONCLUSIVE because
+    the accuracy was 40 m. Neither is wrong.
     """
     if distance_m is None or radius_m is None or radius_m <= 0:
         return 'unknown'
@@ -379,11 +387,12 @@ def _process_punch(
     # Written in the same transaction as the punch, so a punch can never
     # exist with a half-recorded location. punch itself stays append-only;
     # this row is the part retention is allowed to delete.
-    if (
-        distance_val is not None
-        and payload.latitude is not None
-        and payload.longitude is not None
-    ):
+    #
+    # Gated on the *fix* existing, not on a distance being computable. A
+    # site with no radius yields no distance, but the position was still
+    # captured and must expire on the normal schedule rather than vanish
+    # when ten_0031 drops the columns from punch.
+    if payload.latitude is not None and payload.longitude is not None:
         db.add(PunchLocation(
             punch_id=punch.id,
             latitude=payload.latitude,

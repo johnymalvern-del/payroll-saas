@@ -1,15 +1,19 @@
-"""Geofence verdict tests for POST /punches (Phase 2).
+"""Geofence verdict tests for POST /punches (Phase 2, plus ten_0030).
 
 test_punches.py proves the geofence block does not crash. This file proves
 it produces the *right answer*: given a device at a known site, a known
 punch location and a known accuracy, the persisted verdict must be the one
 the Phase 1 evaluator specifies.
 
+It also covers the location row introduced by ten_0030 (privacy policy
+section 5). The raw fix now lives in punch_location rather than on the
+append-only punch, and that row is what retention later deletes.
+
 The fixtures here are deliberately self-contained rather than imported
 from test_punches.py. Module-level pytest fixtures are not visible across
-test modules, and hoisting these into conftest.py would couple this file
-to a file this phase is not meant to touch. The duplication is four small
-helpers; the decoupling is worth it.
+test modules, and hoisting them into conftest.py would couple this file to
+a file this phase is not meant to touch. The duplication is a handful of
+small helpers; the decoupling is worth it.
 
 The most important test in this file is
 test_outside_geofence_still_accepted_and_flagged: an out-of-fence punch
@@ -31,7 +35,7 @@ from sqlalchemy.orm import Session
 
 from app.api.v1.device_auth import hash_device_key
 from app.core.security import hash_password
-from app.db.tenant.models.attendance import Punch
+from app.db.tenant.models.attendance import Punch, PunchLocation
 from app.db.tenant.models.devices import Device
 from app.db.tenant.models.organisation import Branch, Site
 from app.db.tenant.models.people import Employee
@@ -203,6 +207,10 @@ def _num(value):
     return float(value)
 
 
+def _location_for(db, punch_id):
+    return db.scalar(select(PunchLocation).where(PunchLocation.punch_id == punch_id))
+
+
 def _setup(api, db, *, lat=CT_LAT, lon=CT_LON, radius=100):
     client, tenant = api
     site = _mk_site(db, lat=lat, lon=lon, radius=radius)
@@ -359,6 +367,13 @@ def test_idempotent_replay_preserves_verdict_and_writes_one_row(api, db):
         select(func.count()).select_from(Punch).where(Punch.client_punch_id == uuid.UUID(cpid))
     )
     assert count == 1
+    # A deduplicated retry must not write a second location row either.
+    loc_count = db.scalar(
+        select(func.count())
+        .select_from(PunchLocation)
+        .where(PunchLocation.punch_id == uuid.UUID(first_body['id']))
+    )
+    assert loc_count == 1
 
 
 def test_different_payload_same_uuid_still_conflicts(api, db):
@@ -380,5 +395,130 @@ def test_different_payload_same_uuid_still_conflicts(api, db):
     )
     assert second.status_code == 409, second.text
     assert second.json()['error']['code'] == 'punch_uuid_reused'
+
+
+# ---------------------------------------------------------------------------
+# Location row (policy s5, ten_0030)
+# ---------------------------------------------------------------------------
+
+
+def test_location_row_written_with_correct_values(api, db):
+    client, tenant, _site, raw, employee = _setup(api, db)
+    cpid = str(uuid.uuid4())
+    r = _post(
+        client, tenant.slug, raw,
+        _payload(employee.id, client_punch_id=cpid,
+                 latitude=str(INSIDE_LAT), longitude=str(CT_LON),
+                 gps_accuracy_m='7.5'),
+    )
+    assert r.status_code == 201, r.text
+    punch_id = uuid.UUID(r.json()['id'])
+
+    db.rollback()
+    loc = _location_for(db, punch_id)
+    assert loc is not None, 'punch_location row was not written'
+    assert float(loc.latitude) == pytest.approx(float(INSIDE_LAT), abs=1e-6)
+    assert float(loc.longitude) == pytest.approx(float(CT_LON), abs=1e-6)
+    assert float(loc.gps_accuracy_m) == pytest.approx(7.5)
+    assert loc.distance_m is not None
+    # captured_at echoes effective_time so the sweeper can filter on this
+    # table alone.
+    punch = db.get(Punch, punch_id)
+    assert loc.captured_at == punch.effective_time
+
+
+def test_location_row_written_even_without_a_site_radius(api, db):
+    """A site with no radius yields no distance, but the fix still exists.
+
+    The row must be written so retention expires it on schedule. Gating the
+    write on a computable distance would mean ten_0031 destroyed those
+    coordinates abruptly at the column drop.
+    """
+    client, tenant, _site, raw, employee = _setup(api, db, radius=None)
+    cpid = str(uuid.uuid4())
+    r = _post(
+        client, tenant.slug, raw,
+        _payload(employee.id, client_punch_id=cpid,
+                 latitude=str(CT_LAT), longitude=str(CT_LON),
+                 gps_accuracy_m='5'),
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body['geofence_result'] == 'unavailable'
+    assert body['distance_band'] == 'unknown'
+
+    punch_id = uuid.UUID(body['id'])
+    db.rollback()
+    loc = _location_for(db, punch_id)
+    assert loc is not None, 'location must be retained without a radius'
+    assert loc.distance_m is None
+    assert float(loc.latitude) == pytest.approx(float(CT_LAT), abs=1e-6)
+
+
+def test_no_location_row_without_coordinates(api, db):
+    client, tenant, _site, raw, employee = _setup(api, db)
+    r = _post(client, tenant.slug, raw, _payload(employee.id))
+    assert r.status_code == 201, r.text
+
+    punch_id = uuid.UUID(r.json()['id'])
+    db.rollback()
+    assert _location_for(db, punch_id) is None
+
+
+def test_inconclusive_fix_still_writes_a_location_row(api, db):
+    """An undecidable fix is still a real position and must age out."""
+    client, tenant, _site, raw, employee = _setup(api, db)
+    r = _post(
+        client, tenant.slug, raw,
+        _payload(employee.id, latitude=str(CT_LAT), longitude=str(CT_LON),
+                 gps_accuracy_m=None),
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()['geofence_result'] == 'inconclusive'
+
+    punch_id = uuid.UUID(r.json()['id'])
+    db.rollback()
+    loc = _location_for(db, punch_id)
+    assert loc is not None
+    assert loc.distance_m is not None
+    assert loc.gps_accuracy_m is None
+
+
+def test_distance_band_is_near_when_just_outside_radius(api, db):
+    """~111 m out against a 100 m radius: outside, but within 2x."""
+    client, tenant, _site, raw, employee = _setup(api, db)
+    r = _post(
+        client, tenant.slug, raw,
+        _payload(employee.id, latitude=str(NEAR_LAT), longitude=str(CT_LON),
+                 gps_accuracy_m='1'),
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body['geofence_result'] == 'outside'
+    assert body['distance_band'] == 'near'
+
+
+def test_distance_band_is_distant_far_from_radius(api, db):
+    client, tenant, _site, raw, employee = _setup(api, db)
+    r = _post(
+        client, tenant.slug, raw,
+        _payload(employee.id, latitude=str(FAR_LAT), longitude=str(FAR_LON),
+                 gps_accuracy_m='5'),
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body['geofence_result'] == 'outside'
+    assert body['distance_band'] == 'distant'
+
+
+def test_distance_band_is_within_inside_the_fence(api, db):
+    client, tenant, _site, raw, employee = _setup(api, db)
+    r = _post(
+        client, tenant.slug, raw,
+        _payload(employee.id, latitude=str(INSIDE_LAT), longitude=str(CT_LON),
+                 gps_accuracy_m='5'),
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()['distance_band'] == 'within'
 
 # END OF FILE
