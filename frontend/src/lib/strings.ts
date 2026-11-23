@@ -1,15 +1,17 @@
-
 export const EXCEPTION_TYPE_ORDER = [
   "missing_out",
   "missing_in",
   "no_shift_match",
   "low_confidence",
+  "liveness_failed",
   "absent_expected",
   "overtime_unapproved",
   "too_long",
   "duplicate",
   "device_clock_gap",
   "employee_query",
+  "geofence_outside",
+  "geofence_inconclusive",
 ] as const;
 
 const EXCEPTION_TYPE_LABELS: Record<string, string> = {
@@ -17,12 +19,15 @@ const EXCEPTION_TYPE_LABELS: Record<string, string> = {
   missing_in: "Missing in",
   no_shift_match: "No shift match",
   low_confidence: "Low confidence",
+  liveness_failed: "Liveness failed",
   absent_expected: "Absent (expected)",
   overtime_unapproved: "Overtime unapproved",
   too_long: "Too long",
   duplicate: "Duplicate",
   device_clock_gap: "Device clock gap",
   employee_query: "Employee query",
+  geofence_outside: "Outside geofence",
+  geofence_inconclusive: "Location unverified",
 };
 
 export function exceptionTypeLabel(code: string): string {
@@ -77,6 +82,34 @@ export const strings = {
     needPhoto: "Start the camera before clocking in.",
     cameraDenied: "Camera access denied or unavailable.",
     recomputeWarning: "Your punch was recorded, but attendance could not be updated. Please notify your administrator.",
+
+    // Identity disclosure. This terminal proves which machine a punch came
+    // from and, from Phase 2 onward, where it came from -- but the employee
+    // code is self-declared and the photo is stored, not compared. Saying so
+    // plainly is better than letting "clock in with a photo" be mistaken for
+    // biometric verification.
+    identityNotice:
+      "This terminal records your employee code, a photo and your location. It does not verify your identity biometrically. Anyone who knows your employee code could clock in as you, and HR can review every punch.",
+
+    locating: "Checking your location…",
+    locationDenied:
+      "Location permission was refused. This punch was recorded without location.",
+    locationTimeout:
+      "Location timed out. This punch was recorded without location.",
+    locationUnsupported:
+      "This browser cannot report a location. This punch was recorded without it.",
+    locationUnavailable:
+      "Location was unavailable. This punch was recorded without it.",
+    accuracyWarning: (metres: number) =>
+      `Location accurate to about ${metres} m. HR may need to review this punch.`,
+
+    unknownSite: "Unknown site",
+    accurateTo: (metres: number) => `accurate to ${metres} m`,
+    distanceFromSite: (metres: number) => `${metres} m from site`,
+    verdictInside: "Inside authorised area",
+    verdictOutside: "Outside the authorised area",
+    verdictInconclusive: "Location could not be verified",
+    verdictUnavailable: "No location recorded",
   },
   devices: {
     title: "Devices",
@@ -580,7 +613,8 @@ export const strings = {
     fieldEmpty: "—",
     errInvalidRange: "From date must not be after To date.",
     errNotFound: "Audit entry not found.",
-  },  payslips: {
+  },
+  payslips: {
     title: "My payslips",
     empty: "No payslips yet.",
     error: "Could not load your payslips.",

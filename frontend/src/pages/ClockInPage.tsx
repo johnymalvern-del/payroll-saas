@@ -17,15 +17,72 @@ import { useMe } from "../auth/useMe";
 import { getDeviceKey, setDeviceKey, clearDeviceKey } from "../lib/deviceKey";
 import { startCamera, type CameraHandle } from "../lib/camera";
 import {
+  getCurrentPosition,
   newClientPunchId,
   resolveEmployeeByCode,
   submitPunch,
   type EmployeeLookup,
+  type PositionResult,
 } from "../api/clockIn";
 import { strings } from "../lib/strings";
 import { colors } from "../theme/colors";
 
 type Phase = "need_key" | "ready" | "submitting" | "success" | "error";
+
+/**
+ * Accuracy above which we warn the employee before they commit.
+ *
+ * This is a client-side hint only -- the authoritative decision is the
+ * server-side geofence verdict, which compares the fix against the site's
+ * radius. The number is chosen because an urban fix is typically 5-30 m
+ * and mobile-network fallback is 1-3 km: 50 m is roughly where a fix
+ * stops being good enough to judge a small office fence.
+ */
+const ACCURACY_WARN_METRES = 50;
+
+type Verdict = {
+  time: string;
+  siteName: string | null;
+  result: string | null;
+  reason: string | null;
+  accuracy: number | null;
+  distance: number | null;
+  /** Why no location was sent, when the fix failed. Null when we had one. */
+  locationProblem: string | null;
+};
+
+function verdictLabel(result: string | null): string {
+  switch (result) {
+    case "inside":
+      return strings.clockIn.verdictInside;
+    case "outside":
+      return strings.clockIn.verdictOutside;
+    case "inconclusive":
+      return strings.clockIn.verdictInconclusive;
+    default:
+      return strings.clockIn.verdictUnavailable;
+  }
+}
+
+function verdictColor(result: string | null): string {
+  if (result === "inside") return colors.approved;
+  if (result === "outside") return colors.problem;
+  return colors.pending;
+}
+
+function describeLocationProblem(pos: PositionResult | null): string | null {
+  if (!pos || pos.ok) return null;
+  switch (pos.reason) {
+    case "denied":
+      return strings.clockIn.locationDenied;
+    case "timeout":
+      return strings.clockIn.locationTimeout;
+    case "unsupported":
+      return strings.clockIn.locationUnsupported;
+    default:
+      return strings.clockIn.locationUnavailable;
+  }
+}
 
 export function ClockInPage() {
   const me = useMe();
@@ -41,6 +98,8 @@ export function ClockInPage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [warningMsg, setWarningMsg] = useState<string | null>(null);
+  const [position, setPosition] = useState<PositionResult | null>(null);
+  const [verdict, setVerdict] = useState<Verdict | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraRef = useRef<CameraHandle | null>(null);
 
@@ -87,10 +146,13 @@ export function ClockInPage() {
     setSuccessMsg(null);
     setWarningMsg(null);
     setErrorMsg(null);
+    setPosition(null);
+    setVerdict(null);
   };
 
   const lookup = async () => {
     setErrorMsg(null);
+    setVerdict(null);
     try {
       const found = await resolveEmployeeByCode(employeeCode.trim());
       if (!found) {
@@ -99,6 +161,11 @@ export function ClockInPage() {
         return;
       }
       setEmployee(found);
+      // Ask for the fix as soon as we know who is clocking, so the accuracy
+      // hint can appear before they commit. A refusal here is not an error:
+      // the punch still goes through, it simply carries no location.
+      setPosition(null);
+      void getCurrentPosition().then(setPosition);
     } catch (e) {
       setErrorMsg((e as Error).message || strings.clockIn.lookupFailed);
       setEmployee(null);
@@ -115,9 +182,20 @@ export function ClockInPage() {
     setErrorMsg(null);
     setSuccessMsg(null);
     setWarningMsg(null);
+    setVerdict(null);
     try {
       const photo = cameraRef.current.captureJpegBase64(0.7);
       const now = new Date().toISOString();
+
+      // Reuse the fix taken at lookup time; fetch one now if it was never
+      // requested. Never block the punch on it -- an employee who cannot get
+      // a location must still be able to clock in, with the day routed to HR.
+      let pos = position;
+      if (!pos) {
+        pos = await getCurrentPosition();
+        setPosition(pos);
+      }
+
       const out = await submitPunch(
         {
           client_punch_id: newClientPunchId(),
@@ -126,10 +204,32 @@ export function ClockInPage() {
           device_now_at_send: now,
           method: "code",
           photo_base64: photo,
+          ...(pos.ok
+            ? {
+                latitude: pos.latitude,
+                longitude: pos.longitude,
+                gps_accuracy_m: pos.gps_accuracy_m,
+              }
+            : {}),
         },
         deviceKey,
       );
+
       const t = new Date(out.effective_time).toLocaleTimeString();
+      const accuracy =
+        out.gps_accuracy_m != null ? Number(out.gps_accuracy_m) : pos.ok ? pos.gps_accuracy_m : null;
+      const distance = out.distance_m != null ? Number(out.distance_m) : null;
+
+      setVerdict({
+        time: t,
+        siteName: out.site_name ?? null,
+        result: out.geofence_result ?? null,
+        reason: out.geofence_reason ?? null,
+        accuracy: Number.isFinite(accuracy as number) ? accuracy : null,
+        distance: Number.isFinite(distance as number) ? distance : null,
+        locationProblem: describeLocationProblem(pos),
+      });
+
       if (out.warnings && out.warnings.length > 0) {
         setWarningMsg(strings.clockIn.recomputeWarning);
       } else {
@@ -176,6 +276,25 @@ export function ClockInPage() {
     );
   }
 
+  const accuracyHint =
+    position?.ok && position.gps_accuracy_m > ACCURACY_WARN_METRES
+      ? strings.clockIn.accuracyWarning(Math.round(position.gps_accuracy_m))
+      : null;
+
+  const locating = position === null && employee !== null;
+
+  const verdictParts: string[] = [];
+  if (verdict) {
+    verdictParts.push(verdict.siteName ?? strings.clockIn.unknownSite);
+    if (verdict.accuracy != null) {
+      verdictParts.push(strings.clockIn.accurateTo(Math.round(verdict.accuracy)));
+    }
+    if (verdict.result === "outside" && verdict.distance != null) {
+      verdictParts.push(strings.clockIn.distanceFromSite(Math.round(verdict.distance)));
+    }
+    verdictParts.push(verdictLabel(verdict.result));
+  }
+
   return (
     <Container size="sm" py="xl">
       <Stack>
@@ -190,6 +309,9 @@ export function ClockInPage() {
             {strings.clockIn.resetDevice}
           </Button>
         </Group>
+        <Alert color={colors.pending} data-testid="clockin-identity-notice">
+          {strings.clockIn.identityNotice}
+        </Alert>
         {errorMsg && (
           <Alert color={colors.problem} data-testid="clockin-error">
             {errorMsg}
@@ -198,6 +320,19 @@ export function ClockInPage() {
         {successMsg && (
           <Alert color={colors.approved} data-testid="clockin-success">
             {successMsg}
+          </Alert>
+        )}
+        {verdict && (
+          <Alert
+            color={verdictColor(verdict.result)}
+            data-testid="clockin-verdict"
+          >
+            {verdictParts.join(" · ")}
+            {verdict.locationProblem && (
+              <Text size="sm" mt={4}>
+                {verdict.locationProblem}
+              </Text>
+            )}
           </Alert>
         )}
         {warningMsg && (
@@ -216,6 +351,8 @@ export function ClockInPage() {
               onChange={(e) => {
                 setEmployeeCode(e.currentTarget.value);
                 setEmployee(null);
+                setPosition(null);
+                setVerdict(null);
               }}
               data-testid="clockin-code"
             />
@@ -231,6 +368,16 @@ export function ClockInPage() {
                 {employee.first_name} {employee.last_name} (
                 {employee.employee_code})
               </Text>
+            )}
+            {locating && (
+              <Text size="sm" c="dimmed" data-testid="clockin-locating">
+                {strings.clockIn.locating}
+              </Text>
+            )}
+            {accuracyHint && (
+              <Alert color={colors.pending} data-testid="clockin-accuracy-warning">
+                {accuracyHint}
+              </Alert>
             )}
           </Stack>
         </Card>

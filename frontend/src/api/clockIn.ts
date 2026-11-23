@@ -19,6 +19,9 @@ export type PunchIn = {
   photo_base64?: string | null;
   match_score?: number | string | null;
   liveness_passed?: boolean | null;
+  latitude?: number | string | null;
+  longitude?: number | string | null;
+  gps_accuracy_m?: number | string | null;
 };
 
 export type PunchOut = {
@@ -26,8 +29,20 @@ export type PunchOut = {
   effective_time: string;
   status: string;
   flags: string[];
+  site_id?: string | null;
+  site_name?: string | null;
+  latitude?: string | null;
+  longitude?: string | null;
+  gps_accuracy_m?: string | null;
+  geofence_result?: string | null;
+  geofence_reason?: string | null;
+  distance_m?: string | null;
   warnings?: string[];
 };
+
+export type PositionResult =
+  | { ok: true; latitude: number; longitude: number; gps_accuracy_m: number }
+  | { ok: false; reason: "unsupported" | "denied" | "timeout" | "unavailable" };
 
 function baseHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
@@ -80,6 +95,51 @@ export async function submitPunch(
     throw new Error(msg);
   }
   return (await res.json()) as PunchOut;
+}
+
+/**
+ * Read the device's current position for attendance verification.
+ *
+ * Returns a discriminated result rather than throwing: a clock-in must still
+ * be possible when location is unavailable, and the caller needs to tell the
+ * difference between "the employee refused permission" and "the fix timed
+ * out" so it can show a sensible message and route the day to HR.
+ *
+ * `enableHighAccuracy` is essential here. With it off, desktop browsers fall
+ * back to IP geolocation, which is routinely kilometres out -- that would
+ * make every punch INCONCLUSIVE and the whole geofence feature meaningless.
+ *
+ * `maximumAge: 0` deliberately refuses a cached fix. A five-minute-old
+ * position is not evidence of where someone is standing now.
+ */
+export function getCurrentPosition(
+  timeoutMs = 10000,
+): Promise<PositionResult> {
+  if (typeof navigator === "undefined" || !navigator.geolocation) {
+    return Promise.resolve({ ok: false, reason: "unsupported" });
+  }
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        resolve({
+          ok: true,
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          gps_accuracy_m: pos.coords.accuracy,
+        });
+      },
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) {
+          resolve({ ok: false, reason: "denied" });
+        } else if (err.code === err.TIMEOUT) {
+          resolve({ ok: false, reason: "timeout" });
+        } else {
+          resolve({ ok: false, reason: "unavailable" });
+        }
+      },
+      { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 0 },
+    );
+  });
 }
 
 export function newClientPunchId(): string {
