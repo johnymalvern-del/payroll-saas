@@ -23,6 +23,12 @@ new punches. Existing stored photographs and their keys are untouched;
 removing those needs the dependency investigation required by policy s1
 and is deliberately not attempted here.
 
+GPS retention (policy s5, ten_0030): the raw fix is written to
+punch_location in the same transaction as the punch, because punch itself
+is append-only and a mutable column cannot live there. The punch keeps a
+coarse distance_band permanently; the exact distance and accuracy are
+deleted with the coordinates when retention expires.
+
 Note that storage: Storage remains in _process_punch's signature although
 this endpoint no longer writes to it. The parameter is retained so call
 sites and the dependency wiring stay unchanged; it will become redundant
@@ -61,7 +67,7 @@ from app.api.v1.punches_schemas import (
 from app.core.errors import AppError
 from app.core.permissions import Permission, require_permission
 from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
-from app.db.tenant.models.attendance import Punch
+from app.db.tenant.models.attendance import Punch, PunchLocation
 from app.db.tenant.models.organisation import Site
 from app.db.tenant.models.people import Employee
 from app.db.tenant.models.platform import AuditLog
@@ -82,6 +88,28 @@ _RAW_PAYLOAD_MAX_BYTES = 8 * 1024
 # keep the punch and record the verdict as inconclusive rather than
 # letting a bad number abort the insert.
 _ACCURACY_MAX_STORABLE = 9999
+
+
+def _distance_band(distance_m: float | None, radius_m: float | None) -> str:
+    """Coarse, permanently-retained descriptor of how far outside a fence.
+
+    Privacy policy section 5: the exact distance is purged with the
+    coordinates, so what survives must be enough to defend the verdict
+    without localising the employee. "near" vs "distant" preserves the
+    distinction an auditor needs; neither pins a position.
+
+    'unknown' covers three cases -- no fix, no site radius, or a verdict
+    that never produced a distance. It is also the value every punch
+    captured before ten_0030 carries, because backfilling them would
+    require UPDATE on an append-only table.
+    """
+    if distance_m is None or radius_m is None or radius_m <= 0:
+        return 'unknown'
+    if distance_m <= radius_m:
+        return 'within'
+    if distance_m <= 2.0 * radius_m:
+        return 'near'
+    return 'distant'
 
 
 def _site_name(db: Any, site_id: uuid.UUID | None, cache: dict | None = None) -> str | None:
@@ -115,6 +143,7 @@ def _to_out(p: Punch, *, site_name: str | None = None) -> PunchOut:
         geofence_result=p.geofence_result,
         geofence_reason=p.geofence_reason,
         distance_m=p.distance_m,
+        distance_band=p.distance_band,
         status=p.status,
         flags=list(p.flags or []), raw_payload=p.raw_payload, created_at=p.created_at,
     )
@@ -275,6 +304,9 @@ def _process_punch(
     geofence_result_val = None
     geofence_reason_val = None
     distance_val = None
+    # Hoisted out of the site branch so the band can be computed whether or
+    # not a verdict was reached.
+    radius_val: float | None = None
     if device.site_id is None:
         geofence_result_val = GeofenceVerdict.UNAVAILABLE.value
         geofence_reason_val = 'device_site_not_specified'
@@ -284,6 +316,7 @@ def _process_punch(
             geofence_result_val = GeofenceVerdict.UNAVAILABLE.value
             geofence_reason_val = 'site_record_missing'
         else:
+            radius_val = None if site.geofence_radius_m is None else float(site.geofence_radius_m)
             geo = evaluate_geofence(
                 latitude=payload.latitude,
                 longitude=payload.longitude,
@@ -334,12 +367,32 @@ def _process_punch(
         geofence_result=geofence_result_val,
         geofence_reason=geofence_reason_val,
         distance_m=distance_val,
+        distance_band=_distance_band(distance_val, radius_val),
         status=status_val,
         flags=flags,
         raw_payload=payload.raw_payload,
     )
     db.add(punch)
     db.flush()
+
+    # --- Policy s5: the raw fix goes to its own table --------------------
+    # Written in the same transaction as the punch, so a punch can never
+    # exist with a half-recorded location. punch itself stays append-only;
+    # this row is the part retention is allowed to delete.
+    if (
+        distance_val is not None
+        and payload.latitude is not None
+        and payload.longitude is not None
+    ):
+        db.add(PunchLocation(
+            punch_id=punch.id,
+            latitude=payload.latitude,
+            longitude=payload.longitude,
+            gps_accuracy_m=accuracy_val,
+            distance_m=distance_val,
+            captured_at=punch.effective_time,
+        ))
+
     db.add(AuditLog(
         id=uuid.uuid4(), actor_user_id=None, actor_role=None,
         entity_type='punch', entity_id=str(punch.id), action='punch.create',

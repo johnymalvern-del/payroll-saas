@@ -24,6 +24,14 @@ Phase 5: PunchOut gains site_name so the clock-in screen can name the
 branch the employee clocked at ("Hotel Branch - Cape Town", per the
 location-confirmation requirement) without a second round trip to
 /org/sites. It is display data only; site_id remains the identifier.
+
+ten_0030 (privacy policy s5): PunchOut gains distance_band. The exact
+distance_m is purged with the coordinates after the retention window,
+so the band is what an auditor sees for an older punch. It is a coarse
+geometry descriptor and never localises an employee: 'within' (inside
+the fence), 'near' (outside but within twice the radius), 'distant'
+(beyond that), and 'unknown' for punches with no fix, no site radius,
+or captured before ten_0030.
 '''
 from __future__ import annotations
 
@@ -85,6 +93,7 @@ class PunchOut(BaseModel):
     geofence_result: str | None = None
     geofence_reason: str | None = None
     distance_m: Decimal | None = None
+    distance_band: str | None = None
     status: str
     flags: list[str]
     raw_payload: dict[str, Any]
