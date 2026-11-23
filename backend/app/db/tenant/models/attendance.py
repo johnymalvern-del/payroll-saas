@@ -17,6 +17,12 @@ No __table_args__ unique constraints are declared for the functional
 unique index uq_shift_name_lower_active because it is on lower(btrim(name))
 WHERE is_active=true, which SQLAlchemy cannot express as a UniqueConstraint.
 Uniqueness is enforced by migration 0012 at the DB level.
+
+PunchLocation (migration ten_0030) holds the raw GPS fix separately from the
+punch, so privacy-policy section 5 retention can delete it without touching
+the append-only punch row. It inherits Base only: a row is inserted once and
+later deleted, never updated, and a database trigger refuses UPDATE. Its two
+CHECK constraints are enforced by ten_0030.
 """
 from __future__ import annotations
 
@@ -223,6 +229,8 @@ class Punch(Base):
         ForeignKey("site.id", ondelete="RESTRICT"),
         nullable=True,
     )
+    # Not supplied by _process_punch: the server clock stamps arrival. The
+    # server_default is what populates it, so removing it breaks every insert.
     server_received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -248,12 +256,58 @@ class Punch(Base):
     geofence_result: Mapped[str | None] = mapped_column(String(20), nullable=True)
     geofence_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
     distance_m: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    # Privacy-policy section 5: the exact distance is purged with the
+    # coordinates, so a coarse band is what survives permanently. Written at
+    # capture time. 'unknown' is the honest value for punches that predate
+    # ten_0030 -- backfilling them would need UPDATE on an append-only table.
+    distance_band: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="unknown", server_default="unknown"
+    )
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     flags: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=list,
         server_default=text("'[]'::jsonb"),
     )
     raw_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PunchLocation(Base):
+    """The raw GPS fix for one punch, held separately so it can be deleted.
+
+    punch is append-only: UPDATE and DELETE are both revoked and a trigger
+    raises. A mutable column therefore cannot live there, which is why the
+    coordinates moved here in ten_0030. Retention deletes this row; the punch
+    and its verdict stay untouched.
+
+    Inherits Base only -- inserted once, deleted once, never updated. The
+    database trigger trg_punch_location_no_update enforces that as a second
+    line of defence behind the REVOKE.
+
+    captured_at echoes punch.effective_time so the retention sweep can filter
+    on this table alone, without joining back to the immutable one.
+    """
+
+    __tablename__ = "punch_location"
+    __table_args__ = (
+        UniqueConstraint("punch_id", name="uq_punch_location_punch"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    punch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("punch.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    latitude: Mapped[Decimal] = mapped_column(Numeric(9, 6), nullable=False)
+    longitude: Mapped[Decimal] = mapped_column(Numeric(9, 6), nullable=False)
+    gps_accuracy_m: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    distance_m: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
