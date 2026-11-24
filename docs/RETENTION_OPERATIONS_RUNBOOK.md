@@ -29,4 +29,9 @@ holding on them would mean retaining coordinates forever.
 
 ---
 
-## 2. Command
+## 2. Scheduling
+
+The sweep is registered in Windows Task Scheduler as **Payroll-RetentionPurge**,
+running daily at 02:00 as `NT AUTHORITY\SYSTEM`.
+
+The task action is a PowerShell wrapper, not `python.exe` directly:
