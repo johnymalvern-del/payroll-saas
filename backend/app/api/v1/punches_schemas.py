@@ -16,28 +16,26 @@ Phase 2: gps_accuracy_m carries the device's reported horizontal
 accuracy alongside latitude/longitude. It is intentionally NOT part of
 canonical_payload_hash -- see punches.py -- so a retry of an
 already-accepted punch keeps the same payload_hash and is recognised as
-a duplicate rather than a conflict. It is also deliberately unconstrained
-in sign: a device reporting nonsense is a device we want to record and
-flag as inconclusive, not one whose clock-in we want to reject outright.
+a duplicate rather than a conflict.
 
-Note PunchIn KEEPS latitude, longitude and gps_accuracy_m. Those are the
-request: how a device reports where it is. ten_0031 dropped them from the
-punch TABLE, not from the wire format.
+Non-biometric fallback (policy section 4): method='pin' carries a PIN in
+the `pin` field. SecretStr keeps it out of repr(), logs and any accidental
+model_dump() in an error path; the value is read with get_secret_value()
+at exactly one place in punches.py.
+
+`pin` is likewise excluded from canonical_payload_hash, because that
+function builds its field dict explicitly rather than dumping the model.
+That is not incidental -- a failed PIN retry re-sent with the same
+client_punch_id must be recognised as the same punch and must not be
+re-verified. The original already verified.
 
 Phase 5: PunchOut carries site_name so the clock-in screen can name the
 branch the employee clocked at without a second round trip to /org/sites.
-It is display data only; site_id remains the identifier.
 
 ten_0030/ten_0031 (privacy policy s5): PunchOut no longer carries flat
 latitude, longitude, gps_accuracy_m or distance_m. The fix is a nested
 location object, or null -- either because none was captured or because
-retention has deleted it. Those two cases are deliberately indistinguishable:
-telling them apart would need a marker that is itself retained personal
-metadata.
-
-distance_band survives permanently on the punch. It is coarse geometry
-(within / near / distant) and defends the verdict without localising the
-employee.
+retention has deleted it.
 '''
 from __future__ import annotations
 
@@ -46,9 +44,16 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+)
 
-_DEVICE_METHODS = ('fingerprint', 'face', 'code')
+_DEVICE_METHODS = ('fingerprint', 'face', 'code', 'pin')
 
 
 class PunchIn(BaseModel):
@@ -63,6 +68,9 @@ class PunchIn(BaseModel):
     latitude: Decimal | None = None
     longitude: Decimal | None = None
     gps_accuracy_m: Decimal | None = None
+    # Non-biometric fallback credential. Only read when method == 'pin'.
+    # Never persisted, never logged, never returned.
+    pin: SecretStr | None = None
     raw_payload: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator('method')

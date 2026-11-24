@@ -22,14 +22,29 @@ without deleting the row -- which would erase the evidence that consent was
 ever given, the opposite of what an audit needs. ten_0032 adds withdrawn_at
 and withdrawn_by; the row is now never deleted.
 
-BiometricEnrolment.template_encrypted is NOT NULL. That is a deliberate second
-gate behind the approval requirement in section 8 of the privacy policy: no
-enrolment row can exist without an actual template, so there is no code path
-that could record a biometric enrolment while the gate is closed.
+BiometricEnrolment.template_encrypted is NOT NULL. That is a deliberate
+second gate behind the approval requirement in section 8 of the privacy
+policy: no enrolment row can exist without an actual template, so there is
+no code path that could record a biometric enrolment while the gate is
+closed.
 
 consent_id uses ondelete="RESTRICT" rather than CASCADE: deleting a consent
 row must not silently delete the enrolment that depended on it. The row is
 never deleted in practice, and the constraint says so at the database level.
+
+Non-biometric fallback (ten_0033, policy section 4)
+
+Employee.pin_hash is the credential for the attendance fallback that section 4
+requires. Two deliberate choices:
+
+  * It is a one-way argon2 hash, NOT an *_encrypted column. The encryption
+    columns above exist because those values are read back and displayed. A PIN
+    is only ever compared, so it must not be recoverable -- a stolen tenant
+    database then yields no PINs.
+
+  * pin_failed_attempts and pin_locked_until are the real defence. A 6-digit
+    PIN is 10^6 values; hashing makes each guess expensive but bounds nothing
+    about how many are attempted. The counter does.
 """
 from __future__ import annotations
 
@@ -112,6 +127,20 @@ class Employee(Base, TimestampMixin):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     row_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
+    )
+    # Non-biometric fallback (ten_0033, policy section 4). One-way hash, never
+    # decrypted -- see the module docstring for why this differs from the
+    # *_encrypted columns above.
+    pin_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pin_set_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Lockout state is the real bound on guessing; argon2 alone is not.
+    pin_failed_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    pin_locked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 

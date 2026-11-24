@@ -48,6 +48,13 @@ from app.api.v1.leave_requests import router as leave_requests_router
 from app.api.v1.intelligence_settings import router as intelligence_settings_router
 from app.api.v1.intelligence_decisions import router as intelligence_decisions_router
 
+# Biometric attendance programme. These two modules are kept out of the
+# alphabetised block above so that everything belonging to the programme is
+# visible in one place: consent capture, the (gated) enrolment refusal, and the
+# non-biometric PIN fallback required by section 4 of the privacy policy.
+from app.api.v1.biometric_consent import router as biometric_consent_router
+from app.api.v1.employee_pin import router as employee_pin_router
+
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(register_router)
 api_router.include_router(auth_router)
@@ -91,3 +98,9 @@ api_router.include_router(payroll_payslips_router)
 api_router.include_router(payroll_salary_structures_router)
 api_router.include_router(payroll_salary_assignments_router)
 api_router.include_router(payroll_salary_assignments_history_router)
+
+# Biometric attendance programme (see the import comment above).
+api_router.include_router(biometric_consent_router)
+api_router.include_router(employee_pin_router)
+
+# END OF FILE

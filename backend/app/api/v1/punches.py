@@ -11,10 +11,6 @@ missing clock-in is a worse outcome than an exception somebody can look
 at -- that is also the safeguard that stops a GPS or biometric problem
 from silently becoming an unpaid deduction downstream.
 
-Phase 5: PunchOut carries site_name so the clock-in screen can confirm the
-branch by name. The lookup is cached per request because a batch shares a
-single device and therefore a single site.
-
 Photo retention (policy s1): raw facial photographs are no longer stored.
 A submitted photo is still decoded, validated and virus-scanned, and is
 still required by device.require_photo_for_code -- but the bytes are
@@ -23,15 +19,25 @@ new punches.
 
 GPS retention (policy s5): the raw fix is written to punch_location in the
 same transaction as the punch. punch is append-only, so ten_0031 removed
-latitude, longitude, gps_accuracy_m and distance_m from it entirely -- a
-column that must expire cannot live on a row that can never be updated.
-What punch keeps is the audit conclusion: geofence_result, geofence_reason
-and the coarse distance_band.
+latitude, longitude, gps_accuracy_m and distance_m from it entirely. What
+punch keeps is the audit conclusion: geofence_result, geofence_reason and
+the coarse distance_band.
 
-The location row is written whenever a fix exists, even when no verdict
-could be reached. A site with no geofence radius produces no distance, but
-the employee's position was still captured, and retention policy applies to
-it on the same 30-day schedule as any other.
+Non-biometric fallback (policy s4): method='pin' verifies a 6-digit PIN
+against employee.pin_hash before the punch is created. This is the
+alternative section 4 requires, and it is deliberately available on *every*
+device -- device.allows_code_only governs only method='code', which performs
+no verification at all.
+
+A PIN punch is NOT flagged as an exception. The fallback is a mandated right,
+not a suspicious event; surfacing it in the exception queue would be exactly
+the detriment section 4 forbids. `punch.method` is the record, and HR can
+query on it.
+
+PIN verification commits independently of the punch. A failed attempt is a
+security event that must survive even though no punch was created, so the
+counter increment is committed before the error is raised and before any
+punch transaction begins.
 
 list_punches eager-loads the relationship with selectinload -- 100 rows each
 needing one lazily-loaded location would be 100 extra queries. Single-punch
@@ -43,6 +49,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
@@ -74,6 +81,7 @@ from app.api.v1.punches_schemas import (
 from app.core.errors import AppError
 from app.core.permissions import Permission, require_permission
 from app.core.scope import ScopeViolation, apply_scope, assert_in_scope
+from app.core.security import verify_password
 from app.db.tenant.models.attendance import Punch, PunchLocation
 from app.db.tenant.models.organisation import Site
 from app.db.tenant.models.people import Employee
@@ -96,14 +104,90 @@ _RAW_PAYLOAD_MAX_BYTES = 8 * 1024
 # letting a bad number abort the insert.
 _ACCURACY_MAX_STORABLE = 9999
 
+# --- Non-biometric fallback (policy s4) ------------------------------------
+# 6 digits, not 4: 4 digits is 10,000 combinations, exhaustible in hours at a
+# public terminal. argon2 makes each guess expensive, but it places no limit on
+# how many guesses can be made -- _PIN_MAX_FAILED_ATTEMPTS does that.
+_PIN_RE = re.compile(r'^\d{6}$')
+_PIN_MAX_FAILED_ATTEMPTS = 5
+_PIN_LOCK_MINUTES = 15
+
+
+def _verify_employee_pin(db: Any, employee: Employee, pin: str | None) -> None:
+    """Verify the fallback PIN, or raise AppError.
+
+    Failures are counted and committed before raising. A failed attempt is a
+    security event that must persist even though no punch exists, so the
+    counter cannot ride on the punch transaction -- which never starts.
+
+    The order of checks matters:
+
+      1. lockout first, so a locked account cannot be probed for whether the
+         PIN is set at all
+      2. format, before any hashing: argon2 on a malformed value wastes work
+         and tells an attacker nothing useful
+      3. verify last, because it is the expensive step
+
+    Returns None on success; the caller proceeds to create the punch.
+    """
+    if employee.pin_hash is None:
+        raise AppError(
+            'pin_not_set',
+            'No attendance PIN has been set for this employee. '
+            'Ask HR to set one.',
+            400,
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if employee.pin_locked_until is not None and employee.pin_locked_until > now:
+        remaining = int((employee.pin_locked_until - now).total_seconds() // 60) + 1
+        raise AppError(
+            'pin_locked',
+            f'Too many incorrect PIN attempts. Try again in {remaining} minute(s), '
+            f'or ask HR to unlock the PIN.',
+            423,
+        )
+
+    if pin is None or not _PIN_RE.match(pin):
+        # Deliberately not counted: a client that sent no PIN has not made a
+        # guess, and counting it would let a buggy terminal lock out every
+        # employee by omitting the field.
+        raise AppError(
+            'pin_required',
+            'This punch requires a 6-digit PIN.',
+            400,
+        )
+
+    if not verify_password(pin, employee.pin_hash):
+        employee.pin_failed_attempts = (employee.pin_failed_attempts or 0) + 1
+        if employee.pin_failed_attempts >= _PIN_MAX_FAILED_ATTEMPTS:
+            employee.pin_locked_until = now + timedelta(minutes=_PIN_LOCK_MINUTES)
+            employee.pin_failed_attempts = 0
+            db.commit()
+            raise AppError(
+                'pin_locked',
+                f'Too many incorrect PIN attempts. The PIN is locked for '
+                f'{_PIN_LOCK_MINUTES} minutes.',
+                423,
+            )
+        remaining = _PIN_MAX_FAILED_ATTEMPTS - employee.pin_failed_attempts
+        db.commit()
+        raise AppError(
+            'pin_incorrect',
+            f'Incorrect PIN. {remaining} attempt(s) remaining before lockout.',
+            401,
+        )
+
+    # Success clears the lockout state entirely.
+    if employee.pin_failed_attempts or employee.pin_locked_until is not None:
+        employee.pin_failed_attempts = 0
+        employee.pin_locked_until = None
+        db.commit()
+
 
 def _distance_band(distance_m: float | None, radius_m: float | None) -> str:
     """Coarse, permanently-retained descriptor of how far outside a fence.
-
-    Privacy policy section 5: the exact distance is deleted with the
-    coordinates, so what survives must defend the verdict without localising
-    the employee. "near" vs "distant" preserves the distinction an auditor
-    needs; neither pins a position.
 
     'unknown' covers no fix, no site radius, or a verdict that never produced
     a distance. It is also the value every punch captured before ten_0030
@@ -136,11 +220,7 @@ def _location_out(loc: PunchLocation | None) -> PunchLocationOut | None:
 
 
 def _site_name(db: Any, site_id: uuid.UUID | None, cache: dict | None = None) -> str | None:
-    """Display name for a site id, memoised for batch reuse.
-
-    A batch of 500 punches from one device shares one site, so without a
-    cache this would be 500 identical db.get() calls.
-    """
+    """Display name for a site id, memoised for batch reuse."""
     if site_id is None:
         return None
     if cache is not None and site_id in cache:
@@ -298,11 +378,28 @@ def _process_punch(
         raise AppError('unknown_employee', 'employee_id does not exist', 422)
     validate_raw_payload(payload.raw_payload, _RAW_PAYLOAD_MAX_BYTES)
     photo_bytes = decode_and_validate_photo(payload.photo_base64, _PHOTO_MAX_BYTES)
+
+    # --- Non-biometric fallback (policy s4) -----------------------------
+    # Verified before anything else of substance, and before any punch row
+    # exists. A wrong PIN must not produce a punch, an audit row, or a
+    # geofence verdict -- it produces an error and a counter increment.
+    #
+    # No photo is required for a PIN punch: the credential has already
+    # verified identity, which is more than method='code' does. If a photo
+    # was supplied anyway it is still scanned and discarded below.
+    if payload.method == 'pin':
+        _verify_employee_pin(
+            db,
+            employee,
+            payload.pin.get_secret_value() if payload.pin is not None else None,
+        )
+
     if payload.method == 'code':
         if not device.allows_code_only:
             raise AppError('code_not_allowed_here', 'This device does not allow code-only punches', 403)
         if device.require_photo_for_code and photo_bytes is None:
             raise AppError('photo_required', 'This device requires a photo for code-only punches', 400)
+
     effective_time, offset_ms = compute_timing_and_offset(payload.device_time, payload.device_now_at_send, server_received_at)
     flags: list[str] = []
     status_val = 'accepted'
@@ -329,15 +426,10 @@ def _process_punch(
     raw_accuracy = payload.gps_accuracy_m
     accuracy_val = raw_accuracy
     if accuracy_val is not None and (accuracy_val < 0 or accuracy_val > _ACCURACY_MAX_STORABLE):
-        # Unstorable or implausible: keep it out of the column (NUMERIC(6,2)
-        # would raise), but still hand the raw value to the evaluator so the
-        # reason tag records that the device reported nonsense.
         accuracy_val = None
     geofence_result_val = None
     geofence_reason_val = None
     distance_val = None
-    # Hoisted out of the site branch so the band can be computed whether or
-    # not a verdict was reached.
     radius_val: float | None = None
     if device.site_id is None:
         geofence_result_val = GeofenceVerdict.UNAVAILABLE.value
@@ -403,13 +495,6 @@ def _process_punch(
     db.flush()
 
     # --- Policy s5: the raw fix goes to its own table --------------------
-    # Written in the same transaction as the punch, so a punch can never
-    # exist with a half-recorded location. punch itself stays append-only;
-    # this row is the part retention is allowed to delete.
-    #
-    # Gated on the *fix* existing, not on a distance being computable. A
-    # site with no radius yields no distance, but the position was still
-    # captured and must expire on the normal schedule.
     location_row: PunchLocation | None = None
     if payload.latitude is not None and payload.longitude is not None:
         location_row = PunchLocation(
@@ -426,7 +511,7 @@ def _process_punch(
         id=uuid.uuid4(), actor_user_id=None, actor_role=None,
         entity_type='punch', entity_id=str(punch.id), action='punch.create',
         old_value=None,
-        new_value={'employee_id': str(punch.employee_id), 'device_id': str(device.id), 'status': punch.status, 'flags': punch.flags},
+        new_value={'employee_id': str(punch.employee_id), 'device_id': str(device.id), 'status': punch.status, 'flags': punch.flags, 'method': punch.method},
         request_id=request_id,
     ))
     db.commit()
@@ -449,9 +534,6 @@ def _process_punch(
         warnings = ["attendance_recompute_failed"]
         print(f"[TRIGGER FAILED] {type(e).__name__}: {e}", file=_sys.stderr)
         _tb.print_exc(file=_sys.stderr)
-    # Handed back so the caller can serialise it without triggering a lazy
-    # load on a relationship that may not resolve yet. Private by convention:
-    # it is consumed by submit_punch and submit_punch_batch only.
     punch.__dict__['_si_location'] = location_row
     return punch, warnings
 
