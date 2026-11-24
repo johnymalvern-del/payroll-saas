@@ -110,12 +110,19 @@ def _mk_calendar(session, year, dates):
     session.commit()
 
 
-def _mk_punch(session, employee_id, ts_utc):
+def _mk_punch(session, employee_id, ts_utc, *, status="accepted"):
+    """A punch row. `status` is exposed because the computation filters on it.
+
+    Only "duplicate" and "rejected" are excluded from attendance since the
+    engine.py:808 fix; "low_confidence" and "accepted" both count. A punch is
+    append-only at the database level, so these rows cannot be cleaned up --
+    each test uses a disposable tenant and unique employee codes.
+    """
     p = Punch(
         client_punch_id=uuid.uuid4(), payload_hash="0" * 64,
         employee_id=employee_id, device_time=ts_utc,
         effective_time=ts_utc, offset_ms=0,
-        method="fingerprint", status="accepted",
+        method="fingerprint", status=status,
         flags=[], raw_payload={},
     )
     session.add(p); session.commit(); return p
@@ -213,5 +220,65 @@ def test_recompute_day_locked_skipped(db):
     db.expire_all()
     d2 = recompute_day(db, e.id, date(2024, 5, 1))
     assert d2 is not None and d2.id == sid
+
+
+# ---------------------------------------------------------------------------
+# Rejected punches are excluded from computation (engine.py:808)
+#
+# The filter was `Punch.status != "duplicate"`, so a punch rejected for
+# future_time or employee_not_active still paired up and paid hours for the
+# session it formed. Because punch is append-only and DELETE is revoked, that
+# error was permanent. These two tests pin the corrected behaviour.
+#
+# The domain decision behind it: a rejected punch is not evidence the person
+# worked. Counting it inflates pay; excluding it routes the day to HR as an
+# incomplete day, which is visible and correctable. Inflating silently is the
+# one outcome that must never happen.
+# ---------------------------------------------------------------------------
+
+
+def test_rejected_punch_does_not_count_toward_minutes(db):
+    _mk_calendar(db, 2024, [])
+    shift = _mk_shift(db)
+    _mk_rule(db, shift.id, "weekday", "normal", tier=1, up_to=None)
+
+    # Control: the same day with only the out-punch present.
+    control = _mk_emp(db, "R5C", hire=date(2024, 1, 1), dflt_shift=shift.id)
+    _mk_punch(db, control.id, _sa_utc(2024, 5, 1, 17, 0))
+    control_day = recompute_day(db, control.id, date(2024, 5, 1))
+
+    # Subject: identical, plus a rejected in-punch that must be ignored.
+    subject = _mk_emp(db, "R5S", hire=date(2024, 1, 1), dflt_shift=shift.id)
+    _mk_punch(db, subject.id, _sa_utc(2024, 5, 1, 8, 0), status="rejected")
+    _mk_punch(db, subject.id, _sa_utc(2024, 5, 1, 17, 0))
+    subject_day = recompute_day(db, subject.id, date(2024, 5, 1))
+
+    assert control_day is not None
+    assert subject_day is not None
+
+    # The rejected punch changed nothing: same status, same minutes.
+    assert subject_day.status == control_day.status
+    assert subject_day.worked_minutes == control_day.worked_minutes
+
+    # Before the fix this pair produced a full 480-minute worked day.
+    assert subject_day.status != "worked"
+    assert subject_day.worked_minutes != 480
+
+
+def test_day_with_only_rejected_punches_is_not_worked(db):
+    """Two rejected punches must not become a complete session."""
+    _mk_calendar(db, 2024, [])
+    shift = _mk_shift(db)
+    _mk_rule(db, shift.id, "weekday", "normal", tier=1, up_to=None)
+    e = _mk_emp(db, "R6", hire=date(2024, 1, 1), dflt_shift=shift.id)
+    _mk_punch(db, e.id, _sa_utc(2024, 5, 1, 8, 0), status="rejected")
+    _mk_punch(db, e.id, _sa_utc(2024, 5, 1, 17, 0), status="rejected")
+
+    day = recompute_day(db, e.id, date(2024, 5, 1))
+
+    assert day is not None
+    assert day.status != "worked"
+    assert day.worked_minutes == 0
+
 
 # END OF FILE

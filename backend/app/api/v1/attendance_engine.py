@@ -805,7 +805,7 @@ def recompute_day(db, employee_id, work_date):
         Punch.employee_id == employee_id,
         Punch.effective_time >= win_start.astimezone(timezone.utc),
         Punch.effective_time < win_end.astimezone(timezone.utc),
-        Punch.status != "duplicate",
+        Punch.status.notin_(("duplicate", "rejected")),
     ).order_by(Punch.effective_time)).all()
 
     if not punch_rows:
