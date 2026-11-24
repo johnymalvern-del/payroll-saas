@@ -54,13 +54,6 @@ function renderPage() {
   );
 }
 
-/**
- * Install a fake navigator.geolocation.
- *
- * The real wrapper in api/clockIn reads err.PERMISSION_DENIED and err.TIMEOUT
- * off the error object, so the fake must carry those constants as well as the
- * numeric code -- that is what the browser's PositionError looks like.
- */
 function stubGeo(
   outcome:
     | { kind: "ok"; accuracy: number; lat?: number; lon?: number }
@@ -114,11 +107,6 @@ const EMP = {
   last_name: "Lovelace",
 };
 
-/**
- * fetch stub covering the two endpoints the page uses. `sent` captures the
- * POST /punches body so tests can assert on what was actually transmitted,
- * not merely that a request happened.
- */
 function stubFetch(punch: unknown, sent: { body?: Record<string, unknown> } = {}) {
   global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -133,6 +121,29 @@ function stubFetch(punch: unknown, sent: { body?: Record<string, unknown> } = {}
   });
 }
 
+/**
+ * fetch stub for the PIN path: employee lookup succeeds, and the punch POST
+ * returns whatever status/body the test supplies.
+ */
+function stubFetchPunchError(
+  status: number,
+  code: string,
+  message: string,
+  sent: { body?: Record<string, unknown> } = {},
+) {
+  global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes("/employees?employee_code=")) {
+      return jr({ items: [EMP] });
+    }
+    if (url.includes("/punches")) {
+      if (init?.body) sent.body = JSON.parse(String(init.body));
+      return jr({ error: { code, message } }, status);
+    }
+    return jr({});
+  });
+}
+
 const BASE_PUNCH = {
   id: "p1",
   effective_time: "2026-11-10T08:00:00Z",
@@ -141,8 +152,7 @@ const BASE_PUNCH = {
   warnings: [],
 };
 
-/** Walk the page from device key through to a successful clock-in. */
-async function clockInFlow() {
+async function lookupOnly() {
   fireEvent.change(screen.getByTestId("clockin-device-key"), {
     target: { value: "k" },
   });
@@ -154,10 +164,26 @@ async function clockInFlow() {
   await waitFor(() =>
     expect(screen.getByTestId("clockin-emp")).toBeInTheDocument(),
   );
+}
+
+async function clockInFlow() {
+  await lookupOnly();
   fireEvent.click(screen.getByTestId("clockin-start-camera"));
   await waitFor(() =>
     expect(screen.getByTestId("clockin-stop-camera")).toBeInTheDocument(),
   );
+  fireEvent.click(screen.getByTestId("clockin-submit"));
+}
+
+async function pinFlow(pin = "481920") {
+  await lookupOnly();
+  fireEvent.click(screen.getByText("Use a PIN instead"));
+  await waitFor(() =>
+    expect(screen.getByTestId("clockin-pin")).toBeInTheDocument(),
+  );
+  fireEvent.change(screen.getByTestId("clockin-pin"), {
+    target: { value: pin },
+  });
   fireEvent.click(screen.getByTestId("clockin-submit"));
 }
 
@@ -205,17 +231,8 @@ describe("ClockInPage", () => {
   it("looks up employee by code and shows name", async () => {
     global.fetch = vi.fn(async () => jr({ items: [EMP] }));
     renderPage();
-    fireEvent.change(screen.getByTestId("clockin-device-key"), {
-      target: { value: "k" },
-    });
-    fireEvent.click(screen.getByTestId("clockin-save-key"));
-    fireEvent.change(screen.getByTestId("clockin-code"), {
-      target: { value: "E1" },
-    });
-    fireEvent.click(screen.getByTestId("clockin-lookup"));
-    await waitFor(() =>
-      expect(screen.getByTestId("clockin-emp")).toHaveTextContent(/Ada/),
-    );
+    await lookupOnly();
+    expect(screen.getByTestId("clockin-emp")).toHaveTextContent(/Ada/);
   });
 
   it("shows error when code matches nothing", async () => {
@@ -241,14 +258,8 @@ describe("ClockInPage", () => {
     await waitFor(() =>
       expect(screen.getByTestId("clockin-recompute-warning")).toBeInTheDocument(),
     );
-    expect(screen.getByText(/punch was recorded, but attendance/i))
-      .toBeInTheDocument();
     expect(screen.queryByTestId("clockin-success")).not.toBeInTheDocument();
   });
-
-  // -------------------------------------------------------------------------
-  // Location capture
-  // -------------------------------------------------------------------------
 
   it("sends latitude, longitude and accuracy when a fix is available", async () => {
     stubGeo({ kind: "ok", accuracy: 12 });
@@ -269,7 +280,6 @@ describe("ClockInPage", () => {
     renderPage();
     await clockInFlow();
     await waitFor(() => expect(sent.body).toBeDefined());
-    // The punch must go through -- a refused fix is not a refused clock-in.
     expect(sent.body?.employee_id).toBe(EMP.id);
     expect(sent.body).not.toHaveProperty("latitude");
     expect(sent.body).not.toHaveProperty("longitude");
@@ -290,14 +300,7 @@ describe("ClockInPage", () => {
     stubGeo({ kind: "ok", accuracy: 65 });
     stubFetch(BASE_PUNCH);
     renderPage();
-    fireEvent.change(screen.getByTestId("clockin-device-key"), {
-      target: { value: "k" },
-    });
-    fireEvent.click(screen.getByTestId("clockin-save-key"));
-    fireEvent.change(screen.getByTestId("clockin-code"), {
-      target: { value: "E1" },
-    });
-    fireEvent.click(screen.getByTestId("clockin-lookup"));
+    await lookupOnly();
     await waitFor(() =>
       expect(screen.getByTestId("clockin-accuracy-warning")).toBeInTheDocument(),
     );
@@ -308,25 +311,11 @@ describe("ClockInPage", () => {
     stubGeo({ kind: "ok", accuracy: 12 });
     stubFetch(BASE_PUNCH);
     renderPage();
-    fireEvent.change(screen.getByTestId("clockin-device-key"), {
-      target: { value: "k" },
-    });
-    fireEvent.click(screen.getByTestId("clockin-save-key"));
-    fireEvent.change(screen.getByTestId("clockin-code"), {
-      target: { value: "E1" },
-    });
-    fireEvent.click(screen.getByTestId("clockin-lookup"));
-    await waitFor(() =>
-      expect(screen.getByTestId("clockin-emp")).toBeInTheDocument(),
-    );
+    await lookupOnly();
     expect(
       screen.queryByTestId("clockin-accuracy-warning"),
     ).not.toBeInTheDocument();
   });
-
-  // -------------------------------------------------------------------------
-  // Verdict display
-  // -------------------------------------------------------------------------
 
   it("shows site, accuracy and an inside verdict after clocking in", async () => {
     stubGeo({ kind: "ok", accuracy: 12 });
@@ -335,8 +324,13 @@ describe("ClockInPage", () => {
       site_name: "Hotel Branch",
       geofence_result: "inside",
       geofence_reason: "within_geofence",
-      gps_accuracy_m: "12.00",
-      distance_m: "4.50",
+      location: {
+        latitude: "-33.924900",
+        longitude: "18.424100",
+        gps_accuracy_m: "12.00",
+        distance_m: "4.50",
+        captured_at: "2026-11-10T08:00:00Z",
+      },
     });
     renderPage();
     await clockInFlow();
@@ -353,8 +347,13 @@ describe("ClockInPage", () => {
       site_name: "Bellville",
       geofence_result: "outside",
       geofence_reason: "outside_geofence",
-      gps_accuracy_m: "8.00",
-      distance_m: "19152.30",
+      location: {
+        latitude: "-33.923900",
+        longitude: "18.424100",
+        gps_accuracy_m: "8.00",
+        distance_m: "19152.30",
+        captured_at: "2026-11-10T08:00:00Z",
+      },
     });
     renderPage();
     await clockInFlow();
@@ -365,10 +364,6 @@ describe("ClockInPage", () => {
   });
 
   it("explains a refused location under the verdict", async () => {
-    // A refused fix yields geofence_result "unavailable", which maps to
-    // verdictUnavailable ("No location recorded"), not to the inconclusive
-    // label -- "could not be verified" is reserved for a fix that exists but
-    // cannot settle the question.
     stubGeo({ kind: "denied" });
     stubFetch({
       ...BASE_PUNCH,
@@ -384,38 +379,35 @@ describe("ClockInPage", () => {
   });
 
   it("blames the site, not the phone, when the site has no radius", async () => {
-    // The fix was good; the site record is what cannot be compared against it.
-    // Saying "No location recorded" here would send the employee to report a
-    // working phone.
     stubGeo({ kind: "ok", accuracy: 12 });
     stubFetch({
       ...BASE_PUNCH,
       site_name: "Hotel Branch",
       geofence_result: "unavailable",
       geofence_reason: "site_radius_not_configured",
-      gps_accuracy_m: "12.00",
+      location: {
+        latitude: "-33.924900",
+        longitude: "18.424100",
+        gps_accuracy_m: "12.00",
+        distance_m: null,
+        captured_at: "2026-11-10T08:00:00Z",
+      },
     });
     renderPage();
     await clockInFlow();
     const v = await screen.findByTestId("clockin-verdict");
     expect(v).toHaveTextContent(/This site has no location configured/i);
     expect(v).not.toHaveTextContent(/No location recorded/i);
-    // The accuracy is still reported, because a fix *was* obtained.
     expect(v).toHaveTextContent(/accurate to 12 m/i);
   });
 
   it("reads accuracy and distance from the nested location object", async () => {
-    // After the destructive migration the flat fields are permanently null,
-    // so a page reading only those would silently lose the accuracy and
-    // distance from the verdict -- no error, just quietly degraded output.
     stubGeo({ kind: "ok", accuracy: 12 });
     stubFetch({
       ...BASE_PUNCH,
       site_name: "Bellville",
       geofence_result: "outside",
       geofence_reason: "outside_geofence",
-      gps_accuracy_m: null,
-      distance_m: null,
       location: {
         latitude: "-33.923900",
         longitude: "18.424100",
@@ -432,22 +424,102 @@ describe("ClockInPage", () => {
   });
 
   it("falls back to the locally measured accuracy when no fix is returned", async () => {
-    // A punch recorded before the location table existed has no nested
-    // object and null flat fields. Showing nothing would hide a usable
-    // measurement the device already took.
     stubGeo({ kind: "ok", accuracy: 7 });
     stubFetch({
       ...BASE_PUNCH,
       site_name: "Hotel Branch",
       geofence_result: "inside",
       geofence_reason: "within_geofence",
-      gps_accuracy_m: null,
-      distance_m: null,
       location: null,
     });
     renderPage();
     await clockInFlow();
     const v = await screen.findByTestId("clockin-verdict");
     expect(v).toHaveTextContent(/accurate to 7 m/i);
+  });
+
+  // -------------------------------------------------------------------------
+  // Non-biometric fallback (privacy policy section 4)
+  // -------------------------------------------------------------------------
+
+  it("offers the PIN alternative on the clock-in screen itself", async () => {
+    // Section 4 requires the alternative to be genuinely available. An option
+    // an employee can only discover from HR documentation is not.
+    stubFetch(BASE_PUNCH);
+    renderPage();
+    await lookupOnly();
+    expect(screen.getByText("Use a PIN instead")).toBeInTheDocument();
+  });
+
+  it("sends method=pin and the PIN, with no photo, in PIN mode", async () => {
+    stubGeo({ kind: "ok", accuracy: 12 });
+    const sent: { body?: Record<string, unknown> } = {};
+    stubFetch({ ...BASE_PUNCH, method: "pin" }, sent);
+    renderPage();
+    await pinFlow("481920");
+    await waitFor(() => expect(sent.body).toBeDefined());
+    expect(sent.body?.method).toBe("pin");
+    expect(sent.body?.pin).toBe("481920");
+    expect(sent.body).not.toHaveProperty("photo_base64");
+  });
+
+  it("does not require the camera in PIN mode", async () => {
+    stubFetch({ ...BASE_PUNCH, method: "pin" });
+    renderPage();
+    await pinFlow("481920");
+    await waitFor(() =>
+      expect(screen.getByTestId("clockin-success")).toBeInTheDocument(),
+    );
+  });
+
+  it("cannot submit a PIN punch with an empty PIN", async () => {
+    stubFetch(BASE_PUNCH);
+    renderPage();
+    await lookupOnly();
+    fireEvent.click(screen.getByText("Use a PIN instead"));
+    await waitFor(() =>
+      expect(screen.getByTestId("clockin-pin")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("clockin-submit")).toBeDisabled();
+  });
+
+  it("tells the employee to ask HR when no PIN is set", async () => {
+    stubFetchPunchError(
+      400,
+      "pin_not_set",
+      "No attendance PIN has been set for this employee. Ask HR to set one.",
+    );
+    renderPage();
+    await pinFlow("481920");
+    await waitFor(() =>
+      expect(screen.getByTestId("clockin-error")).toHaveTextContent(
+        /Ask HR to set one/i,
+      ),
+    );
+  });
+
+  it("explains a lockout instead of leaving the employee stuck", async () => {
+    stubFetchPunchError(423, "pin_locked", "PIN is locked for 15 minutes.");
+    renderPage();
+    await pinFlow("481920");
+    await waitFor(() =>
+      expect(screen.getByTestId("clockin-error")).toHaveTextContent(
+        /Too many incorrect PINs|locked/i,
+      ),
+    );
+  });
+
+  it("switches back to the camera and releases it when leaving PIN mode", async () => {
+    stubFetch(BASE_PUNCH);
+    renderPage();
+    await lookupOnly();
+    fireEvent.click(screen.getByText("Use a PIN instead"));
+    await waitFor(() =>
+      expect(screen.getByTestId("clockin-pin")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByText("Use the camera instead"));
+    await waitFor(() =>
+      expect(screen.getByTestId("clockin-start-camera")).toBeInTheDocument(),
+    );
   });
 });

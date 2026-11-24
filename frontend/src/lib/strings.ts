@@ -114,6 +114,22 @@ export const strings = {
     // has no coordinates or radius to compare it against. Blaming the phone
     // here sends employees to report a device that is working correctly.
     verdictSiteMissing: "This site has no location configured",
+
+    // Non-biometric fallback (privacy policy section 4). Offered on the
+    // clock-in screen itself, not mentioned only in HR documentation: an
+    // alternative an employee must be told about is not genuinely available,
+    // and section 4 requires it to be.
+    usePin: "Use a PIN instead",
+    useCamera: "Use the camera instead",
+    pinLabel: "6-digit PIN",
+    pinPlaceholder: "••••••",
+    pinRequired: "Enter your 6-digit PIN.",
+    pinNotSet:
+      "No PIN has been set for you yet. Ask HR to set one \u2014 you can still clock in with your code.",
+    pinLocked:
+      "Too many incorrect PINs. Ask HR to unlock it, or clock in with your code.",
+    pinIncorrect: "Incorrect PIN.",
+    pinHint: "You can set up a PIN with HR if you prefer not to use your code.",
   },
   devices: {
     title: "Devices",

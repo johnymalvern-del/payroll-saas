@@ -3,6 +3,25 @@ import { getTenantSlug } from "./tenant";
 
 const BASE = "/api/v1";
 
+/**
+ * An API error carrying the server's machine-readable code.
+ *
+ * The clock-in page needs to distinguish "no PIN set" from "PIN locked" and
+ * show different guidance for each, and the human message alone is not a
+ * contract. `code` is the server's, unchanged.
+ */
+export class ApiError extends Error {
+  readonly code: string;
+  readonly status: number;
+
+  constructor(code: string, message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
 export type EmployeeLookup = {
   id: string;
   employee_code: string;
@@ -15,6 +34,13 @@ export type PunchIn = {
   employee_id: string;
   device_time: string;
   device_now_at_send?: string | null;
+  /**
+   * "code" = employee code plus a photograph, no verification.
+   * "pin"  = employee code plus a 6-digit PIN, verified server-side.
+   *
+   * The PIN path is the non-biometric alternative section 4 of the privacy
+   * policy requires. It performs real verification; "code" does not.
+   */
   method: string;
   photo_base64?: string | null;
   match_score?: number | string | null;
@@ -22,20 +48,10 @@ export type PunchIn = {
   latitude?: number | string | null;
   longitude?: number | string | null;
   gps_accuracy_m?: number | string | null;
+  /** Required only when method is "pin". Never stored or logged server-side. */
+  pin?: string | null;
 };
 
-/**
- * The raw GPS fix for one punch.
- *
- * Lives in its own table because `punch` is append-only -- UPDATE and DELETE
- * are revoked and a trigger raises -- so a column that must eventually be
- * deleted cannot live there. Retention deletes this object outright 30 days
- * after capture; the punch and its verdict survive.
- *
- * A null `location` therefore means either "no fix was captured" or "the fix
- * has expired". Those two cases are deliberately indistinguishable: telling
- * them apart would need a marker that is itself retained personal metadata.
- */
 export type PunchLocationOut = {
   latitude: string;
   longitude: string;
@@ -49,17 +65,9 @@ export type PunchOut = {
   effective_time: string;
   status: string;
   flags: string[];
+  method?: string;
   site_id?: string | null;
   site_name?: string | null;
-  /**
-   * Transitional. Populated from `punch` until the destructive migration
-   * drops those columns, after which they are permanently null. Read
-   * `location` instead.
-   */
-  latitude?: string | null;
-  longitude?: string | null;
-  gps_accuracy_m?: string | null;
-  distance_m?: string | null;
   geofence_result?: string | null;
   geofence_reason?: string | null;
   distance_band?: string | null;
@@ -80,6 +88,17 @@ function baseHeaders(): Record<string, string> {
   return h;
 }
 
+/** Turn a failed response into an ApiError carrying the server's code. */
+async function toApiError(res: Response): Promise<ApiError> {
+  const body = await res.json().catch(() => ({}));
+  const err = (body as { error?: { code?: string; message?: string } })?.error;
+  return new ApiError(
+    err?.code ?? "request_failed",
+    err?.message ?? `HTTP ${res.status}`,
+    res.status,
+  );
+}
+
 export async function resolveEmployeeByCode(
   code: string,
 ): Promise<EmployeeLookup | null> {
@@ -87,11 +106,7 @@ export async function resolveEmployeeByCode(
     `${BASE}/employees?employee_code=${encodeURIComponent(code)}&limit=2`;
   const res = await fetch(url, { credentials: "include", headers: baseHeaders() });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const msg =
-      (err as { error?: { message?: string } })?.error?.message ??
-      `HTTP ${res.status}`;
-    throw new Error(msg);
+    throw await toApiError(res);
   }
   const body = (await res.json()) as { items?: EmployeeLookup[] };
   const items = body.items ?? [];
@@ -115,11 +130,7 @@ export async function submitPunch(
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const msg =
-      (err as { error?: { message?: string } })?.error?.message ??
-      `HTTP ${res.status}`;
-    throw new Error(msg);
+    throw await toApiError(res);
   }
   return (await res.json()) as PunchOut;
 }
@@ -131,13 +142,6 @@ export async function submitPunch(
  * be possible when location is unavailable, and the caller needs to tell the
  * difference between "the employee refused permission" and "the fix timed
  * out" so it can show a sensible message and route the day to HR.
- *
- * `enableHighAccuracy` is essential here. With it off, desktop browsers fall
- * back to IP geolocation, which is routinely kilometres out -- that would
- * make every punch INCONCLUSIVE and the whole geofence feature meaningless.
- *
- * `maximumAge: 0` deliberately refuses a cached fix. A five-minute-old
- * position is not evidence of where someone is standing now.
  */
 export function getCurrentPosition(
   timeoutMs = 10000,

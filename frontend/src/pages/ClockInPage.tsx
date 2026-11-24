@@ -8,6 +8,7 @@ import {
   Group,
   Loader,
   PasswordInput,
+  SegmentedControl,
   Stack,
   Text,
   TextInput,
@@ -17,6 +18,7 @@ import { useMe } from "../auth/useMe";
 import { getDeviceKey, setDeviceKey, clearDeviceKey } from "../lib/deviceKey";
 import { startCamera, type CameraHandle } from "../lib/camera";
 import {
+  ApiError,
   getCurrentPosition,
   newClientPunchId,
   resolveEmployeeByCode,
@@ -30,14 +32,24 @@ import { colors } from "../theme/colors";
 type Phase = "need_key" | "ready" | "submitting" | "success" | "error";
 
 /**
- * Accuracy above which we warn the employee before they commit.
+ * How the employee proves who they are.
  *
- * This is a client-side hint only -- the authoritative decision is the
- * server-side geofence verdict, which compares the fix against the site's
- * radius. The number is chosen because an urban fix is typically 5-30 m
- * and mobile-network fallback is 1-3 km: 50 m is roughly where a fix
- * stops being good enough to judge a small office fence.
+ * "camera" is the code-plus-photo path: the code is self-declared and nothing
+ * verifies it, but policy section 1 forbids retaining the photograph, so the
+ * photo is validated then discarded. It is therefore identification without
+ * verification.
+ *
+ * "pin" is the non-biometric alternative section 4 of the privacy policy
+ * requires. The PIN is verified server-side, so it is genuine verification --
+ * weaker than a biometric template, and not represented as equivalent, but
+ * strictly stronger than an unverified code.
+ *
+ * Both are offered on this screen, side by side. Section 4 requires the
+ * alternative to be genuinely available, and an option an employee can only
+ * find out about from HR is not.
  */
+type AuthMode = "camera" | "pin";
+
 const ACCURACY_WARN_METRES = 50;
 
 type Verdict = {
@@ -47,19 +59,9 @@ type Verdict = {
   reason: string | null;
   accuracy: number | null;
   distance: number | null;
-  /** Why no location was sent, when the fix failed. Null when we had one. */
   locationProblem: string | null;
 };
 
-/**
- * Reasons where the *site* is at fault, not the employee's device.
- *
- * The server returns "unavailable" for several distinct reasons. Only some of
- * them mean no location was recorded; the ones below mean a location arrived
- * perfectly well and the site record cannot be compared against it. Telling an
- * employee "No location recorded" in those cases sends them to report a phone
- * that is working correctly.
- */
 const SITE_FAULT_REASONS = new Set([
   "site_radius_not_configured",
   "site_coordinates_missing",
@@ -103,12 +105,33 @@ function describeLocationProblem(pos: PositionResult | null): string | null {
 }
 
 /**
+ * Map a PIN failure to guidance the employee can act on.
+ *
+ * Every branch names a next step. "Incorrect PIN" alone leaves someone typing
+ * the same digits again until they are locked out, and a locked-out employee
+ * who does not know HR can unlock them will simply stop clocking in.
+ */
+function pinErrorMessage(e: unknown): string | null {
+  if (!(e instanceof ApiError)) return null;
+  switch (e.code) {
+    case "pin_not_set":
+      return strings.clockIn.pinNotSet;
+    case "pin_locked":
+      return strings.clockIn.pinLocked;
+    case "pin_incorrect":
+      return e.message || strings.clockIn.pinIncorrect;
+    case "pin_required":
+      return strings.clockIn.pinRequired;
+    default:
+      return null;
+  }
+}
+
+/**
  * Read a numeric field that may be absent, null, or a decimal string.
  *
- * The API serialises NUMERIC columns as strings. Number("") is 0 and
- * Number(null) is 0, so a naive Number() would turn "no value" into "zero
- * metres" -- showing an employee "accurate to 0 m" when their accuracy is
- * simply unknown.
+ * Number("") and Number(null) are both 0, so a naive Number() would show
+ * "accurate to 0 m" when the accuracy is simply unknown.
  */
 function num(value: string | number | null | undefined): number | null {
   if (value === null || value === undefined || value === "") return null;
@@ -125,6 +148,8 @@ export function ClockInPage() {
   );
   const [employeeCode, setEmployeeCode] = useState("");
   const [employee, setEmployee] = useState<EmployeeLookup | null>(null);
+  const [authMode, setAuthMode] = useState<AuthMode>("camera");
+  const [pin, setPin] = useState("");
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -174,12 +199,23 @@ export function ClockInPage() {
     setPhase("need_key");
     setEmployeeCode("");
     setEmployee(null);
+    setPin("");
+    setAuthMode("camera");
     stopCamera();
     setSuccessMsg(null);
     setWarningMsg(null);
     setErrorMsg(null);
     setPosition(null);
     setVerdict(null);
+  };
+
+  const switchMode = (next: string) => {
+    const mode = next as AuthMode;
+    setAuthMode(mode);
+    setErrorMsg(null);
+    // Switching away from the camera must release it: holding a camera open
+    // for a mode the employee is not using looks like surveillance.
+    if (mode === "pin") stopCamera();
   };
 
   const lookup = async () => {
@@ -193,9 +229,6 @@ export function ClockInPage() {
         return;
       }
       setEmployee(found);
-      // Ask for the fix as soon as we know who is clocking, so the accuracy
-      // hint can appear before they commit. A refusal here is not an error:
-      // the punch still goes through, it simply carries no location.
       setPosition(null);
       void getCurrentPosition().then(setPosition);
     } catch (e) {
@@ -206,22 +239,28 @@ export function ClockInPage() {
 
   const clockIn = async () => {
     if (!employee) return;
-    if (!cameraOn || !cameraRef.current) {
+
+    if (authMode === "camera" && (!cameraOn || !cameraRef.current)) {
       setErrorMsg(strings.clockIn.needPhoto);
       return;
     }
+    if (authMode === "pin" && pin.trim().length === 0) {
+      setErrorMsg(strings.clockIn.pinRequired);
+      return;
+    }
+
     setPhase("submitting");
     setErrorMsg(null);
     setSuccessMsg(null);
     setWarningMsg(null);
     setVerdict(null);
     try {
-      const photo = cameraRef.current.captureJpegBase64(0.7);
+      const photo =
+        authMode === "camera" && cameraRef.current
+          ? cameraRef.current.captureJpegBase64(0.7)
+          : null;
       const now = new Date().toISOString();
 
-      // Reuse the fix taken at lookup time; fetch one now if it was never
-      // requested. Never block the punch on it -- an employee who cannot get
-      // a location must still be able to clock in, with the day routed to HR.
       let pos = position;
       if (!pos) {
         pos = await getCurrentPosition();
@@ -234,8 +273,9 @@ export function ClockInPage() {
           employee_id: employee.id,
           device_time: now,
           device_now_at_send: now,
-          method: "code",
-          photo_base64: photo,
+          method: authMode === "pin" ? "pin" : "code",
+          ...(photo ? { photo_base64: photo } : {}),
+          ...(authMode === "pin" ? { pin: pin.trim() } : {}),
           ...(pos.ok
             ? {
                 latitude: pos.latitude,
@@ -249,19 +289,10 @@ export function ClockInPage() {
 
       const t = new Date(out.effective_time).toLocaleTimeString();
 
-      // The fix now lives in a nested object, because `punch` is append-only
-      // and the coordinates must be deletable on a retention schedule. The
-      // flat fields are transitional: they mirror `punch` until the
-      // destructive migration drops those columns, after which they are
-      // permanently null. Prefer `location`, fall back to the flat fields so
-      // this works on both sides of that migration, and use the locally
-      // measured fix as a last resort.
       const fix = out.location ?? null;
       const accuracy =
-        num(fix?.gps_accuracy_m) ??
-        num(out.gps_accuracy_m) ??
-        (pos.ok ? pos.gps_accuracy_m : null);
-      const distance = num(fix?.distance_m) ?? num(out.distance_m);
+        num(fix?.gps_accuracy_m) ?? (pos.ok ? pos.gps_accuracy_m : null);
+      const distance = num(fix?.distance_m);
 
       setVerdict({
         time: t,
@@ -281,9 +312,15 @@ export function ClockInPage() {
       setPhase("success");
       setEmployee(null);
       setEmployeeCode("");
+      setPin("");
       stopCamera();
     } catch (e) {
-      setErrorMsg((e as Error).message || strings.clockIn.submitFailed);
+      // Named intermediate rather than nested ??/|| -- the two operators
+      // cannot be mixed without parentheses, and the precedence is not
+      // obvious to a reader either.
+      const pinMsg = pinErrorMessage(e);
+      const fallback = (e as Error).message || strings.clockIn.submitFailed;
+      setErrorMsg(pinMsg ?? fallback);
       setPhase("error");
     }
   };
@@ -424,40 +461,79 @@ export function ClockInPage() {
             )}
           </Stack>
         </Card>
-        <Card withBorder>
-          <Stack>
-            <video
-              ref={videoRef}
-              style={{ width: "100%", maxWidth: 320, background: "#000" }}
-              muted
-              playsInline
-              data-testid="clockin-video"
-            />
-            {!cameraOn ? (
-              <Button onClick={beginCamera} data-testid="clockin-start-camera">
-                {strings.clockIn.startCamera}
-              </Button>
-            ) : (
+
+        {employee && (
+          <Card withBorder>
+            <Stack>
+              <SegmentedControl
+                fullWidth
+                value={authMode}
+                onChange={switchMode}
+                data={[
+                  { label: strings.clockIn.useCamera, value: "camera" },
+                  { label: strings.clockIn.usePin, value: "pin" },
+                ]}
+                data-testid="clockin-auth-mode"
+              />
+
+              {authMode === "camera" ? (
+                <>
+                  <video
+                    ref={videoRef}
+                    style={{ width: "100%", maxWidth: 320, background: "#000" }}
+                    muted
+                    playsInline
+                    data-testid="clockin-video"
+                  />
+                  {!cameraOn ? (
+                    <Button onClick={beginCamera} data-testid="clockin-start-camera">
+                      {strings.clockIn.startCamera}
+                    </Button>
+                  ) : (
+                    <Button
+                      color={colors.inactive}
+                      onClick={stopCamera}
+                      data-testid="clockin-stop-camera"
+                    >
+                      {strings.clockIn.stopCamera}
+                    </Button>
+                  )}
+                  {cameraError && <Alert color={colors.pending}>{cameraError}</Alert>}
+                </>
+              ) : (
+                <>
+                  <PasswordInput
+                    label={strings.clockIn.pinLabel}
+                    placeholder={strings.clockIn.pinPlaceholder}
+                    value={pin}
+                    onChange={(e) => setPin(e.currentTarget.value)}
+                    maxLength={6}
+                    inputMode="numeric"
+                    data-testid="clockin-pin"
+                  />
+                  <Text size="xs" c="dimmed">
+                    {strings.clockIn.pinHint}
+                  </Text>
+                </>
+              )}
+
               <Button
-                color={colors.inactive}
-                onClick={stopCamera}
-                data-testid="clockin-stop-camera"
+                onClick={clockIn}
+                disabled={
+                  !employee ||
+                  phase === "submitting" ||
+                  (authMode === "camera" && !cameraOn) ||
+                  (authMode === "pin" && pin.trim().length === 0)
+                }
+                data-testid="clockin-submit"
               >
-                {strings.clockIn.stopCamera}
+                {phase === "submitting"
+                  ? strings.clockIn.submitting
+                  : strings.clockIn.clockInNow}
               </Button>
-            )}
-            {cameraError && <Alert color={colors.pending}>{cameraError}</Alert>}
-            <Button
-              onClick={clockIn}
-              disabled={!employee || !cameraOn || phase === "submitting"}
-              data-testid="clockin-submit"
-            >
-              {phase === "submitting"
-                ? strings.clockIn.submitting
-                : strings.clockIn.clockInNow}
-            </Button>
-          </Stack>
-        </Card>
+            </Stack>
+          </Card>
+        )}
       </Stack>
     </Container>
   );
