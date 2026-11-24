@@ -13,6 +13,23 @@ Columns added by migration 0008:
     Branch, Site and Department (see migration 0004); 1C.8 adds it here so
     employee PATCH follows the same contract as the other organisation
     endpoints.
+
+Biometric consent and enrolment (ten_0032)
+
+BiometricConsent originally recorded only that consent was *given*. Nothing
+recorded that it was later withdrawn, so withdrawal could not be represented
+without deleting the row -- which would erase the evidence that consent was
+ever given, the opposite of what an audit needs. ten_0032 adds withdrawn_at
+and withdrawn_by; the row is now never deleted.
+
+BiometricEnrolment.template_encrypted is NOT NULL. That is a deliberate second
+gate behind the approval requirement in section 8 of the privacy policy: no
+enrolment row can exist without an actual template, so there is no code path
+that could record a biometric enrolment while the gate is closed.
+
+consent_id uses ondelete="RESTRICT" rather than CASCADE: deleting a consent
+row must not silently delete the enrolment that depended on it. The row is
+never deleted in practice, and the constraint says so at the database level.
 """
 from __future__ import annotations
 
@@ -198,6 +215,15 @@ class BiometricConsent(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("user.id", ondelete="SET NULL"), nullable=True
     )
     method: Mapped[str] = mapped_column(String(40), nullable=False, default="digital")
+    # Withdrawal (ten_0032). The row is never deleted: policy section 2
+    # requires the revocation to be auditable, and deleting the row would
+    # erase the record that consent was ever given.
+    withdrawn_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    withdrawn_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user.id", ondelete="SET NULL"), nullable=True
+    )
 
 
 class BiometricEnrolment(Base, TimestampMixin):
@@ -225,7 +251,3 @@ class BiometricEnrolment(Base, TimestampMixin):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 # END OF FILE
-
-# _4A_BIS_011 people
-
-# _4A_BIS_012 people
