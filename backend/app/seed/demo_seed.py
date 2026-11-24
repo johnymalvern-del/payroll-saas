@@ -550,7 +550,7 @@ def _backfill_exceptions(
 ) -> None:
     types_missing = [
         "missing_in", "no_shift_match", "low_confidence", "overtime_unapproved",
-        "duplicate", "device_clock_gap", "employee_query",
+        "duplicate", "device_clock_gap", "device_clock_ahead", "employee_query",
         "absent_expected", "too_long",
         "liveness_failed", "geofence_outside", "geofence_inconclusive",
     ]

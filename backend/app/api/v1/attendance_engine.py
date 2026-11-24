@@ -1081,6 +1081,7 @@ _EXCEPTION_TYPES_FROM_STATUS = {
 # mapping is the safer of the two.
 _EXCEPTION_TYPES_FROM_PUNCH_FLAGS = {
     "clock_gap": "device_clock_gap",
+    "future_time": "device_clock_ahead",
     "liveness_failed": "liveness_failed",
     "geofence_outside": "geofence_outside",
     "geofence_inconclusive": "geofence_inconclusive",
@@ -1157,6 +1158,7 @@ def _suggested_fix(exception_type):
         "low_confidence": {"action": "accept_punch"},
         "liveness_failed": {"action": "reject_punch"},
         "device_clock_gap": {"action": "review_device_clock"},
+        "device_clock_ahead": {"action": "review_device_clock"},
         "geofence_outside": {"action": "review_location"},
         "geofence_inconclusive": {"action": "review_location"},
     }.get(exception_type, {})

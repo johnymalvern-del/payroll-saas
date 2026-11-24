@@ -494,7 +494,7 @@ def _suggested_adjustment_for(db, exc, day, employee):
     if t in (
         "low_confidence", "overtime_unapproved", "device_clock_gap", "duplicate",
         "employee_query", "liveness_failed", "geofence_outside",
-        "geofence_inconclusive",
+        "geofence_inconclusive", "device_clock_ahead",
     ):
         return None
     raise AppError(

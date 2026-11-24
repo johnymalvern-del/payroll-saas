@@ -6,16 +6,30 @@ Punch.status == "low_confidence". Every other punch flag was written and
 read by nothing -- including "device_clock_gap", which existed in the
 vocabulary of both exceptions.py and demo_seed.py but was never emitted.
 
-These tests pin the mapping added in Phase 4:
+These tests pin the mapping:
 
     clock_gap             -> device_clock_gap
+    future_time           -> device_clock_ahead
     liveness_failed       -> liveness_failed
     geofence_outside      -> geofence_outside
     geofence_inconclusive -> geofence_inconclusive
 
-The last test here is the important guard: a flag that is NOT in the
-mapping must remain inert. Without it, a future change could map every
-flag indiscriminately and flood the exception queue.
+future_time was mapped late, and only after the attendance computation was
+corrected to exclude rejected punches. Before that correction the mapping
+would have been misleading: the punch was paid *and* flagged, so the
+exception asked HR to review a device clock while the money had already
+gone out. Now the two halves agree -- the punch is excluded from pay and
+the device fault is visible.
+
+That split is worth understanding before changing either side: the punch
+SELECT in recompute_day filters on status, while the flag SELECT in
+_expected_exception_types does not. A rejected punch is therefore invisible
+to minutes and visible to the queue, which is exactly the intended
+behaviour and is asserted in test_future_time_flag_creates_exception.
+
+The negative-control test here is the important guard: a flag that is NOT
+in the mapping must remain inert. Without it, a future change could map
+every flag indiscriminately and flood the exception queue.
 
 Note on liveness: a punch that fails liveness carries status
 "low_confidence" (set by _process_punch for either low match score or
@@ -246,7 +260,7 @@ def _worked_day_setup(db, code="P1"):
 
 
 # ---------------------------------------------------------------------------
-# The four mappings
+# The five mappings
 # ---------------------------------------------------------------------------
 
 
@@ -258,6 +272,38 @@ def test_clock_gap_flag_creates_device_clock_gap_exception(db):
 
     exc = _open_exception(db, employee.id, WORK_DATE, "device_clock_gap")
     assert exc is not None, "clock_gap flag did not raise device_clock_gap"
+    assert exc.suggested_fix.get("action") == "review_device_clock"
+
+
+def test_future_time_flag_creates_exception(db):
+    """A device clock running fast must be visible, even though it is unpaid.
+
+    The punch is status="rejected", exactly as _process_punch writes it. That
+    status now excludes the punch from the minutes computation (engine.py:808),
+    so a lone rejected punch leaves the day with no sessions and no pay. The
+    flag query in _expected_exception_types does not filter on status, so the
+    device fault still reaches the HR queue.
+
+    Both halves are asserted deliberately. A fix that excluded the punch from
+    pay but also hid it from HR would turn a device fault into an unexplained
+    absence -- and an absence can become a deduction.
+    """
+    employee = _worked_day_setup(db, "FT1")
+    _mk_punch(
+        db, employee.id, _sa_utc(2024, 5, 1, 8, 0),
+        status="rejected", flags=["future_time"],
+    )
+    day = recompute_day(db, employee.id, WORK_DATE)
+    db.expire_all()
+
+    # Not paid: a rejected punch forms no session.
+    assert day is not None
+    assert day.status != "worked"
+    assert day.worked_minutes == 0
+
+    # Still visible: the flag survives the status filter.
+    exc = _open_exception(db, employee.id, WORK_DATE, "device_clock_ahead")
+    assert exc is not None, "future_time flag did not raise device_clock_ahead"
     assert exc.suggested_fix.get("action") == "review_device_clock"
 
 
@@ -331,6 +377,10 @@ def test_unmapped_flag_raises_nothing(db):
     employee_not_active is written by _process_punch but is not in
     _EXCEPTION_TYPES_FROM_PUNCH_FLAGS. If a future change maps every flag
     indiscriminately, this test fails.
+
+    mapped_types is enumerated by hand rather than derived from the mapping
+    dict, so that adding a mapping without deciding whether it belongs here
+    shows up as a stale test rather than silently widening the guard.
     """
     employee = _worked_day_setup(db, "NM1")
     _mk_punch(db, employee.id, _sa_utc(2024, 5, 1, 8, 0), flags=["employee_not_active"])
@@ -340,6 +390,7 @@ def test_unmapped_flag_raises_nothing(db):
     types = _open_exception_types(db, employee.id, WORK_DATE)
     mapped_types = {
         "device_clock_gap",
+        "device_clock_ahead",
         "liveness_failed",
         "geofence_outside",
         "geofence_inconclusive",
