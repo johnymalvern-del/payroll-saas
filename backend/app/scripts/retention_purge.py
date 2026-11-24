@@ -24,6 +24,16 @@ indistinguishable from one that works. The post-check is what turns
 "retention is running" from a belief into a fact, and a non-zero code is
 what makes Task Scheduler surface it.
 
+Tenant selection uses a DENYLIST, not an allowlist. A retention obligation
+must fail toward sweeping too much: if a new subscriber status is introduced
+later (suspended, trial, ...), an allowlist would silently stop purging
+coordinates for those tenants and nobody would notice. Skipping only the
+states that provably have no tenant database -- deleted, provisioning,
+failed -- keeps unknown states in scope.
+
+An active subscriber whose database is missing still fails loudly. That is
+correct: it is a real inconsistency, not noise to be filtered away.
+
 There is no scheduler inside this application. refresh_cleanup.py has the
 same gap and has never been invoked: JobRunner exposes only enqueue() and
 status(), and InProcessRunner loses in-flight jobs on restart, so it cannot
@@ -49,13 +59,19 @@ from app.services.attendance_retention import (
 
 log = get_logger("app.scripts.retention_purge")
 
+# Subscriber states that provably have no tenant database to sweep.
+# Everything else is in scope -- see the module docstring for why this is a
+# denylist rather than an allowlist.
+_SKIP_STATUSES = ("deleted", "provisioning", "failed")
+
 
 def _active_tenants(only: str | None = None) -> list[tuple[str, str]]:
     """(slug, tenant_db_name) for every tenant worth sweeping.
 
-    Skips rows with no database (still provisioning) and rows marked
-    deleted, whose database has been dropped -- connecting to those would
-    fail for a reason that is not a retention failure.
+    Skips rows with no database name and rows in a state that cannot have a
+    database. An `active` row pointing at a missing database is NOT skipped:
+    the connection error is a genuine finding and the run should exit
+    non-zero because of it.
 
     Returns a plain list rather than ORM objects so the control session can
     close before any tenant work starts.
@@ -63,7 +79,7 @@ def _active_tenants(only: str | None = None) -> list[tuple[str, str]]:
     with control_session() as session:
         q = session.query(Subscriber).filter(
             Subscriber.tenant_db_name.is_not(None),
-            Subscriber.status != "deleted",
+            Subscriber.status.notin_(_SKIP_STATUSES),
         )
         if only is not None:
             q = q.filter(Subscriber.slug == only)
