@@ -114,3 +114,58 @@ class ControlAuditLog(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
     request_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+
+# --- Biometric approval (privacy policy section 8, control migration ctl_0002) ---
+# Placed at the end of the module rather than among the classes above so the
+# addition is visible as a single block. The import is function-of-module, not
+# function-of-scope: a module-level import anywhere executes before the class
+# body below it.
+from sqlalchemy.dialects.postgresql import JSONB as _JSONB
+
+
+class BiometricApproval(Base, TimestampMixin):
+    """The signed approval that permits biometric collection for one tenant.
+
+    Reads as a permission, not a preference: its absence closes the enrolment
+    endpoint. See ctl_0002 for why this lives in the control database and why
+    record_sha256 exists.
+    """
+
+    __tablename__ = "biometric_approval"
+    __table_args__ = (
+        UniqueConstraint(
+            "subscriber_id",
+            "biometric_type",
+            name="uq_biometric_approval_subscriber_type",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    subscriber_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("subscriber.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="not_approved", server_default="not_approved"
+    )
+    biometric_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    approved_by_company: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    approved_by_counsel: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    signed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    effective_from: Mapped[date] = mapped_column(Date, nullable=False)
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    record_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope_employee_ids: Mapped[list | None] = mapped_column(_JSONB, nullable=True)
+    scope_site_ids: Mapped[list | None] = mapped_column(_JSONB, nullable=True)
+    retention_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=30, server_default="30"
+    )
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
