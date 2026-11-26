@@ -42,6 +42,23 @@ def get_tenant_engine(db_name: str) -> Engine:
         return engine
 
 
+def dispose_tenant_engine(db_name: str) -> None:
+    """Dispose and evict the cached engine for one tenant database.
+
+    Necessary before DROP DATABASE: a pooled connection makes the drop fail
+    with "database is being accessed by other users". clear_engine_cache()
+    would work but disposes every tenant's pool, which is wrong inside an
+    operation that targets a single database.
+
+    Safe to call when nothing is cached -- that is the normal case in
+    production and the common case in tests.
+    """
+    with _cache_lock:
+        engine = _engine_cache.pop(db_name, None)
+    if engine is not None:
+        engine.dispose()
+
+
 def clear_engine_cache() -> None:
     with _cache_lock:
         for engine in _engine_cache.values():

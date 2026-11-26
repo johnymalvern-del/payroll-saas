@@ -171,6 +171,15 @@ def _drop_tenant_database(db_name: str) -> None:
 
     Both are administrative operations and belong on the superuser connection.
     """
+    # A cached engine for this database still holds pooled connections, and a
+    # live connection makes DROP DATABASE fail with "being accessed by other
+    # users". pg_terminate_backend below would usually clear them, but a pool
+    # with pool_pre_ping can re-establish one in the gap before the drop.
+    # Disposing first closes the race rather than relying on timing.
+    from app.db.tenant.session import dispose_tenant_engine
+
+    dispose_tenant_engine(db_name)
+
     admin_engine = create_engine(
         _control_admin_url("postgres"),
         isolation_level="AUTOCOMMIT",
