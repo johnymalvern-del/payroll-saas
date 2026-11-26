@@ -87,6 +87,12 @@ from app.db.tenant.models.organisation import Site
 from app.db.tenant.models.people import Employee
 from app.db.tenant.models.platform import AuditLog
 from app.scanner.base import VirusScanner
+from app.services.fraud import (
+    RAPID_PUNCH_WINDOW_MINUTES,
+    TravelVerdict,
+    assess_travel,
+    is_rapid_succession,
+)
 from app.services.geofence import GeofenceVerdict, evaluate_geofence
 from app.storage.base import Storage
 
@@ -458,6 +464,61 @@ def _process_punch(
         flags.append('geofence_outside')
     elif geofence_result_val == GeofenceVerdict.INCONCLUSIVE.value:
         flags.append('geofence_inconclusive')
+
+    # --- Slice A: fraud heuristics (flags only, never a rejection) ----
+    # Same principle as the geofence verdict: suspicion is recorded and
+    # routed to a human, never used to discard a clock-in. A punch
+    # quietly rejected because a heuristic fired becomes an unpaid hour,
+    # which is a worse outcome than the fraud it was guarding against.
+    #
+    # Both queries exclude rejected and duplicate punches, matching the
+    # attendance computation. A rejected punch is not a reference point
+    # for where somebody has been.
+    prev = db.execute(
+        select(
+            Punch.effective_time,
+            PunchLocation.latitude,
+            PunchLocation.longitude,
+        )
+        .outerjoin(PunchLocation, PunchLocation.punch_id == Punch.id)
+        .where(
+            Punch.employee_id == employee.id,
+            Punch.effective_time < effective_time,
+            Punch.status.notin_(('duplicate', 'rejected')),
+        )
+        .order_by(Punch.effective_time.desc())
+        .limit(1)
+    ).first()
+
+    # The outer join is deliberate. Once retention purges
+    # punch_location, the punch survives with NULL coordinates here, and
+    # assess_travel reports UNAVAILABLE. That must never be read as
+    # clean: a check that passes because the evidence was deleted is
+    # worse than no check, because it reports 'verified' when it means
+    # 'unknown'.
+    travel = assess_travel(
+        prev_latitude=prev.latitude if prev is not None else None,
+        prev_longitude=prev.longitude if prev is not None else None,
+        prev_at=prev.effective_time if prev is not None else None,
+        latitude=payload.latitude,
+        longitude=payload.longitude,
+        at=effective_time,
+    )
+    if travel.verdict is TravelVerdict.IMPOSSIBLE:
+        flags.append('impossible_travel')
+
+    recent = db.scalars(
+        select(Punch.effective_time).where(
+            Punch.employee_id == employee.id,
+            Punch.effective_time >= effective_time - timedelta(
+                minutes=RAPID_PUNCH_WINDOW_MINUTES
+            ),
+            Punch.effective_time <= effective_time,
+            Punch.status.notin_(('duplicate', 'rejected')),
+        )
+    ).all()
+    if is_rapid_succession(list(recent) + [effective_time]):
+        flags.append('rapid_succession')
 
     # --- Photo: validate, scan, discard ---------------------------------
     # Policy s1 forbids retaining raw facial photographs once processing is

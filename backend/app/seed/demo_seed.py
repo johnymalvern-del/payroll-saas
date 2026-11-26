@@ -552,6 +552,7 @@ def _backfill_exceptions(
         "missing_in", "no_shift_match", "low_confidence", "overtime_unapproved",
         "duplicate", "device_clock_gap", "device_clock_ahead", "employee_query",
         "absent_expected", "too_long",
+        "impossible_travel", "rapid_succession",
         "liveness_failed", "geofence_outside", "geofence_inconclusive",
     ]
     # Skip any cell whose (employee, work_date, type) is already open —

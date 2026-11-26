@@ -1082,6 +1082,10 @@ _EXCEPTION_TYPES_FROM_STATUS = {
 _EXCEPTION_TYPES_FROM_PUNCH_FLAGS = {
     "clock_gap": "device_clock_gap",
     "future_time": "device_clock_ahead",
+    # Slice A. The flag and the type share a name because there is no
+    # pre-existing vocabulary entry to map onto; the flag is the finding.
+    "impossible_travel": "impossible_travel",
+    "rapid_succession": "rapid_succession",
     "liveness_failed": "liveness_failed",
     "geofence_outside": "geofence_outside",
     "geofence_inconclusive": "geofence_inconclusive",
@@ -1159,6 +1163,8 @@ def _suggested_fix(exception_type):
         "liveness_failed": {"action": "reject_punch"},
         "device_clock_gap": {"action": "review_device_clock"},
         "device_clock_ahead": {"action": "review_device_clock"},
+        "impossible_travel": {"action": "review_attendance"},
+        "rapid_succession": {"action": "review_attendance"},
         "geofence_outside": {"action": "review_location"},
         "geofence_inconclusive": {"action": "review_location"},
     }.get(exception_type, {})

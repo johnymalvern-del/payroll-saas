@@ -495,6 +495,7 @@ def _suggested_adjustment_for(db, exc, day, employee):
         "low_confidence", "overtime_unapproved", "device_clock_gap", "duplicate",
         "employee_query", "liveness_failed", "geofence_outside",
         "geofence_inconclusive", "device_clock_ahead",
+        "impossible_travel", "rapid_succession",
     ):
         return None
     raise AppError(
