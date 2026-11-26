@@ -130,6 +130,24 @@ export const strings = {
       "Too many incorrect PINs. Ask HR to unlock it, or clock in with your code.",
     pinIncorrect: "Incorrect PIN.",
     pinHint: "You can set up a PIN with HR if you prefer not to use your code.",
+
+    // Offline queue. Every message names what happened and what the employee
+    // should do -- a queued punch that vanishes without explanation is worse
+    // than no queue, because the employee believes they clocked in.
+    queuedOffline:
+      "No connection. Your clock-in is saved on this device and will be sent automatically.",
+    queueNotStored:
+      "No connection, and this device could not save your clock-in. Tell HR you were here.",
+    queuedExpired:
+      "A saved clock-in expired before it could be sent. Ask HR to record your time.",
+    queuePending: (count: number) =>
+      count === 1
+        ? "1 saved clock-in waiting to send."
+        : `${count} saved clock-ins waiting to send.`,
+    queueSynced: (count: number) =>
+      count === 1
+        ? "1 saved clock-in was sent."
+        : `${count} saved clock-ins were sent.`,
   },
   devices: {
     title: "Devices",

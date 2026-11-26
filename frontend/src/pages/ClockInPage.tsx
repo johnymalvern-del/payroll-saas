@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -20,12 +20,23 @@ import { startCamera, type CameraHandle } from "../lib/camera";
 import {
   ApiError,
   getCurrentPosition,
+  isNetworkError,
   newClientPunchId,
   resolveEmployeeByCode,
   submitPunch,
   type EmployeeLookup,
   type PositionResult,
+  type PunchIn,
 } from "../api/clockIn";
+import {
+  FLUSH_BATCH_SIZE,
+  clearQueue,
+  enqueuePunch,
+  queuedPunches,
+  removeQueued,
+  storageWorks,
+  type QueuedPunch,
+} from "../lib/punchQueue";
 import { strings } from "../lib/strings";
 import { colors } from "../theme/colors";
 
@@ -155,16 +166,70 @@ export function ClockInPage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [warningMsg, setWarningMsg] = useState<string | null>(null);
+  const [queueMsg, setQueueMsg] = useState<string | null>(null);
+  const [pendingCount, setPendingCount] = useState(0);
   const [position, setPosition] = useState<PositionResult | null>(null);
   const [verdict, setVerdict] = useState<Verdict | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraRef = useRef<CameraHandle | null>(null);
+  const flushedRef = useRef(false);
 
   useEffect(() => {
     return () => {
       cameraRef.current?.stop();
     };
   }, []);
+
+  /**
+   * Send saved punches. Runs once per page load.
+   *
+   * Capped at FLUSH_BATCH_SIZE so a long backlog does not block the screen.
+   * Oldest first, because an older punch is closer to expiring.
+   *
+   * A punch that the server rejects outright is removed: retrying a wrong PIN
+   * or an unknown employee would fail forever and, for a PIN, would burn the
+   * lockout counter. A punch that fails on the network stays queued.
+   */
+  const flushQueue = useCallback(async (key: string | null) => {
+    if (!storageWorks()) return;
+    const pending = queuedPunches();
+    if (pending.length === 0) {
+      setPendingCount(0);
+      return;
+    }
+
+    let sent = 0;
+    let dropped = 0;
+
+    for (const item of pending.slice(0, FLUSH_BATCH_SIZE)) {
+      try {
+        await submitPunch(item.payload, key);
+        removeQueued(item.client_punch_id);
+        sent += 1;
+      } catch (e) {
+        if (isNetworkError(e)) break; // still offline; stop trying
+        removeQueued(item.client_punch_id);
+        dropped += 1;
+      }
+    }
+
+    const remaining = queuedPunches().length;
+    setPendingCount(remaining);
+
+    if (sent > 0) {
+      setQueueMsg(strings.clockIn.queueSynced(sent));
+    } else if (dropped > 0 && remaining === 0) {
+      setErrorMsg(strings.clockIn.queuedExpired);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (flushedRef.current) return;
+    if (!deviceKey) return;
+    flushedRef.current = true;
+    setPendingCount(queuedPunches().length);
+    void flushQueue(deviceKey);
+  }, [deviceKey, flushQueue]);
 
   const beginCamera = async () => {
     setCameraError(null);
@@ -191,11 +256,18 @@ export function ClockInPage() {
     setDeviceKeyState(k);
     setKeyInput("");
     setPhase("ready");
+    // A queued punch belongs to the device it was captured on. Replacing the
+    // key means a different device identity, so anything queued is no longer
+    // attributable and must not be sent under the new key.
+    clearQueue();
+    setPendingCount(0);
   };
 
   const resetDevice = () => {
     clearDeviceKey();
+    clearQueue();
     setDeviceKeyState(null);
+    setPendingCount(0);
     setPhase("need_key");
     setEmployeeCode("");
     setEmployee(null);
@@ -205,6 +277,7 @@ export function ClockInPage() {
     setSuccessMsg(null);
     setWarningMsg(null);
     setErrorMsg(null);
+    setQueueMsg(null);
     setPosition(null);
     setVerdict(null);
   };
@@ -253,6 +326,7 @@ export function ClockInPage() {
     setErrorMsg(null);
     setSuccessMsg(null);
     setWarningMsg(null);
+    setQueueMsg(null);
     setVerdict(null);
     try {
       const photo =
@@ -267,25 +341,51 @@ export function ClockInPage() {
         setPosition(pos);
       }
 
-      const out = await submitPunch(
-        {
-          client_punch_id: newClientPunchId(),
-          employee_id: employee.id,
-          device_time: now,
-          device_now_at_send: now,
-          method: authMode === "pin" ? "pin" : "code",
-          ...(photo ? { photo_base64: photo } : {}),
-          ...(authMode === "pin" ? { pin: pin.trim() } : {}),
-          ...(pos.ok
-            ? {
-                latitude: pos.latitude,
-                longitude: pos.longitude,
-                gps_accuracy_m: pos.gps_accuracy_m,
-              }
-            : {}),
-        },
-        deviceKey,
-      );
+      const payload: PunchIn = {
+        client_punch_id: newClientPunchId(),
+        employee_id: employee.id,
+        device_time: now,
+        device_now_at_send: now,
+        method: authMode === "pin" ? "pin" : "code",
+        ...(photo ? { photo_base64: photo } : {}),
+        ...(authMode === "pin" ? { pin: pin.trim() } : {}),
+        ...(pos.ok
+          ? {
+              latitude: pos.latitude,
+              longitude: pos.longitude,
+              gps_accuracy_m: pos.gps_accuracy_m,
+            }
+          : {}),
+      };
+
+      let out;
+      try {
+        out = await submitPunch(payload, deviceKey);
+      } catch (e) {
+        if (!isNetworkError(e)) throw e;
+        // The punch never reached the server. Save it and say so, rather than
+        // showing a failure the employee cannot act on.
+        const q = enqueuePunch(payload, new Date(now));
+        setPendingCount(queuedPunches().length);
+        if (!q.ok) {
+          setErrorMsg(strings.clockIn.queueNotStored);
+          setPhase("error");
+          return;
+        }
+        if (q.expired.length > 0) {
+          setErrorMsg(strings.clockIn.queuedExpired);
+          setPhase("error");
+          return;
+        }
+        setQueueMsg(strings.clockIn.queuedOffline);
+        setPhase("success");
+        setSuccessMsg(strings.clockIn.queuedOffline);
+        setEmployee(null);
+        setEmployeeCode("");
+        setPin("");
+        stopCamera();
+        return;
+      }
 
       const t = new Date(out.effective_time).toLocaleTimeString();
 
@@ -392,6 +492,16 @@ export function ClockInPage() {
         <Alert color={colors.pending} data-testid="clockin-identity-notice">
           {strings.clockIn.identityNotice}
         </Alert>
+        {pendingCount > 0 && (
+          <Alert color={colors.pending} data-testid="clockin-queue-pending">
+            {strings.clockIn.queuePending(pendingCount)}
+          </Alert>
+        )}
+        {queueMsg && (
+          <Alert color={colors.info} data-testid="clockin-queue-msg">
+            {queueMsg}
+          </Alert>
+        )}
         {errorMsg && (
           <Alert color={colors.problem} data-testid="clockin-error">
             {errorMsg}

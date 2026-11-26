@@ -9,6 +9,8 @@ import {
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MantineProvider } from "@mantine/core";
 import { ClockInPage } from "./ClockInPage";
+import { clearQueue, enqueuePunch, queuedPunches } from "../lib/punchQueue";
+import type { PunchIn } from "../api/clockIn";
 
 vi.mock("../lib/camera", () => ({
   startCamera: vi.fn(async () => ({
@@ -144,6 +146,26 @@ function stubFetchPunchError(
   });
 }
 
+/**
+ * The network is down: the punch POST rejects at transport level.
+ *
+ * A TypeError here is what fetch actually throws on a dead connection. It is
+ * not an ApiError, which is what marks it as "queue this" rather than "show
+ * this to the employee".
+ */
+function stubFetchNetworkDown() {
+  global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/employees?employee_code=")) {
+      return jr({ items: [EMP] });
+    }
+    if (url.includes("/punches")) {
+      throw new TypeError("Failed to fetch");
+    }
+    return jr({});
+  });
+}
+
 const BASE_PUNCH = {
   id: "p1",
   effective_time: "2026-11-10T08:00:00Z",
@@ -157,6 +179,16 @@ async function lookupOnly() {
     target: { value: "k" },
   });
   fireEvent.click(screen.getByTestId("clockin-save-key"));
+  fireEvent.change(screen.getByTestId("clockin-code"), {
+    target: { value: "E1" },
+  });
+  fireEvent.click(screen.getByTestId("clockin-lookup"));
+  await waitFor(() =>
+    expect(screen.getByTestId("clockin-emp")).toBeInTheDocument(),
+  );
+}
+
+async function lookupWithStoredKey() {
   fireEvent.change(screen.getByTestId("clockin-code"), {
     target: { value: "E1" },
   });
@@ -187,12 +219,26 @@ async function pinFlow(pin = "481920") {
   fireEvent.click(screen.getByTestId("clockin-submit"));
 }
 
+function samplePayload(id = "queued-1"): PunchIn {
+  return {
+    client_punch_id: id,
+    employee_id: EMP.id,
+    device_time: new Date().toISOString(),
+    device_now_at_send: new Date().toISOString(),
+    method: "code",
+    latitude: -33.9249,
+    longitude: 18.4241,
+    gps_accuracy_m: 5,
+  };
+}
+
 beforeEach(() => {
   try {
     localStorage.clear();
   } catch {
     /* ignored */
   }
+  clearQueue();
   stubNoGeo();
 });
 
@@ -521,5 +567,93 @@ describe("ClockInPage", () => {
     await waitFor(() =>
       expect(screen.getByTestId("clockin-start-camera")).toBeInTheDocument(),
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Offline queue
+  //
+  // The distinction these tests protect: a transport failure is queued, a
+  // server refusal is shown. Queueing a refusal would retry a wrong PIN with
+  // nobody present, burning the lockout counter for an employee who never sees
+  // the message.
+  // -------------------------------------------------------------------------
+
+  it("queues the punch when the network is down", async () => {
+    stubNoGeo();
+    stubFetchNetworkDown();
+    renderPage();
+    await clockInFlow();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("clockin-success")).toHaveTextContent(
+        /saved on this device/i,
+      ),
+    );
+
+    const q = queuedPunches();
+    expect(q).toHaveLength(1);
+    expect(q[0].payload.employee_id).toBe(EMP.id);
+    // The coordinates travel with the punch so the server can still reach a
+    // geofence verdict when it finally arrives.
+    expect(q[0].payload.latitude).toBeUndefined(); // no geolocation in this test
+    expect(q[0].client_punch_id).toBeTruthy();
+  });
+
+  it("does not queue a punch the server refused", async () => {
+    stubFetchPunchError(423, "pin_locked", "Too many incorrect PINs.");
+    renderPage();
+    await pinFlow("481920");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("clockin-error")).toBeInTheDocument(),
+    );
+    expect(queuedPunches()).toHaveLength(0);
+  });
+
+  it("sends a saved punch on the next page load", async () => {
+    localStorage.setItem("payroll.device_key", "k");
+    enqueuePunch(samplePayload("queued-1"));
+    const sent: { body?: Record<string, unknown> } = {};
+    stubFetch(BASE_PUNCH, sent);
+
+    renderPage();
+
+    await waitFor(() => expect(queuedPunches()).toHaveLength(0));
+    expect(sent.body?.client_punch_id).toBe("queued-1");
+    expect(
+      screen.queryByTestId("clockin-queue-pending"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows how many punches are waiting when the flush cannot reach the server", async () => {
+    localStorage.setItem("payroll.device_key", "k");
+    enqueuePunch(samplePayload("queued-1"));
+    enqueuePunch(samplePayload("queued-2"));
+    stubFetchNetworkDown();
+
+    renderPage();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("clockin-queue-pending")).toHaveTextContent(
+        /2 saved clock-ins/i,
+      ),
+    );
+    expect(queuedPunches()).toHaveLength(2);
+  });
+
+  it("clears the queue when the device key is replaced", async () => {
+    // A queued punch belongs to the device that captured it. Sending it under
+    // a different key would attribute one terminal's clock-in to another.
+    enqueuePunch(samplePayload("queued-1"));
+    expect(queuedPunches()).toHaveLength(1);
+
+    stubFetch(BASE_PUNCH);
+    renderPage();
+    fireEvent.change(screen.getByTestId("clockin-device-key"), {
+      target: { value: "new-key" },
+    });
+    fireEvent.click(screen.getByTestId("clockin-save-key"));
+
+    expect(queuedPunches()).toHaveLength(0);
   });
 });

@@ -99,6 +99,24 @@ async function toApiError(res: Response): Promise<ApiError> {
   );
 }
 
+/**
+ * True when a failure was the network rather than the server.
+ *
+ * This decides whether a punch is queued or surfaced. A network failure means
+ * the punch may never have arrived, so it is saved and retried. An ApiError
+ * means the server answered and refused -- a wrong PIN, a locked account, an
+ * unknown employee -- and retrying that would be pointless and, for a bad PIN,
+ * would burn through the lockout counter.
+ *
+ * A 5xx is treated as a server problem, not a network one: it is an ApiError,
+ * so it is surfaced rather than queued. That is deliberate. A punch that
+ * caused a 500 would fail identically on retry, and queueing it would hide a
+ * real defect behind a "saved for later" message.
+ */
+export function isNetworkError(e: unknown): boolean {
+  return !(e instanceof ApiError);
+}
+
 export async function resolveEmployeeByCode(
   code: string,
 ): Promise<EmployeeLookup | null> {
