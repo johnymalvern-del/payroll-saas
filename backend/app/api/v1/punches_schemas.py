@@ -71,6 +71,11 @@ class PunchIn(BaseModel):
     # Non-biometric fallback credential. Only read when method == 'pin'.
     # Never persisted, never logged, never returned.
     pin: SecretStr | None = None
+    # A biometric probe template, base64. Sent by the reader agent for
+    # method='fingerprint' or 'face'. Compared server-side and then
+    # discarded -- it is never stored, for the same reason policy
+    # section 1 discards photographs.
+    probe_template_base64: str | None = None
     raw_payload: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator('method')

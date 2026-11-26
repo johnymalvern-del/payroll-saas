@@ -93,6 +93,12 @@ from app.services.fraud import (
     assess_travel,
     is_rapid_succession,
 )
+from app.services.biometric_verify import (
+    ProbeInvalid,
+    decode_probe_template,
+    is_biometric_method,
+    verify_biometric_punch,
+)
 from app.services.geofence import GeofenceVerdict, evaluate_geofence
 from app.storage.base import Storage
 
@@ -408,6 +414,48 @@ def _process_punch(
 
     effective_time, offset_ms = compute_timing_and_offset(payload.device_time, payload.device_now_at_send, server_received_at)
     flags: list[str] = []
+
+    # --- Biometric verification (privacy policy section 8) ----------
+    # The device sends a probe, never a verdict. A client-supplied
+    # match_score is ignored for biometric methods: a terminal that
+    # reports its own success has not been verified by anything.
+    #
+    # Anchored after the flags list is created. The block appends to it,
+    # so placing it earlier in the function would raise UnboundLocalError
+    # at runtime while the patch itself reported success.
+    bio_score = None
+    bio_liveness = None
+    if is_biometric_method(payload.method):
+        try:
+            probe_raw = decode_probe_template(payload.probe_template_base64)
+        except ProbeInvalid as exc:
+            raise AppError('probe_invalid', str(exc), 400) from None
+        bio = verify_biometric_punch(
+            db,
+            employee_id=payload.employee_id,
+            biometric_type=payload.method,
+            probe_raw=probe_raw,
+            crypto=tenant_crypto,
+        )
+        bio_score = bio.score
+        # Liveness is the device's assertion -- there is no server-side way
+        # to test it from a template -- so it is recorded as reported and
+        # weighed later, not trusted.
+        bio_liveness = payload.liveness_passed
+        for bio_flag in bio.flags:
+            flags.append(bio_flag)
+
+    # Server score wins for biometrics. payload.match_score is only
+    # meaningful for methods where nothing verifies anything (code), and
+    # for those it is a device claim in any case.
+    effective_score = (
+        bio_score if is_biometric_method(payload.method) else payload.match_score
+    )
+    effective_liveness = (
+        bio_liveness
+        if is_biometric_method(payload.method)
+        else payload.liveness_passed
+    )
     status_val = 'accepted'
     if is_future_time(effective_time, server_received_at):
         flags.append('future_time')
@@ -420,7 +468,7 @@ def _process_punch(
         flags.append('employee_not_active')
         if status_val == 'accepted':
             status_val = 'rejected'
-    for f in classify_match(payload.match_score, payload.liveness_passed, 60):
+    for f in classify_match(effective_score, effective_liveness, 60):
         flags.append(f)
         if status_val == 'accepted':
             status_val = 'low_confidence'

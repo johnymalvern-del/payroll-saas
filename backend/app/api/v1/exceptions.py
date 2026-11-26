@@ -496,6 +496,9 @@ def _suggested_adjustment_for(db, exc, day, employee):
         "employee_query", "liveness_failed", "geofence_outside",
         "geofence_inconclusive", "device_clock_ahead",
         "impossible_travel", "rapid_succession",
+        "match_below_threshold", "biometric_not_enrolled",
+        "biometric_consent_missing", "biometric_template_mismatch",
+        "biometric_verification_unavailable",
     ):
         return None
     raise AppError(

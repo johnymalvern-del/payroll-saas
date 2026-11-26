@@ -553,6 +553,9 @@ def _backfill_exceptions(
         "duplicate", "device_clock_gap", "device_clock_ahead", "employee_query",
         "absent_expected", "too_long",
         "impossible_travel", "rapid_succession",
+        "match_below_threshold", "biometric_not_enrolled",
+        "biometric_consent_missing", "biometric_template_mismatch",
+        "biometric_verification_unavailable",
         "liveness_failed", "geofence_outside", "geofence_inconclusive",
     ]
     # Skip any cell whose (employee, work_date, type) is already open —

@@ -1086,6 +1086,11 @@ _EXCEPTION_TYPES_FROM_PUNCH_FLAGS = {
     # pre-existing vocabulary entry to map onto; the flag is the finding.
     "impossible_travel": "impossible_travel",
     "rapid_succession": "rapid_succession",
+    "match_below_threshold": "match_below_threshold",
+    "biometric_not_enrolled": "biometric_not_enrolled",
+    "biometric_consent_missing": "biometric_consent_missing",
+    "biometric_template_mismatch": "biometric_template_mismatch",
+    "biometric_verification_unavailable": "biometric_verification_unavailable",
     "liveness_failed": "liveness_failed",
     "geofence_outside": "geofence_outside",
     "geofence_inconclusive": "geofence_inconclusive",
@@ -1165,6 +1170,11 @@ def _suggested_fix(exception_type):
         "device_clock_ahead": {"action": "review_device_clock"},
         "impossible_travel": {"action": "review_attendance"},
         "rapid_succession": {"action": "review_attendance"},
+        "match_below_threshold": {"action": "verify_identity"},
+        "biometric_not_enrolled": {"action": "enrol_employee"},
+        "biometric_consent_missing": {"action": "review_consent"},
+        "biometric_template_mismatch": {"action": "re_enrol_device"},
+        "biometric_verification_unavailable": {"action": "check_biometric_device"},
         "geofence_outside": {"action": "review_location"},
         "geofence_inconclusive": {"action": "review_location"},
     }.get(exception_type, {})
