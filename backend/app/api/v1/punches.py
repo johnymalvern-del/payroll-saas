@@ -94,6 +94,8 @@ from app.services.fraud import (
     is_rapid_succession,
 )
 from app.services.biometric_verify import (
+    BiometricResult,
+    BiometricVerdict,
     ProbeInvalid,
     decode_probe_template,
     is_biometric_method,
@@ -426,17 +428,33 @@ def _process_punch(
     bio_score = None
     bio_liveness = None
     if is_biometric_method(payload.method):
-        try:
-            probe_raw = decode_probe_template(payload.probe_template_base64)
-        except ProbeInvalid as exc:
-            raise AppError('probe_invalid', str(exc), 400) from None
-        bio = verify_biometric_punch(
-            db,
-            employee_id=payload.employee_id,
-            biometric_type=payload.method,
-            probe_raw=probe_raw,
-            crypto=tenant_crypto,
-        )
+        bio = None
+        if payload.probe_template_base64:
+            # Malformed base64 cannot arise by accident over a loopback HTTP
+            # call, so it means the client built the request wrongly. A defect
+            # is worth failing loudly.
+            try:
+                probe_raw = decode_probe_template(payload.probe_template_base64)
+            except ProbeInvalid as exc:
+                raise AppError('probe_invalid', str(exc), 400) from None
+            bio = verify_biometric_punch(
+                db,
+                employee_id=payload.employee_id,
+                biometric_type=payload.method,
+                probe_raw=probe_raw,
+                crypto=tenant_crypto,
+            )
+        else:
+            # No probe at all is a reader that could not capture: unplugged,
+            # SDK failed, camera blocked. Rejecting the punch would cost the
+            # employee a clock-in for a device fault, so the punch is accepted
+            # and flagged. Consistent with every other verification outcome in
+            # this pipeline, none of which rejects.
+            bio = BiometricResult(
+                verdict=BiometricVerdict.UNAVAILABLE,
+                reason='probe_absent',
+                flags=['biometric_verification_unavailable'],
+            )
         bio_score = bio.score
         # Liveness is the device's assertion -- there is no server-side way
         # to test it from a template -- so it is recorded as reported and

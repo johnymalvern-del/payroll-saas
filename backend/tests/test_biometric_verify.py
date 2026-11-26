@@ -559,15 +559,22 @@ def test_not_enrolled_is_accepted_and_flagged(punch_env, db):
     assert "biometric_not_enrolled" in body["flags"]
 
 
-def test_missing_probe_is_a_400_and_creates_no_punch(punch_env, db):
+def test_missing_probe_is_accepted_and_flagged(punch_env, db):
+    """A reader that produced no template has verified nobody, and the punch
+    still happened.
+
+    Rejecting would cost the employee a clock-in for a device fault. The flag
+    routes the fault to HR, which is where a broken reader belongs.
+    """
     client, tenant, key, emp, con = punch_env
     set_provider(FakeProvider())
 
     r = _post(client, tenant.slug, key, _bio_payload(emp.id, None))
 
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "probe_invalid"
-    assert db.scalar(select(Punch).where(Punch.employee_id == emp.id)) is None
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert "biometric_verification_unavailable" in body["flags"]
 
 
 def test_client_supplied_score_is_ignored_for_biometrics(punch_env, db, crypto):

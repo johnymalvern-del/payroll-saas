@@ -198,17 +198,35 @@ def test_submit_bad_device_key_403(api, db):
 
 
 def test_submit_ok_201(api, db):
+    """An ordinary punch: accepted, no flags, method echoed back.
+
+    A code punch, not a fingerprint punch. The previous version sent
+    method='fingerprint' with a device-supplied match_score of 95 and asserted
+    flags == [], which pinned "a score the device made up counts as verified"
+    as correct. That is the fraud hole the server-side verification closed, so
+    the punch here carries no biometric claim at all.
+
+    The biometric path is covered in test_biometric_verify.py, where a probe is
+    actually compared against a stored template.
+    """
     client, tenant = api
     site = _mk_branch_site(db)
-    _dev, raw = _mk_device(db, site.id)
+    _dev, raw = _mk_device(
+        db, site.id, allows_code_only=True, require_photo_for_code=False
+    )
     emp = _mk_employee(db, 'OK-1', site_id=site.id)
-    r = _post(client, tenant.slug, raw, _payload(emp.id))
+    r = _post(
+        client,
+        tenant.slug,
+        raw,
+        _payload(emp.id, method='code', match_score=None, liveness_passed=None),
+    )
     assert r.status_code == 201, r.text
     body = r.json()
     assert body['employee_id'] == str(emp.id)
     assert body['status'] == 'accepted'
     assert body['flags'] == []
-    assert body['method'] == 'fingerprint'
+    assert body['method'] == 'code'
 
 
 def test_submit_idempotent_retry_returns_existing(api, db):

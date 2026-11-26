@@ -1,113 +1,69 @@
 """The vendor seam for biometric matching.
 
-There is no matching algorithm in this repository and there is deliberately
-none written here. Comparing two minutiae templates or two face embeddings is a
-trained model's job; a hand-written approximation would return plausible scores
-and verify nobody. This module defines the interface a real SDK plugs into,
-plus implementations for the two states that exist today: nothing configured,
-and a deterministic fake for tests.
+No matching algorithm is written from scratch here. Face comparison is done by
+face_provider (a real embedding model, real arithmetic); fingerprint comparison
+requires a reader SDK and remains unimplemented until hardware exists.
 
 Why a protocol rather than a direct SDK call:
 
     Vendors differ in template format, score range and threshold convention.
-    Suprema returns an integer match score where 0 means identical; DigitalPersona
-    returns a 0-100 similarity; face APIs return cosine distance where lower is
-    better. Putting those behind one interface means the punch pipeline never
-    learns a vendor's convention, and swapping SDKs does not touch the clock-in
-    path.
+    Putting them behind one interface means the punch pipeline never learns a
+    vendor's convention, and swapping SDKs does not touch clock-in.
 
 Why VersionMismatch is a raised error rather than a low score:
 
-    Templates from different vendors, or from different versions of the same
-    SDK, are not comparable. Dijkstra-style alignment of two ISO templates from
-    unrelated extractors produces a number that looks like a score and means
-    nothing -- typically either a near-random value or a consistent zero. If
-    that number flows into match_score, the system records a verification
-    attempt that never happened. Refusing is the only honest answer.
+    Templates from different extractors are not comparable. Comparing them
+    yields a number that looks like a score and means nothing. If that number
+    reached match_score, the system would record a verification that never
+    happened.
 
-Why NullProvider raises rather than returning zero:
+Why the provider is configured lazily from the environment:
 
-    A zero score would read as "did not match", which routes to low_confidence
-    and looks like a failed verification. The truth is that no verification is
-    possible. Those are different facts and an HR user resolving the exception
-    needs to know which one they are looking at.
+    Configuring at import time would run before the app has read its settings,
+    and would make every test import order-dependent. get_provider() configures
+    once, on first call, from BIOMETRIC_PROVIDER.
+
+    BIOMETRIC_PROVIDER=fake    for tests and demos -- byte equality only
+    BIOMETRIC_PROVIDER=face    real face-embedding comparison
+    unset / null               no provider; every biometric punch reports
+                               UNAVAILABLE rather than pretending to verify
 """
 from __future__ import annotations
 
+import os
 from typing import Protocol, runtime_checkable
 
-# Matches the threshold already used by classify_match in punch_service: a score
-# at or above this counts as verified, below it becomes low_confidence. Kept as
-# a module constant so the number exists in one place rather than drifting
-# between the pipeline and whatever SDK is installed.
 MATCH_THRESHOLD = 60.0
-
-# A template shorter than this cannot describe a finger or a face. The same
-# floor TemplateCrypto enforces, restated here because a provider validates
-# before encryption, not after.
 MIN_TEMPLATE_BYTES = 16
 
 
 class ProviderNotConfigured(RuntimeError):
-    """No biometric SDK is installed or configured for this tenant.
-
-    Distinct from a failed match. This means the capability is absent, not that
-    the employee was rejected.
-    """
+    """No biometric SDK is installed or configured."""
 
 
 class TemplateInvalid(ValueError):
-    """The bytes supplied are not a template this provider can use.
-
-    Most often an empty read, a truncated transfer, or an image where a
-    template was expected. The local agent talks to the reader over USB and a
-    half-completed read is a real occurrence, not a theoretical one.
-    """
+    """The bytes supplied are not a template this provider can use."""
 
 
 class VersionMismatch(ValueError):
-    """The two templates were produced by different extractors or versions.
-
-    Comparing them would yield a meaningless number. See the module docstring.
-    """
+    """The two templates were produced by different extractors or versions."""
 
 
 @runtime_checkable
 class BiometricProvider(Protocol):
-    """What a vendor adapter must supply.
-
-    `template_version` is stored alongside every enrolment and compared at
-    verification time. It must change whenever the extractor changes in a way
-    that makes old templates incomparable -- bumping the SDK's major version,
-    switching minutiae formats, or changing face models.
-    """
-
     name: str
     template_version: str
 
-    def validate_template(self, raw: bytes) -> None:
-        """Raise TemplateInvalid if this is not a usable template.
+    def validate_template(self, raw: bytes) -> None: ...
 
-        Called at enrolment before encryption and at verification before
-        matching. Cheap, must not do cryptography or I/O.
-        """
-        ...
-
-    def match(self, probe: bytes, reference: bytes) -> float:
-        """Similarity of two templates, 0.0 to 100.0 inclusive.
-
-        Must raise VersionMismatch if the two cannot be compared. Must not
-        return a value for incomparable input.
-        """
-        ...
+    def match(self, probe: bytes, reference: bytes) -> float: ...
 
 
 class NullProvider:
-    """Stands in when no SDK is installed.
+    """Stands in when no SDK is installed. Every method raises.
 
-    Every method raises. This is the honest state of the system until a reader
-    and its SDK arrive, and making it an object rather than None means a
-    deployment cannot silently fall through to "treated as matched".
+    An object rather than None so a deployment cannot silently fall through to
+    "treated as matched".
     """
 
     name = "null"
@@ -126,20 +82,12 @@ class NullProvider:
 
 
 class FakeProvider:
-    """Deterministic stand-in so the pipeline is testable without hardware.
+    """Deterministic stand-in for tests. Byte equality, nothing cleverer.
 
-    Deliberately NOT a similarity heuristic. A real comparison would have to
-    model minutiae alignment, and a plausible-looking fake invites someone to
-    ship it. Instead matching is byte equality: identical templates score 100,
-    anything else scores 0.
-
-    That makes it useless as a biometric -- and that is the point. It cannot
-    accidentally pass as working verification, while still exercising every
-    branch of the pipeline: the version check, the threshold comparison, the
-    score write, the low_confidence path.
-
-    Tests that need a middle score use FakeProvider(scores=...) to pin an
-    explicit value rather than deriving one.
+    Deliberately NOT a similarity heuristic. A plausible-looking fake invites
+    someone to ship it. Equality scores 100, anything else 0 -- useless as a
+    biometric, and therefore impossible to mistake for working verification,
+    while still exercising every branch of the pipeline.
     """
 
     name = "fake"
@@ -170,29 +118,51 @@ class FakeProvider:
     def match(self, probe: bytes, reference: bytes) -> float:
         self.validate_template(probe)
         self.validate_template(reference)
-        return self._match_score if bytes(probe) == bytes(reference) else self._non_match_score
+        return (
+            self._match_score
+            if bytes(probe) == bytes(reference)
+            else self._non_match_score
+        )
 
 
-_current: BiometricProvider = NullProvider()
+_current: BiometricProvider | None = None
+
+
+def build_provider(name: str | None) -> BiometricProvider:
+    """Construct a provider from its configuration name.
+
+    The face provider is imported inside the function: it imports
+    TemplateInvalid from this module, so a module-level import would be
+    circular.
+    """
+    kind = (name or "").strip().lower()
+    if kind in ("", "null", "none"):
+        return NullProvider()
+    if kind == "fake":
+        return FakeProvider()
+    if kind in ("face", "face-embedding"):
+        from app.services.face_provider import FaceEmbeddingProvider
+
+        return FaceEmbeddingProvider()
+    raise ProviderNotConfigured(
+        f"BIOMETRIC_PROVIDER={name!r} is not recognised; expected "
+        f"'face', 'fake' or unset"
+    )
 
 
 def get_provider() -> BiometricProvider:
-    """The provider this process is configured with.
-
-    Module-level rather than per-tenant for now: the reader SDK is installed on
-    the server, not per subscriber. If a future deployment has different
-    hardware per tenant, this becomes a lookup keyed on subscriber_id and the
-    call sites do not change.
-    """
+    """The provider this process is configured with, resolved once."""
+    global _current
+    if _current is None:
+        _current = build_provider(os.environ.get("BIOMETRIC_PROVIDER"))
     return _current
 
 
 def set_provider(provider: BiometricProvider) -> None:
-    """Install a provider. Called at startup by a vendor adapter, or by tests."""
     global _current
     _current = provider
 
 
 def reset_provider() -> None:
     global _current
-    _current = NullProvider()
+    _current = None
